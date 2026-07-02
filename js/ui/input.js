@@ -5,10 +5,11 @@ import { FP, fpToTile } from "../core/fixed.js";
 import { UNITS, BUILDINGS } from "../core/data.js";
 
 export class Input {
-  constructor(game, renderer, hud) {
+  constructor(game, renderer, hud, audio) {
     this.game = game;
     this.renderer = renderer;
     this.hud = hud;
+    this.audio = audio;
     this.sim = game.sim;
     this.pid = game.localPlayer;
 
@@ -19,6 +20,8 @@ export class Input {
     this.attackMode = false;
     this.placing = null;                   // building type being placed
     this.ghost = null;
+    this.groups = {};                      // digit -> Set of entity ids
+    this.lastRecall = { key: null, time: 0 };
 
     this.ray = new THREE.Raycaster();
     this.groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
@@ -117,6 +120,8 @@ export class Input {
       const hit = this.entityAt(e.clientX, e.clientY);
       if (hit && (hit.owner === this.pid || hit.type === "mineral" || hit.owner >= 0)) {
         this.selection.add(hit.id);
+        if (hit.owner === this.pid) this.audio.select();
+        if (hit.building && hit.owner === this.pid) this.renderer.rallySelection = hit.id;
       }
     } else {
       // box select own units by projecting to screen space
@@ -129,22 +134,38 @@ export class Input {
         const sx = (v.x + 1) / 2 * innerWidth, sy = (-v.y + 1) / 2 * innerHeight;
         if (sx >= x0 && sx <= x1 && sy >= y0 && sy <= y1) this.selection.add(ent.id);
       }
+      if (this.selection.size) this.audio.select();
     }
     this.hud.refreshSelection();
   }
 
   rightClick(sx, sy) {
     const ids = this.mySelectedUnitIds();
-    if (!ids.length) return;
     const target = this.entityAt(sx, sy);
     const g = this.groundAt(sx, sy);
+
+    // no units selected but a finished building is: set its rally point
+    if (!ids.length) {
+      const b = this.mySelected().find((e) => e.building && e.done);
+      if (b && g) {
+        this.game.issue({ t: "rally", buildingId: b.id, x: g.x, y: g.y, targetId: target?.type === "mineral" ? target.id : 0 });
+        this.renderer.rallySelection = b.id;
+        this.renderer.orderPing(g.wx, g.wz, "#7cff6b");
+        this.audio.rally();
+      }
+      return;
+    }
+
     if (target && target.type === "mineral") {
       this.game.issue({ t: "gather", ids, targetId: target.id });
+      this.audio.gatherAck();
     } else if (target && target.owner >= 0 && target.owner !== this.pid) {
       this.game.issue({ t: "attack", ids, targetId: target.id });
+      this.audio.attackAck();
     } else if (g) {
       this.game.issue({ t: "move", ids, x: g.x, y: g.y });
-      this.hud.pingAt(g.wx, g.wz, "#7cff6b");
+      this.renderer.orderPing(g.wx, g.wz, "#7cff6b");
+      this.audio.ack();
     }
   }
 
@@ -153,9 +174,11 @@ export class Input {
     if (!ids.length) return;
     if (target && target.owner >= 0 && target.owner !== this.pid) {
       this.game.issue({ t: "attack", ids, targetId: target.id });
+      this.audio.attackAck();
     } else if (g) {
       this.game.issue({ t: "attackmove", ids, x: g.x, y: g.y });
-      this.hud.pingAt(g.wx, g.wz, "#ff6b5f");
+      this.renderer.orderPing(g.wx, g.wz, "#ff6b5f");
+      this.audio.attackAck();
     }
   }
 
@@ -171,9 +194,41 @@ export class Input {
     if (k === "a" && !e.repeat && this.mySelectedUnitIds().length) this.setAttackMode(true);
     if (k === "s" && !e.repeat) {
       const ids = this.mySelectedUnitIds();
-      if (ids.length) this.game.issue({ t: "stop", ids });
+      if (ids.length) { this.game.issue({ t: "stop", ids }); this.audio.ack(); }
     }
-    // camera keys handled in update(); building hotkeys live on HUD buttons
+
+    // control groups: Ctrl/Alt+digit assigns, digit recalls,
+    // double-tap digit centers the camera on the group
+    if (k >= "1" && k <= "9") {
+      if (e.ctrlKey || e.altKey) {
+        e.preventDefault();
+        const mine = this.mySelected().filter((u) => u.unit).map((u) => u.id);
+        if (mine.length) {
+          this.groups[k] = new Set(mine);
+          this.hud.toastInfo(`Group ${k} set (${mine.length})`);
+          this.audio.select();
+        }
+        return;
+      }
+      const grp = this.groups[k];
+      if (grp) {
+        const alive = [...grp].filter((id) => this.sim.byId.has(id));
+        grp.forEach((id) => { if (!this.sim.byId.has(id)) grp.delete(id); });
+        if (!alive.length) return;
+        this.selection.clear();
+        alive.forEach((id) => this.selection.add(id));
+        this.hud.refreshSelection();
+        this.audio.select();
+        const now = performance.now();
+        if (this.lastRecall.key === k && now - this.lastRecall.time < 450) {
+          // double-tap: jump camera to the group
+          let cx = 0, cy = 0;
+          for (const id of alive) { const u = this.sim.byId.get(id); cx += u.x; cy += u.y; }
+          this.renderer.camera.jumpTo(cx / alive.length / FP, cy / alive.length / FP);
+        }
+        this.lastRecall = { key: k, time: now };
+      }
+    }
   }
 
   setAttackMode(on) {
@@ -213,10 +268,11 @@ export class Input {
     const d = BUILDINGS[this.placing];
     const { tx, ty } = this.ghostTile || {};
     const worker = this.mySelectedWorkers()[0];
-    if (!worker) { this.hud.toast("Select a worker first"); return; }
-    if (!this.sim.canAfford(this.pid, d.cost)) { this.hud.toast("Not enough minerals"); return; }
-    if (!this.sim.canPlace(this.placing, tx, ty)) { this.hud.toast("Can't build there"); return; }
+    if (!worker) { this.hud.toast("Select a worker first"); this.audio.error(); return; }
+    if (!this.sim.canAfford(this.pid, d.cost)) { this.hud.toast("Not enough minerals"); this.audio.error(); return; }
+    if (!this.sim.canPlace(this.placing, tx, ty)) { this.hud.toast("Can't build there"); this.audio.error(); return; }
     this.game.issue({ t: "build", workerId: worker.id, building: this.placing, tx, ty });
+    this.audio.place();
     this.cancelPlace();
   }
 
@@ -261,6 +317,7 @@ export class Input {
       if (this.mouse.y > innerHeight - edge) dz += s;
     }
     if (dx || dz) cam.pan(dx, dz);
+    cam.update(dt);   // smooth zoom
 
     // prune dead ids from selection
     for (const id of this.selection) {

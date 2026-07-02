@@ -1,97 +1,168 @@
 // Three.js presentation layer. Reads sim state every frame, owns no game
 // logic. Interpolates between the last two sim ticks for smooth motion.
+// v2: shadows, ACES + bloom, procedural terrain, animated models, effects.
 import * as THREE from "three";
+import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
+import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
+import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
+import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
 import { FP, fpToTile } from "../core/fixed.js";
-import { UNITS, BUILDINGS, PLAYER_COLORS } from "../core/data.js";
+import { makeRng } from "../core/fixed.js";
+import { BUILDINGS, PLAYER_COLORS } from "../core/data.js";
 import { RtsCamera } from "./camera.js";
+import { makeUnitVisual, makeBuildingVisual, makeMineralVisual, animateVisual, SHARED } from "./models.js";
+import { Effects } from "./fx.js";
 
 const W2 = (v) => v / FP;   // fp -> world units (1 tile = 1.0)
+const PX = 12;              // ground texture pixels per tile
 
 export class Renderer {
   constructor(canvas, sim, localPlayer) {
     this.sim = sim;
     this.localPlayer = localPlayer;
-    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: "high-performance" });
     this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
     this.renderer.setSize(innerWidth, innerHeight);
+    this.renderer.shadowMap.enabled = true;
+    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = 1.35;
+
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0x0a0e14);
-    this.scene.fog = new THREE.Fog(0x0a0e14, 60, 160);
+    this.scene.background = new THREE.Color(0x070a10);
+    this.scene.fog = new THREE.Fog(0x070a10, 55, 150);
 
     const start = sim.map.starts[localPlayer];
     this.camera = new RtsCamera(sim.map.w, sim.map.h, start.x, start.y);
 
     this.meshes = new Map();          // entity id -> visual group
-    this.effects = [];                // transient tracers / rings
     this.selection = new Set();       // set by input.js
+    this.rallySelection = null;       // building id whose rally to draw
     this.playerColors = PLAYER_COLORS.map((c) => new THREE.Color(c));
+    this.flashes = new Map();         // entity id -> remaining flash seconds
+    this.moveAmt = new Map();         // entity id -> smoothed motion 0..1
+    this.clockStart = performance.now();
 
     this.buildLights();
     this.buildGround();
     this.buildRocks();
-    this.sharedGeo = {
-      workerBody: new THREE.SphereGeometry(0.32, 12, 10),
-      marineBody: new THREE.CapsuleGeometry(0.24, 0.42, 4, 10),
-      marineGun: new THREE.BoxGeometry(0.08, 0.08, 0.55),
-      bruteBody: new THREE.ConeGeometry(0.45, 1.0, 8),
-      mineral: new THREE.OctahedronGeometry(0.42),
-      ring: new THREE.RingGeometry(0.5, 0.62, 24),
-      bar: new THREE.PlaneGeometry(1, 0.12),
-    };
-    this.mineralMat = new THREE.MeshStandardMaterial({ color: 0x4adfd2, emissive: 0x0d4a44, roughness: 0.2, metalness: 0.6 });
-    this.ringMat = new THREE.MeshBasicMaterial({ color: 0x7cff6b, side: THREE.DoubleSide, transparent: true, opacity: 0.9 });
+    this.buildStars();
+    this.fx = new Effects(this.scene);
+
+    this.ringMat = new THREE.MeshBasicMaterial({ color: 0x7cff6b, side: THREE.DoubleSide, transparent: true, opacity: 0.9, depthWrite: false });
+    this.barBgMat = new THREE.MeshBasicMaterial({ color: 0x10141a });
+    this.rallyFlag = this.makeRallyFlag();
+
+    // post-processing: MSAA target + bloom (threshold 1.0 = only HDR emissive blooms)
+    const rt = new THREE.WebGLRenderTarget(innerWidth, innerHeight, { samples: 4, type: THREE.HalfFloatType });
+    this.composer = new EffectComposer(this.renderer, rt);
+    this.composer.addPass(new RenderPass(this.scene, this.camera.cam));
+    this.bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.5, 0.55, 1.0);
+    this.composer.addPass(this.bloom);
+    this.composer.addPass(new OutputPass());
 
     window.addEventListener("resize", () => {
       this.camera.resize();
       this.renderer.setSize(innerWidth, innerHeight);
+      this.composer.setSize(innerWidth, innerHeight);
     });
   }
 
   buildLights() {
-    this.scene.add(new THREE.AmbientLight(0x8899bb, 0.55));
-    const sun = new THREE.DirectionalLight(0xfff2dd, 1.15);
-    sun.position.set(30, 50, 10);
-    this.scene.add(sun);
-    const fill = new THREE.DirectionalLight(0x334466, 0.4);
-    fill.position.set(-20, 30, -30);
+    this.scene.add(new THREE.AmbientLight(0x8a9cbd, 0.65));
+    const sun = new THREE.DirectionalLight(0xffe8c8, 1.9);
+    sun.position.set(this.sim.map.w * 0.3, 42, this.sim.map.h * 0.15);
+    sun.castShadow = true;
+    sun.shadow.mapSize.set(2048, 2048);
+    const c = sun.shadow.camera;
+    c.left = -30; c.right = 30; c.top = 30; c.bottom = -30;
+    c.near = 5; c.far = 110;
+    sun.shadow.bias = -0.0006;
+    sun.target.position.set(this.sim.map.w / 2, 0, this.sim.map.h / 2);
+    this.scene.add(sun, sun.target);
+    this.sun = sun;
+    const fill = new THREE.DirectionalLight(0x3a4d7a, 0.5);
+    fill.position.set(-25, 28, -32);
     this.scene.add(fill);
   }
 
+  // ---------- terrain ----------
+
   buildGround() {
     const { w, h } = this.sim.map;
+    // static terrain painted once; fog composited over it on updates
+    this.baseCanvas = document.createElement("canvas");
+    this.baseCanvas.width = w * PX;
+    this.baseCanvas.height = h * PX;
+    this.paintTerrain();
+
     this.groundCanvas = document.createElement("canvas");
-    this.groundCanvas.width = w * 8;
-    this.groundCanvas.height = h * 8;
+    this.groundCanvas.width = w * PX;
+    this.groundCanvas.height = h * PX;
     this.groundTex = new THREE.CanvasTexture(this.groundCanvas);
-    this.groundTex.magFilter = THREE.LinearFilter;
-    this.paintGround();
-    const mat = new THREE.MeshStandardMaterial({ map: this.groundTex, roughness: 0.95 });
-    const geo = new THREE.PlaneGeometry(w, h);
-    const mesh = new THREE.Mesh(geo, mat);
+    this.groundTex.colorSpace = THREE.SRGBColorSpace;
+    this.groundTex.anisotropy = this.renderer.capabilities.getMaxAnisotropy();
+    this.paintFog();
+
+    const mat = new THREE.MeshStandardMaterial({ map: this.groundTex, roughness: 0.95, metalness: 0 });
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(w, h), mat);
     mesh.rotation.x = -Math.PI / 2;
     mesh.position.set(w / 2, 0, h / 2);
+    mesh.receiveShadow = true;
     this.scene.add(mesh);
     this.lastFogPaint = -1;
   }
 
-  // Terrain + fog baked into one canvas texture, repainted when fog changes.
-  paintGround() {
+  paintTerrain() {
     const { w, h, rock } = this.sim.map;
-    const fog = this.sim.fog[this.localPlayer];
-    const ctx = this.groundCanvas.getContext("2d");
+    const ctx = this.baseCanvas.getContext("2d");
+    const rng = makeRng(this.sim.seed ^ 0x5eed);
+    const rnd = () => rng() / 0xffffffff;
+
+    // grass base with two-octave value noise
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
         const i = y * w + x;
-        let c;
-        if (rock[i]) c = [52, 58, 66];
-        else {
-          const check = (x + y) & 1;
-          c = check ? [38, 62, 42] : [35, 57, 39];
+        const isRock = rock[i];
+        for (let sy = 0; sy < PX; sy += 3) {
+          for (let sx = 0; sx < PX; sx += 3) {
+            const n = rnd();
+            let r, g, b;
+            if (isRock) {
+              const v = 56 + n * 20;
+              r = v; g = v + 4; b = v + 12;
+            } else {
+              const patch = rnd() > 0.94;
+              r = 40 + n * 16 + (patch ? 18 : 0);
+              g = 68 + n * 22 + (patch ? 13 : 0);
+              b = 42 + n * 13;
+            }
+            ctx.fillStyle = `rgb(${r | 0},${g | 0},${b | 0})`;
+            ctx.fillRect(x * PX + sx, y * PX + sy, 3, 3);
+          }
         }
-        const f = fog[i];
-        const mul = f === 2 ? 1 : f === 1 ? 0.45 : 0.12;
-        ctx.fillStyle = `rgb(${(c[0] * mul) | 0},${(c[1] * mul) | 0},${(c[2] * mul) | 0})`;
-        ctx.fillRect(x * 8, y * 8, 8, 8);
+      }
+    }
+    // faint tile grid for placement legibility
+    ctx.strokeStyle = "rgba(140,200,255,0.045)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let x = 0; x <= w; x++) { ctx.moveTo(x * PX + 0.5, 0); ctx.lineTo(x * PX + 0.5, h * PX); }
+    for (let y = 0; y <= h; y++) { ctx.moveTo(0, y * PX + 0.5); ctx.lineTo(w * PX, y * PX + 0.5); }
+    ctx.stroke();
+  }
+
+  paintFog() {
+    const { w, h } = this.sim.map;
+    const fog = this.sim.fog[this.localPlayer];
+    const ctx = this.groundCanvas.getContext("2d");
+    ctx.drawImage(this.baseCanvas, 0, 0);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const f = fog[y * w + x];
+        if (f === 2) continue;
+        ctx.fillStyle = f === 1 ? "rgba(4,6,10,0.55)" : "rgba(3,4,8,0.9)";
+        ctx.fillRect(x * PX, y * PX, PX, PX);
       }
     }
     this.groundTex.needsUpdate = true;
@@ -104,90 +175,83 @@ export class Renderer {
       for (let x = 0; x < w; x++)
         if (rock[y * w + x]) positions.push([x + 0.5, y + 0.5]);
     const geo = new THREE.DodecahedronGeometry(0.55);
-    const mat = new THREE.MeshStandardMaterial({ color: 0x4a525e, roughness: 0.9 });
+    const mat = new THREE.MeshStandardMaterial({ color: 0x555e6b, roughness: 0.85 });
     const inst = new THREE.InstancedMesh(geo, mat, positions.length);
+    inst.castShadow = true;
+    inst.receiveShadow = true;
     const m = new THREE.Matrix4();
+    const q = new THREE.Quaternion();
     positions.forEach(([x, z], i) => {
-      const s = 0.8 + ((x * 7 + z * 13) % 5) / 10;
-      m.makeScale(s, s * 0.8, s);
-      m.setPosition(x, 0.25, z);
+      const s = 0.75 + ((x * 7 + z * 13) % 6) / 9;
+      q.setFromEuler(new THREE.Euler(((x * 3) % 7) / 7, ((z * 5) % 9) / 9 * Math.PI, 0));
+      m.compose(new THREE.Vector3(x, 0.22 + (s - 0.75) * 0.2, z), q, new THREE.Vector3(s, s * 0.75, s));
       inst.setMatrixAt(i, m);
     });
     this.scene.add(inst);
   }
 
+  buildStars() {
+    const n = 700;
+    const pos = new Float32Array(n * 3);
+    const col = new Float32Array(n * 3);
+    const cx = this.sim.map.w / 2, cz = this.sim.map.h / 2;
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const alt = Math.random() * Math.PI * 0.42 + 0.06;
+      const r = 130;
+      pos[i * 3] = cx + Math.cos(a) * Math.cos(alt) * r;
+      pos[i * 3 + 1] = Math.sin(alt) * r;
+      pos[i * 3 + 2] = cz + Math.sin(a) * Math.cos(alt) * r;
+      const b = 0.35 + Math.random() * 0.65;
+      const warm = Math.random() > 0.8;
+      col[i * 3] = b; col[i * 3 + 1] = b * (warm ? 0.85 : 0.95); col[i * 3 + 2] = b * (warm ? 0.7 : 1.1);
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+    geo.setAttribute("color", new THREE.BufferAttribute(col, 3));
+    const stars = new THREE.Points(geo, new THREE.PointsMaterial({
+      size: 0.8, vertexColors: true, sizeAttenuation: false,
+      transparent: true, opacity: 0.85, depthWrite: false, fog: false,
+    }));
+    stars.frustumCulled = false;
+    this.scene.add(stars);
+  }
+
+  makeRallyFlag() {
+    const g = new THREE.Group();
+    const pole = new THREE.Mesh(SHARED.pole, new THREE.MeshBasicMaterial({ color: 0xcccccc }));
+    pole.position.y = 0.7;
+    const flag = new THREE.Mesh(SHARED.flag, new THREE.MeshBasicMaterial({ color: 0x7cff6b }));
+    flag.position.set(0.17, 1.25, 0);
+    g.add(pole, flag);
+    g.visible = false;
+    this.scene.add(g);
+    g.userData.flag = flag;
+    return g;
+  }
+
   // ---------- entity visuals ----------
 
   makeMesh(e) {
-    const group = new THREE.Group();
+    let group;
     const color = e.owner >= 0 ? this.playerColors[e.owner] : null;
-
     if (e.type === "mineral") {
-      const m = new THREE.Mesh(this.sharedGeo.mineral, this.mineralMat);
-      m.position.y = 0.35;
-      m.rotation.y = (e.id * 0.7) % Math.PI;
-      group.add(m);
-      group.userData.crystal = m;
+      group = makeMineralVisual(e);
     } else if (e.unit) {
-      const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.5, metalness: 0.3 });
-      const body = new THREE.Group();
-      if (e.type === "worker") {
-        const b = new THREE.Mesh(this.sharedGeo.workerBody, mat);
-        b.position.y = 0.34; b.scale.y = 0.75;
-        body.add(b);
-      } else if (e.type === "marine") {
-        const b = new THREE.Mesh(this.sharedGeo.marineBody, mat);
-        b.position.y = 0.5;
-        const gun = new THREE.Mesh(this.sharedGeo.marineGun,
-          new THREE.MeshStandardMaterial({ color: 0x222831, roughness: 0.4 }));
-        gun.position.set(0.18, 0.55, 0.25);
-        body.add(b, gun);
-      } else { // brute
-        const b = new THREE.Mesh(this.sharedGeo.bruteBody, mat);
-        b.position.y = 0.5;
-        body.add(b);
-      }
-      group.add(body);
-      group.userData.body = body;
-      this.addRingAndBar(group, e, 0.55);
-    } else if (e.building) {
-      const d = BUILDINGS[e.type];
-      const built = new THREE.Group();
-      const base = new THREE.MeshStandardMaterial({ color: 0x39424e, roughness: 0.7, metalness: 0.35 });
-      const trim = new THREE.MeshStandardMaterial({ color, roughness: 0.45, metalness: 0.4, emissive: color, emissiveIntensity: 0.15 });
-      if (e.type === "hq") {
-        const b1 = new THREE.Mesh(new THREE.BoxGeometry(2.6, 1.1, 2.6), base);
-        b1.position.y = 0.55;
-        const b2 = new THREE.Mesh(new THREE.CylinderGeometry(0.7, 0.9, 0.9, 8), trim);
-        b2.position.y = 1.55;
-        built.add(b1, b2);
-      } else if (e.type === "depot") {
-        const b1 = new THREE.Mesh(new THREE.BoxGeometry(1.7, 0.7, 1.7), base);
-        b1.position.y = 0.35;
-        const b2 = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.35, 1.2), trim);
-        b2.position.y = 0.87;
-        built.add(b1, b2);
-      } else { // barracks
-        const b1 = new THREE.Mesh(new THREE.BoxGeometry(2.5, 1.3, 2.2), base);
-        b1.position.y = 0.65;
-        const b2 = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.9, 0.25), trim);
-        b2.position.set(0, 0.45, 1.15);
-        built.add(b1, b2);
-      }
-      group.add(built);
-      group.userData.built = built;
-      this.addRingAndBar(group, e, d.size * 0.62);
+      group = makeUnitVisual(e, color);
+      this.addRingAndBar(group, e, 0.55, 1.25);
+    } else {
+      group = makeBuildingVisual(e, color, e.size);
+      this.addRingAndBar(group, e, e.size * 0.62, BUILDINGS[e.type].size + 0.6);
     }
-
-    // pickable body reference for raycasting
     group.traverse((o) => { o.userData.eid = e.id; });
     group.position.set(W2(e.x), 0, W2(e.y));
     this.scene.add(group);
     return group;
   }
 
-  addRingAndBar(group, e, ringScale) {
-    const ring = new THREE.Mesh(this.sharedGeo.ring, this.ringMat);
+  addRingAndBar(group, e, ringScale, barHeight) {
+    const ring = new THREE.Mesh(SHARED.ring, this.ringMat);
     ring.rotation.x = -Math.PI / 2;
     ring.position.y = 0.03;
     ring.scale.setScalar(ringScale * 2);
@@ -195,12 +259,12 @@ export class Renderer {
     group.add(ring);
     group.userData.ring = ring;
 
-    const barBg = new THREE.Mesh(this.sharedGeo.bar, new THREE.MeshBasicMaterial({ color: 0x1a1e24 }));
-    const barFg = new THREE.Mesh(this.sharedGeo.bar, new THREE.MeshBasicMaterial({ color: 0x62d96b }));
-    barFg.position.z = 0.001;
+    const barBg = new THREE.Mesh(SHARED.bar, this.barBgMat);
+    const barFg = new THREE.Mesh(SHARED.bar, new THREE.MeshBasicMaterial({ color: 0x62d96b }));
+    barFg.position.z = 0.004;
     const bar = new THREE.Group();
     bar.add(barBg, barFg);
-    bar.position.y = e.building ? 2.1 : 1.25;
+    bar.position.y = barHeight;
     bar.visible = false;
     group.add(bar);
     group.userData.bar = bar;
@@ -209,15 +273,19 @@ export class Renderer {
 
   // ---------- per-frame sync ----------
 
-  render(alpha) {
+  render(alpha, dt = 1 / 60) {
     const sim = this.sim;
+    const t = (performance.now() - this.clockStart) / 1000;
     const seen = new Set();
 
-    // repaint fog when the sim updated it
     if (sim.tick !== this.lastFogPaint && sim.tick % 3 === 0) {
-      this.paintGround();
+      this.paintFog();
       this.lastFogPaint = sim.tick;
     }
+
+    // sun shadow frustum follows the camera target
+    this.sun.position.set(this.camera.tx + 14, 42, this.camera.tz + 7);
+    this.sun.target.position.set(this.camera.tx, 0, this.camera.tz);
 
     for (const e of sim.entities) {
       const visible = this.entityVisible(e);
@@ -226,65 +294,102 @@ export class Renderer {
         if (!visible) continue;
         g = this.makeMesh(e);
         this.meshes.set(e.id, g);
+        if (e.unit && sim.tick > 5) this.fx.spawnPoof(W2(e.x), W2(e.y), e.owner >= 0 ? PLAYER_COLORS[e.owner] : 0xffffff);
       }
       seen.add(e.id);
       g.visible = visible;
       if (!visible) continue;
 
-      // interpolate between previous and current sim position
       const x = W2(e.px + (e.x - e.px) * alpha);
       const z = W2(e.py + (e.y - e.py) * alpha);
       g.position.set(x, 0, z);
 
-      // face travel direction
-      if (g.userData.body && (e.x !== e.px || e.y !== e.py)) {
-        g.userData.body.rotation.y = Math.atan2(e.x - e.px, e.y - e.py);
+      // smoothed motion amount drives walk cycles
+      const moving = (e.x !== e.px || e.y !== e.py) ? 1 : 0;
+      const prev = this.moveAmt.get(e.id) || 0;
+      const amt = prev + (moving - prev) * Math.min(1, dt * 10);
+      this.moveAmt.set(e.id, amt);
+      if (g.userData.body && moving) {
+        const targetYaw = Math.atan2(e.x - e.px, e.y - e.py);
+        let dy = targetYaw - g.userData.body.rotation.y;
+        while (dy > Math.PI) dy -= Math.PI * 2;
+        while (dy < -Math.PI) dy += Math.PI * 2;
+        g.userData.body.rotation.y += dy * Math.min(1, dt * 12);
       }
+      animateVisual(g, e, t, amt);
 
-      if (g.userData.crystal) {
-        const s = 0.5 + 0.5 * (e.amount / 1500);
+      if (g.userData.crystal && e.type === "mineral") {
+        const s = 0.55 + 0.45 * (e.amount / 1500);
         g.userData.crystal.scale.setScalar(s);
       }
 
-      // construction progress: building rises out of the ground
       if (g.userData.built) {
         const d = BUILDINGS[e.type];
-        const p = e.done ? 1 : Math.max(0.15, e.progress / d.buildTime);
+        const p = e.done ? 1 : Math.max(0.12, e.progress / d.buildTime);
         g.userData.built.scale.y = p;
-        g.userData.built.traverse((o) => {
-          if (o.material && o.material.transparent !== undefined) {
-            o.material.transparent = !e.done;
-            o.material.opacity = e.done ? 1 : 0.55 + p * 0.4;
-          }
-        });
+        g.userData.scaffold.visible = !e.done;
+        if (!e.done) {
+          g.userData.built.traverse((o) => {
+            if (o.material) { o.material.transparent = true; o.material.opacity = 0.45 + p * 0.4; }
+          });
+        } else if (g.userData.wasSite) {
+          g.userData.built.traverse((o) => {
+            if (o.material) { o.material.transparent = false; o.material.opacity = 1; }
+          });
+        }
+        g.userData.wasSite = !e.done;
+      }
+
+      // damage flash
+      const flash = this.flashes.get(e.id);
+      if (flash !== undefined) {
+        const rem = flash - dt;
+        if (rem <= 0) this.flashes.delete(e.id);
+        else this.flashes.set(e.id, rem);
+        const k = Math.max(0, rem / 0.12);
+        for (const m of g.userData.mats || []) m.emissiveIntensity = 0.12 + k * 1.4;
       }
 
       // selection ring + health bar
       const sel = this.selection.has(e.id);
-      if (g.userData.ring) g.userData.ring.visible = sel;
+      if (g.userData.ring) {
+        g.userData.ring.visible = sel;
+        if (sel) g.userData.ring.material.opacity = 0.75 + Math.sin(t * 5) * 0.2;
+      }
       if (g.userData.bar) {
-        const show = sel || e.hp < e.maxHp;
-        g.userData.bar.visible = show && e.maxHp > 0;
-        if (show && e.maxHp > 0) {
+        const show = (sel || e.hp < e.maxHp) && e.maxHp > 0;
+        g.userData.bar.visible = show;
+        if (show) {
           const frac = Math.max(0, e.hp / e.maxHp);
           g.userData.barFg.scale.x = frac;
           g.userData.barFg.position.x = -(1 - frac) / 2;
-          g.userData.barFg.material.color.setHSL(frac * 0.33, 0.8, 0.5);
+          g.userData.barFg.material.color.setHSL(frac * 0.33, 0.75, 0.5);
           g.userData.bar.quaternion.copy(this.camera.cam.quaternion);
         }
       }
     }
 
-    // remove visuals for dead entities
     for (const [id, g] of this.meshes) {
       if (!seen.has(id) && !this.sim.byId.has(id)) {
         this.scene.remove(g);
         this.meshes.delete(id);
+        this.moveAmt.delete(id);
       }
     }
 
-    this.updateEffects();
-    this.renderer.render(this.scene, this.camera.cam);
+    // rally flag for the selected building
+    this.rallyFlag.visible = false;
+    if (this.rallySelection) {
+      const b = sim.byId.get(this.rallySelection);
+      if (b?.rally && this.selection.has(b.id)) {
+        this.rallyFlag.visible = true;
+        this.rallyFlag.position.set(W2(b.rally.x), 0, W2(b.rally.y));
+        this.rallyFlag.userData.flag.rotation.y = Math.sin(t * 3) * 0.15;
+      }
+    }
+
+    this.fx.update(dt);
+    this.composer.render();
   }
 
   entityVisible(e) {
@@ -294,46 +399,34 @@ export class Renderer {
     return f === 2;
   }
 
-  // ---------- transient effects ----------
+  // ---------- sim events -> effects ----------
 
   consumeEvents(events) {
     for (const ev of events) {
-      if (ev.t === "shot" && ev.ranged) {
-        const geo = new THREE.BufferGeometry().setFromPoints([
-          new THREE.Vector3(W2(ev.fx), 0.6, W2(ev.fy)),
-          new THREE.Vector3(W2(ev.tx), 0.5, W2(ev.ty)),
-        ]);
-        const mat = new THREE.LineBasicMaterial({ color: this.playerColors[ev.owner], transparent: true, opacity: 0.9 });
-        const line = new THREE.Line(geo, mat);
-        this.scene.add(line);
-        this.effects.push({ obj: line, ttl: 0.09, kind: "line" });
-      } else if (ev.t === "death") {
-        const geo = new THREE.RingGeometry(0.1, 0.35, 20);
-        const mat = new THREE.MeshBasicMaterial({ color: 0xffaa55, side: THREE.DoubleSide, transparent: true });
-        const ring = new THREE.Mesh(geo, mat);
-        ring.rotation.x = -Math.PI / 2;
-        ring.position.set(W2(ev.x), 0.1, W2(ev.y));
-        this.scene.add(ring);
-        this.effects.push({ obj: ring, ttl: 0.45, max: 0.45, kind: "ring" });
+      const vis = this.sim.fog[this.localPlayer][fpToTile(ev.y ?? ev.ty ?? 0) * this.sim.map.w + fpToTile(ev.x ?? ev.tx ?? 0)] === 2;
+      switch (ev.t) {
+        case "shot": {
+          this.flashes.set(ev.targetId, 0.12);
+          const g = this.meshes.get(ev.attackerId);
+          if (g?.userData.anim) g.userData.anim.recoil = 0.08;
+          if (!vis && !this.sim.fog[this.localPlayer][fpToTile(ev.fy) * this.sim.map.w + fpToTile(ev.fx)]) break;
+          if (ev.ranged) this.fx.bolt(W2(ev.fx), W2(ev.fy), W2(ev.tx), W2(ev.ty), PLAYER_COLORS[ev.owner]);
+          else this.fx.meleeHit(W2(ev.tx), W2(ev.ty), PLAYER_COLORS[ev.owner]);
+          break;
+        }
+        case "death":
+          if (!vis && ev.owner !== this.localPlayer) break;
+          if (ev.building) this.fx.buildingDeath(W2(ev.x), W2(ev.y), ev.size || 2);
+          else this.fx.unitDeath(W2(ev.x), W2(ev.y), PLAYER_COLORS[ev.owner]);
+          break;
+        case "complete":
+          if (ev.owner === this.localPlayer) this.fx.shockRing(W2(ev.x), W2(ev.y), 0x7cff6b, 2.2, 0.6);
+          break;
+        case "trained":
+          break; // spawn poof handled on mesh creation
       }
     }
   }
 
-  updateEffects() {
-    const dt = 1 / 60;
-    for (let i = this.effects.length - 1; i >= 0; i--) {
-      const fx = this.effects[i];
-      fx.ttl -= dt;
-      if (fx.ttl <= 0) {
-        this.scene.remove(fx.obj);
-        fx.obj.geometry?.dispose();
-        fx.obj.material?.dispose();
-        this.effects.splice(i, 1);
-      } else if (fx.kind === "ring") {
-        const p = 1 - fx.ttl / fx.max;
-        fx.obj.scale.setScalar(1 + p * 4);
-        fx.obj.material.opacity = 1 - p;
-      }
-    }
-  }
+  orderPing(wx, wz, color) { this.fx.ping(wx, wz, color); }
 }

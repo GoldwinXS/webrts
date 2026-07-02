@@ -83,7 +83,7 @@ export class Sim {
     for (const e of this.entities) {
       if (e.owner >= 0 && e.hp <= 0) {
         changed = true;
-        this.events.push({ t: "death", x: e.x, y: e.y, type: e.type, owner: e.owner });
+        this.events.push({ t: "death", x: e.x, y: e.y, type: e.type, owner: e.owner, building: !!e.building, size: e.size || 0 });
         if (e.building) this.setFootprint(e, 0);
         this.byId.delete(e.id);
       } else if (e.type === "mineral" && e.amount <= 0) {
@@ -220,6 +220,12 @@ export class Sim {
         worker.path = null;
         break;
       }
+      case "rally": {
+        const b = own(c.buildingId);
+        if (!b || !b.building) break;
+        b.rally = { x: this.clampX(c.x), y: this.clampY(c.y), targetId: c.targetId || 0 };
+        break;
+      }
       case "train": {
         const b = own(c.buildingId);
         const d = UNITS[c.unit];
@@ -304,7 +310,11 @@ export class Sim {
           if (u.cooldown === 0) {
             u.cooldown = d.cooldown;
             target.hp -= d.dmg;
-            this.events.push({ t: "shot", fx: u.x, fy: u.y, tx: target.x, ty: target.y, owner: u.owner, ranged: d.range > FP });
+            this.events.push({
+              t: "shot", fx: u.x, fy: u.y, tx: target.x, ty: target.y,
+              owner: u.owner, ranged: d.range > FP,
+              attackerId: u.id, targetId: target.id, tOwner: target.owner,
+            });
           }
         } else {
           this.travelTo(u, target.x, target.y, d.speed, true);
@@ -349,7 +359,18 @@ export class Sim {
         fpToTile(b.x), b.ty + b.size); // prefer below the building
       if (spot) {
         const u = this.spawnUnit(b.owner, item.type, tileToFp(spot.x), tileToFp(spot.y));
-        if (item.type === "worker") this.autoGather(u);
+        this.events.push({ t: "trained", id: u.id, owner: b.owner, type: item.type, x: u.x, y: u.y });
+        // send the fresh unit to the rally point (workers rally onto minerals)
+        if (b.rally) {
+          const target = b.rally.targetId ? this.byId.get(b.rally.targetId) : null;
+          if (u.type === "worker" && target?.type === "mineral" && target.amount > 0) {
+            u.order = { kind: "gather", targetId: target.id, phase: "to" };
+          } else {
+            u.order = { kind: "move", x: b.rally.x, y: b.rally.y };
+          }
+        } else if (item.type === "worker") {
+          this.autoGather(u);
+        }
       }
     }
   }

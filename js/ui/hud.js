@@ -3,12 +3,15 @@ import { FP, fpToTile } from "../core/fixed.js";
 import { UNITS, BUILDINGS, PLAYER_COLORS } from "../core/data.js";
 
 export class Hud {
-  constructor(game, renderer) {
+  constructor(game, renderer, audio) {
     this.game = game;
     this.sim = game.sim;
     this.renderer = renderer;
+    this.audio = audio;
     this.pid = game.localPlayer;
     this.input = null; // set by main.js after Input is constructed
+    this.cardSig = ""; // structural signature; card DOM rebuilt only on change
+    this.blips = [];   // minimap under-attack markers
 
     this.$minerals = document.getElementById("res-minerals");
     this.$supply = document.getElementById("res-supply");
@@ -24,9 +27,20 @@ export class Hud {
     this.minimap.addEventListener("pointerdown", (e) => this.minimapClick(e));
     this.minimap.addEventListener("pointermove", (e) => { if (e.buttons & 1) this.minimapClick(e); });
 
-    this.pings = []; // world-space click feedback, drawn by CSS dots
+    // mute toggle
+    this.$mute = document.getElementById("btn-mute");
+    this.updateMuteIcon();
+    this.$mute.addEventListener("click", () => {
+      this.audio.setMuted(!this.audio.muted);
+      this.updateMuteIcon();
+    });
 
     document.getElementById("hud").classList.remove("hidden");
+  }
+
+  updateMuteIcon() {
+    this.$mute.classList.toggle("muted", this.audio.muted);
+    this.$mute.title = this.audio.muted ? "Unmute" : "Mute";
   }
 
   // ---------- per-frame ----------
@@ -52,6 +66,7 @@ export class Hud {
     if (!sel.length) {
       this.$selPanel.innerHTML = "";
       this.$cmdCard.innerHTML = "";
+      this.cardSig = "";
       return;
     }
     const counts = {};
@@ -77,16 +92,21 @@ export class Hud {
     }
     this.$selPanel.innerHTML = html;
 
-    // command card
-    let card = "";
+    // command card: rebuild only when the *structure* changes, so buttons
+    // keep hover/focus state between the 100ms HUD refreshes
     const workers = mine.filter((e) => e.type === "worker");
     const combat = mine.filter((e) => e.unit);
+    const building = mine.find((e) => e.building && e.done);
+    const sig = `${workers.length > 0}|${combat.length > 0}|${building ? building.id : 0}`;
+    if (sig === this.cardSig) return;
+    this.cardSig = sig;
+
+    let card = "";
     if (workers.length) {
       for (const [key, d] of Object.entries(BUILDINGS)) {
         card += this.btn(`build-${key}`, `${d.name}`, `${d.cost}`);
       }
     }
-    const building = mine.find((e) => e.building && e.done);
     if (building) {
       for (const t of BUILDINGS[building.type].trains || []) {
         const d = UNITS[t];
@@ -114,13 +134,14 @@ export class Hud {
       const t = cmd.slice(6);
       const d = UNITS[t];
       const s = this.sim.supplyOf(this.pid);
-      if (!this.sim.canAfford(this.pid, d.cost)) return this.toast("Not enough minerals");
-      if (s.used + d.supply > s.cap) return this.toast("Need more supply");
+      if (!this.sim.canAfford(this.pid, d.cost)) { this.audio.error(); return this.toast("Not enough minerals"); }
+      if (s.used + d.supply > s.cap) { this.audio.error(); return this.toast("Need more supply - build a Supply Depot"); }
       this.game.issue({ t: "train", buildingId: building.id, unit: t });
+      this.audio.trained();
     } else if (cmd === "attack") this.input?.setAttackMode(true);
     else if (cmd === "stop") {
       const ids = this.input?.mySelectedUnitIds() || [];
-      if (ids.length) this.game.issue({ t: "stop", ids });
+      if (ids.length) { this.game.issue({ t: "stop", ids }); this.audio.ack(); }
     }
   }
 
@@ -157,12 +178,37 @@ export class Hud {
         ctx.fillRect(tx * S - size / 2 + S / 2, ty * S - size / 2 + S / 2, size, size);
       }
     }
+    // under-attack blips: flashing red circles fading over 3s
+    const now = performance.now();
+    this.blips = this.blips.filter((b) => now - b.t < 3000);
+    for (const b of this.blips) {
+      const age = (now - b.t) / 3000;
+      if (Math.sin(age * 24) < 0) continue;   // flash
+      ctx.strokeStyle = `rgba(255,80,60,${1 - age})`;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(b.x * S, b.y * S, 5 + age * 6, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
     // camera target
     const cam = this.renderer.camera;
     ctx.strokeStyle = "rgba(255,255,255,0.7)";
     ctx.lineWidth = 1;
     const vw = cam.dist * 0.9 * S, vh = cam.dist * 0.6 * S;
     ctx.strokeRect(cam.tx * S - vw / 2, cam.tz * S - vh / 2, vw, vh);
+  }
+
+  // called when one of our entities takes a hit
+  notifyAttack(txFp, tyFp) {
+    const tx = fpToTile(txFp), ty = fpToTile(tyFp);
+    const last = this.blips[this.blips.length - 1];
+    if (last && Math.abs(last.x - tx) < 5 && Math.abs(last.y - ty) < 5) return;
+    this.blips.push({ x: tx, y: ty, t: performance.now() });
+    // audible alarm only if the fight is off-screen
+    const cam = this.renderer.camera;
+    const d = Math.hypot(cam.tx - txFp / 256, cam.tz - tyFp / 256);
+    if (d > 16) this.audio.underAttack();
   }
 
   minimapClick(e) {
@@ -180,6 +226,14 @@ export class Hud {
     el.textContent = msg;
     this.$toasts.appendChild(el);
     setTimeout(() => el.remove(), 2200);
+  }
+
+  toastInfo(msg) {
+    const el = document.createElement("div");
+    el.className = "toast info";
+    el.textContent = msg;
+    this.$toasts.appendChild(el);
+    setTimeout(() => el.remove(), 1600);
   }
 
   setHint(text) {
@@ -201,8 +255,6 @@ export class Hud {
     el.style.width = Math.abs(drag.cx - drag.sx) + "px";
     el.style.height = Math.abs(drag.cy - drag.sy) + "px";
   }
-
-  pingAt() { /* world-space ping handled by renderer effects; reserved */ }
 
   gameOver(winner) {
     const el = document.getElementById("gameover");

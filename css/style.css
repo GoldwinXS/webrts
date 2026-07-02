@@ -53,6 +53,12 @@ body.attack-cursor #game { cursor: cell; }
   letter-spacing: 2px;
   color: var(--muted);
   margin-bottom: 6px;
+  text-shadow: 0 0 24px rgba(76, 194, 255, 0.25);
+  animation: title-glow 3.5s ease-in-out infinite;
+}
+@keyframes title-glow {
+  0%, 100% { text-shadow: 0 0 18px rgba(76, 194, 255, 0.2); }
+  50% { text-shadow: 0 0 34px rgba(76, 194, 255, 0.5); }
 }
 .menu-box h1 b { color: var(--accent); }
 .menu-box h1.win { color: var(--good); }
@@ -142,6 +148,22 @@ body.attack-cursor #game { cursor: cell; }
   font-size: 14px;
 }
 
+.icon-btn {
+  margin-left: auto;
+  pointer-events: auto;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--muted);
+  padding: 4px 6px;
+  cursor: pointer;
+}
+.icon-btn:hover { color: var(--ink); border-color: var(--border); }
+.icon-btn .cross { display: none; }
+.icon-btn.muted .cross { display: block; }
+.icon-btn.muted .wave { display: none; }
+#net-status:not(.hidden) ~ .icon-btn { margin-left: 12px; }
+
 .hint {
   position: absolute;
   top: 52px;
@@ -173,6 +195,12 @@ body.attack-cursor #game { cursor: cell; }
   font-size: 13px;
   color: #ffb3a8;
   animation: fadeout 2.2s forwards;
+}
+.toast.info {
+  background: rgba(16, 34, 24, 0.9);
+  border-color: rgba(124, 255, 107, 0.35);
+  color: #a8e8b0;
+  animation-duration: 1.6s;
 }
 @keyframes fadeout {
   0% { opacity: 0; transform: translateY(-6px); }

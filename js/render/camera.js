@@ -41,8 +41,16 @@ export class RtsCamera {
   }
 
   zoom(factor) {
-    this.dist = Math.min(this.maxDist, Math.max(this.minDist, this.dist * factor));
-    this.updateTransform();
+    this.targetDist = Math.min(this.maxDist, Math.max(this.minDist,
+      (this.targetDist ?? this.dist) * factor));
+  }
+
+  // per-frame smoothing toward the zoom target
+  update(dt) {
+    if (this.targetDist !== undefined && Math.abs(this.targetDist - this.dist) > 0.01) {
+      this.dist += (this.targetDist - this.dist) * Math.min(1, dt * 9);
+      this.updateTransform();
+    }
   }
 
   clamp() {

@@ -4,7 +4,12 @@ import { Renderer } from "./render/renderer.js";
 import { Input } from "./ui/input.js";
 import { Hud } from "./ui/hud.js";
 import { Net, makeCode } from "./net/net.js";
+import { GameAudio } from "./audio.js";
 import { TICK_MS } from "./core/data.js";
+
+const audio = new GameAudio();
+document.addEventListener("pointerdown", () => audio.init(), { once: true });
+document.addEventListener("keydown", () => audio.init(), { once: true });
 
 const $ = (id) => document.getElementById(id);
 const menu = $("menu");
@@ -20,15 +25,36 @@ function startGame(mode, seed, netConn) {
   menu.classList.add("hidden");
   const game = new Game(mode, seed, netConn);
   const renderer = new Renderer($("game"), game.sim, game.localPlayer);
-  const hud = new Hud(game, renderer);
-  const input = new Input(game, renderer, hud);
+  const hud = new Hud(game, renderer, audio);
+  const input = new Input(game, renderer, hud, audio);
   hud.input = input;
 
   game.onEvents = (events) => {
     renderer.consumeEvents(events);
     for (const ev of events) {
-      if (ev.t === "gameover") hud.gameOver(ev.winner);
-      if (ev.t === "complete" && ev.owner === game.localPlayer) hud.toast("Construction complete");
+      switch (ev.t) {
+        case "shot":
+          if (ev.tOwner === game.localPlayer) hud.notifyAttack(ev.tx, ev.ty);
+          if (renderer.entityVisible({ owner: ev.owner, x: ev.fx, y: ev.fy, unit: true })) {
+            if (ev.ranged) audio.shot(); else audio.melee();
+          }
+          break;
+        case "death":
+          if (renderer.entityVisible({ owner: ev.owner, x: ev.x, y: ev.y, unit: !ev.building, building: ev.building })) {
+            if (ev.building) audio.buildingDeath(); else audio.unitDeath();
+          }
+          break;
+        case "complete":
+          if (ev.owner === game.localPlayer) { hud.toastInfo("Construction complete"); audio.complete(); }
+          break;
+        case "trained":
+          if (ev.owner === game.localPlayer) audio.trained();
+          break;
+        case "gameover":
+          hud.gameOver(ev.winner);
+          if (ev.winner === game.localPlayer) audio.victory(); else audio.defeat();
+          break;
+      }
     }
   };
   game.onStall = (stalled) => hud.setStatus(stalled ? "Waiting for opponent..." : "");
