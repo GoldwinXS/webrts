@@ -53,8 +53,8 @@ export class Sim {
     const d = UNITS[type];
     return this.addEntity({
       type, owner: pid, x, y, hp: d.hp, maxHp: d.hp, radius: d.radius,
-      unit: true, order: { kind: "idle" }, path: null, pathI: 0, cooldown: 0,
-      carry: 0, gatherTimer: 0,
+      unit: true, order: { kind: "idle" }, next: [], path: null, pathI: 0,
+      cooldown: 0, carry: 0, gatherTimer: 0,
     });
   }
 
@@ -177,13 +177,13 @@ export class Sim {
       case "move":
       case "attackmove": {
         const units = c.ids.map(own).filter((e) => e && e.unit);
-        this.groupMove(units, c.x, c.y, c.t === "attackmove");
+        this.groupMove(units, c.x, c.y, c.t === "attackmove", c.q);
         break;
       }
       case "stop": {
         for (const id of c.ids) {
           const e = own(id);
-          if (e && e.unit) { e.order = { kind: "idle" }; e.path = null; }
+          if (e && e.unit) { e.order = { kind: "idle" }; e.next = []; e.path = null; }
         }
         break;
       }
@@ -192,7 +192,7 @@ export class Sim {
         if (!target || target.owner === pid || target.owner === -1) break;
         for (const id of c.ids) {
           const e = own(id);
-          if (e && e.unit) e.order = { kind: "attack", targetId: c.targetId, resume: null };
+          if (e && e.unit) this.setOrder(e, { kind: "attack", targetId: c.targetId, resume: null }, c.q);
         }
         break;
       }
@@ -202,8 +202,7 @@ export class Sim {
         for (const id of c.ids) {
           const e = own(id);
           if (e && e.type === "worker") {
-            e.order = { kind: "gather", targetId: c.targetId, phase: "to" };
-            e.path = null;
+            this.setOrder(e, { kind: "gather", targetId: c.targetId, phase: "to" }, c.q);
           }
         }
         break;
@@ -242,7 +241,7 @@ export class Sim {
     }
   }
 
-  groupMove(units, x, y, attackMove) {
+  groupMove(units, x, y, attackMove, queued) {
     if (!units.length) return;
     // deterministic formation: sort by id, tidy grid around the target
     units.sort((a, b) => a.id - b.id);
@@ -253,15 +252,31 @@ export class Sim {
       const ox = ((col - (cols - 1) / 2) * spacing) | 0;
       const oy = ((row - (Math.ceil(units.length / cols) - 1) / 2) * spacing) | 0;
       const tx = this.clampX(x + ox), ty = this.clampY(y + oy);
-      u.order = attackMove
+      this.setOrder(u, attackMove
         ? { kind: "attackmove", x: tx, y: ty }
-        : { kind: "move", x: tx, y: ty };
-      u.path = null;
+        : { kind: "move", x: tx, y: ty }, queued);
     });
   }
 
   clampX(v) { return Math.min(this.map.w * FP - HALF, Math.max(HALF, v)); }
   clampY(v) { return Math.min(this.map.h * FP - HALF, Math.max(HALF, v)); }
+
+  // Set an order now, or append it when the command was shift-queued.
+  setOrder(u, order, queued) {
+    if (queued && u.order.kind !== "idle") {
+      if (u.next.length < 8) u.next.push(order);
+    } else {
+      u.order = order;
+      u.next = queued ? u.next : [];
+      u.path = null;
+    }
+  }
+
+  // Current order finished: advance to the next queued one (or idle).
+  popNext(u) {
+    u.order = u.next.shift() || { kind: "idle" };
+    u.path = null;
+  }
 
   // ---------- unit brain ----------
 
@@ -279,7 +294,7 @@ export class Sim {
         break;
 
       case "move":
-        if (this.travelTo(u, o.x, o.y, d.speed)) u.order = { kind: "idle" };
+        if (this.travelTo(u, o.x, o.y, d.speed)) this.popNext(u);
         break;
 
       case "attackmove": {
@@ -291,20 +306,20 @@ export class Sim {
             break;
           }
         }
-        if (this.travelTo(u, o.x, o.y, d.speed)) u.order = { kind: "idle" };
+        if (this.travelTo(u, o.x, o.y, d.speed)) this.popNext(u);
         break;
       }
 
       case "attack": {
         const target = this.byId.get(o.targetId);
         if (!target || target.hp <= 0) {
-          u.order = o.resume
-            ? { kind: "attackmove", x: o.resume.x, y: o.resume.y }
-            : { kind: "idle" };
-          u.path = null;
+          if (o.resume) {
+            u.order = { kind: "attackmove", x: o.resume.x, y: o.resume.y };
+            u.path = null;
+          } else this.popNext(u);
           break;
         }
-        const gap = dist(u.x, u.y, target.x, target.y) - (target.radius || 0);
+        const gap = this.gapTo(u, target);
         if (gap <= d.range) {
           u.path = null;
           if (u.cooldown === 0) {
@@ -328,8 +343,8 @@ export class Sim {
         const site = this.byId.get(o.targetId);
         if (!site || site.done) { u.order = { kind: "idle" }; u.path = null; break; }
         const bd = BUILDINGS[site.type];
-        const gap = dist(u.x, u.y, site.x, site.y) - site.radius;
-        if (gap <= (FP * 0.6) | 0) {
+        const gap = this.gapTo(u, site);
+        if (gap <= (FP * 0.75) | 0) {
           u.path = null;
           site.progress++;
           site.hp = Math.min(site.maxHp, site.hp + Math.ceil(site.maxHp / bd.buildTime));
@@ -341,7 +356,7 @@ export class Sim {
             this.autoGather(u);
           }
         } else {
-          this.travelTo(u, site.x, site.y, d.speed, true);
+          this.travelTo(u, site.x, site.y, d.speed); // static target: always pathfind
         }
         break;
       }
@@ -382,7 +397,7 @@ export class Sim {
       if (!patch || patch.amount <= 0) {
         const next = this.nearestEntity(u.x, u.y, FP * 14, (e) => e.type === "mineral" && e.amount > 0);
         if (next) { o.targetId = next.id; u.path = null; }
-        else u.order = { kind: "idle" };
+        else this.popNext(u);
         return;
       }
       const gap = dist(u.x, u.y, patch.x, patch.y);
@@ -407,14 +422,14 @@ export class Sim {
       const depot = this.nearestEntity(u.x, u.y, FP * 60,
         (e) => e.building && e.done && e.owner === u.owner && BUILDINGS[e.type].deposit);
       if (!depot) { u.order = { kind: "idle" }; return; }
-      const gap = dist(u.x, u.y, depot.x, depot.y) - depot.radius;
-      if (gap <= (FP * 0.5) | 0) {
+      const gap = this.gapTo(u, depot);
+      if (gap <= (FP * 0.75) | 0) {
         this.minerals[u.owner] += u.carry;
         u.carry = 0;
         o.phase = "to";
         u.path = null;
       } else {
-        this.travelTo(u, depot.x, depot.y, d.speed, true);
+        this.travelTo(u, depot.x, depot.y, d.speed); // static target: always pathfind
       }
     }
   }
@@ -433,14 +448,33 @@ export class Sim {
 
   // ---------- movement ----------
 
-  // Returns true when arrived. `direct` skips pathfinding for nearby chases.
+  // Distance from a unit to an entity's *edge* (not its center). Buildings
+  // use rectangle distance so diagonal approaches aren't penalized — with
+  // center-minus-radius a worker at a 3x3 building's corner reads ~1.3 tiles
+  // away and can never satisfy a 0.5-tile arrival check (the old oscillation
+  // bug: it kept walking into the footprint and getting ejected).
+  gapTo(u, e) {
+    if (e.building) {
+      const half = (e.size * FP) >> 1;
+      const dx = Math.max(0, Math.abs(u.x - e.x) - half);
+      const dy = Math.max(0, Math.abs(u.y - e.y) - half);
+      return isqrt(dx * dx + dy * dy);
+    }
+    return dist(u.x, u.y, e.x, e.y) - (e.radius || 0);
+  }
+
+  // Returns true when arrived. `chasing` allows periodic repathing toward a
+  // moving target and short beelines — but never a beeline into a blocked
+  // tile (that walks units onto building footprints, where the separation
+  // pass ejects them and they thrash back and forth).
   travelTo(u, x, y, speed, chasing) {
     const far = dist2(u.x, u.y, x, y);
     if (far <= FP * FP / 16) { u.path = null; return true; }
 
     if (!u.path || (chasing && this.tick % 8 === 0 && dist2(u.path[u.path.length - 1].x, u.path[u.path.length - 1].y, x, y) > FP * FP)) {
-      if (chasing && far < 9 * FP * FP) {
-        u.path = [{ x, y }]; // close chase: beeline, separation handles bumps
+      const destBlocked = this.blocked[fpToTile(y) * this.map.w + fpToTile(x)];
+      if (chasing && far < 9 * FP * FP && !destBlocked) {
+        u.path = [{ x, y }]; // close chase of a reachable point: beeline
       } else {
         u.path = findPath(this.blocked, this.map.w, this.map.h, u.x, u.y, x, y);
         if (!u.path) { u.order = { kind: "idle" }; return false; }

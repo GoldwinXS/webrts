@@ -22,6 +22,8 @@ export class Input {
     this.ghost = null;
     this.groups = {};                      // digit -> Set of entity ids
     this.lastRecall = { key: null, time: 0 };
+    this.lastClick = { id: 0, time: 0 };   // double-click detection
+    this.idleCycle = 0;                    // idle-worker rotation index
 
     this.ray = new THREE.Raycaster();
     this.groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
@@ -94,7 +96,7 @@ export class Input {
       if (this.attackMode) {
         const g = this.groundAt(e.clientX, e.clientY);
         const target = this.entityAt(e.clientX, e.clientY);
-        this.issueAttack(g, target);
+        this.issueAttack(g, target, e.shiftKey);
         this.setAttackMode(false);
         return;
       }
@@ -102,7 +104,7 @@ export class Input {
     } else if (e.button === 2) {
       if (this.placing) { this.cancelPlace(); return; }
       if (this.attackMode) { this.setAttackMode(false); return; }
-      this.rightClick(e.clientX, e.clientY);
+      this.rightClick(e.clientX, e.clientY, e.shiftKey);
     }
   }
 
@@ -122,6 +124,14 @@ export class Input {
         this.selection.add(hit.id);
         if (hit.owner === this.pid) this.audio.select();
         if (hit.building && hit.owner === this.pid) this.renderer.rallySelection = hit.id;
+
+        // double-click a unit: select all of its type on screen
+        const now = performance.now();
+        if (hit.unit && hit.owner === this.pid &&
+            this.lastClick.id === hit.id && now - this.lastClick.time < 400) {
+          this.selectTypeOnScreen(hit.type);
+        }
+        this.lastClick = { id: hit.id, time: now };
       }
     } else {
       // box select own units by projecting to screen space
@@ -139,10 +149,18 @@ export class Input {
     this.hud.refreshSelection();
   }
 
-  rightClick(sx, sy) {
+  rightClick(sx, sy, shift) {
     const ids = this.mySelectedUnitIds();
-    const target = this.entityAt(sx, sy);
+    const q = shift ? 1 : 0;
+    let target = this.entityAt(sx, sy);
     const g = this.groundAt(sx, sy);
+
+    // a click near (not exactly on) a mineral patch snaps to it
+    if ((!target || target.type !== "mineral") && g) {
+      const near = this.sim.nearestEntity(g.x, g.y, FP * 1.4,
+        (e) => e.type === "mineral" && e.amount > 0);
+      if (near && !(target && target.owner >= 0)) target = near;
+    }
 
     // no units selected but a finished building is: set its rally point
     if (!ids.length) {
@@ -152,31 +170,33 @@ export class Input {
         this.renderer.rallySelection = b.id;
         this.renderer.orderPing(g.wx, g.wz, "#7cff6b");
         this.audio.rally();
+        this.hud.toastInfo(target?.type === "mineral" ? "Rally set: workers will mine" : "Rally point set");
       }
       return;
     }
 
     if (target && target.type === "mineral") {
-      this.game.issue({ t: "gather", ids, targetId: target.id });
+      this.game.issue({ t: "gather", ids, targetId: target.id, q });
       this.audio.gatherAck();
     } else if (target && target.owner >= 0 && target.owner !== this.pid) {
-      this.game.issue({ t: "attack", ids, targetId: target.id });
+      this.game.issue({ t: "attack", ids, targetId: target.id, q });
       this.audio.attackAck();
     } else if (g) {
-      this.game.issue({ t: "move", ids, x: g.x, y: g.y });
-      this.renderer.orderPing(g.wx, g.wz, "#7cff6b");
+      this.game.issue({ t: "move", ids, x: g.x, y: g.y, q });
+      this.renderer.orderPing(g.wx, g.wz, q ? "#c9ff6b" : "#7cff6b");
       this.audio.ack();
     }
   }
 
-  issueAttack(g, target) {
+  issueAttack(g, target, shift) {
     const ids = this.mySelectedUnitIds();
+    const q = shift ? 1 : 0;
     if (!ids.length) return;
     if (target && target.owner >= 0 && target.owner !== this.pid) {
-      this.game.issue({ t: "attack", ids, targetId: target.id });
+      this.game.issue({ t: "attack", ids, targetId: target.id, q });
       this.audio.attackAck();
     } else if (g) {
-      this.game.issue({ t: "attackmove", ids, x: g.x, y: g.y });
+      this.game.issue({ t: "attackmove", ids, x: g.x, y: g.y, q });
       this.renderer.orderPing(g.wx, g.wz, "#ff6b5f");
       this.audio.attackAck();
     }
@@ -192,6 +212,7 @@ export class Input {
       else { this.selection.clear(); this.hud.refreshSelection(); }
     }
     if (k === "a" && !e.repeat && this.mySelectedUnitIds().length) this.setAttackMode(true);
+    if (k === "i" && !e.repeat) this.selectIdleWorker();
     if (k === "s" && !e.repeat) {
       const ids = this.mySelectedUnitIds();
       if (ids.length) { this.game.issue({ t: "stop", ids }); this.audio.ack(); }
@@ -285,6 +306,34 @@ export class Input {
     this.ghost = null;
     this.placing = null;
     this.hud.setHint("");
+  }
+
+  // select every own unit of a type that is currently on screen
+  selectTypeOnScreen(type) {
+    const v = new THREE.Vector3();
+    for (const ent of this.sim.entities) {
+      if (ent.owner !== this.pid || ent.type !== type) continue;
+      v.set(ent.x / FP, 0.4, ent.y / FP).project(this.renderer.camera.cam);
+      if (v.x >= -1 && v.x <= 1 && v.y >= -1 && v.y <= 1 && v.z < 1) {
+        this.selection.add(ent.id);
+      }
+    }
+    this.hud.refreshSelection();
+    this.audio.select();
+  }
+
+  // cycle through idle workers, centering the camera on each
+  selectIdleWorker() {
+    const idle = this.sim.entities.filter((e) =>
+      e.owner === this.pid && e.type === "worker" && e.order.kind === "idle");
+    if (!idle.length) { this.hud.toastInfo("No idle workers"); return; }
+    const w = idle[this.idleCycle % idle.length];
+    this.idleCycle++;
+    this.selection.clear();
+    this.selection.add(w.id);
+    this.renderer.camera.jumpTo(w.x / FP, w.y / FP);
+    this.hud.refreshSelection();
+    this.audio.select();
   }
 
   // ---------- helpers ----------

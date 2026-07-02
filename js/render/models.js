@@ -96,7 +96,9 @@ export function makeUnitVisual(e, color) {
     carry.visible = false;
     body.add(pod, eye, tl, tr, carry);
     body.position.y = 0.42;
-    anim = { kind: "worker", carry, hover: e.id % 7 };
+    // the eye doubles as a task light: team color when moving/idle,
+    // cyan while mining, amber while constructing
+    anim = { kind: "worker", carry, hover: e.id % 7, eye: eye.material, baseColor: new THREE.Color(color) };
   } else if (e.type === "marine") {
     const torso = new THREE.Mesh(G.torso, team);
     torso.position.y = 0.46;
@@ -247,6 +249,21 @@ export function animateVisual(g, e, t, moveAmt) {
       g.userData.body.rotation.x = moveAmt * 0.18;
       a.carry.visible = e.carry > 0;
       if (e.carry > 0) a.carry.rotation.y = t * 2;
+      // task light
+      const kind = e.order?.kind;
+      if (kind === "gather") {
+        a.eye.color.setHex(0x63e8db); a.eye.emissive.setHex(0x63e8db);
+        a.eye.emissiveIntensity = 1.8;
+      } else if (kind === "build") {
+        a.eye.color.setHex(0xffb347); a.eye.emissive.setHex(0xffb347);
+        a.eye.emissiveIntensity = 1.6 + Math.sin(t * 8) * 0.6; // welding flicker
+      } else if (kind === "idle") {
+        a.eye.color.copy(a.baseColor); a.eye.emissive.copy(a.baseColor);
+        a.eye.emissiveIntensity = Math.sin(t * 5) > 0 ? 2.2 : 0.5; // blink = needs orders
+      } else {
+        a.eye.color.copy(a.baseColor); a.eye.emissive.copy(a.baseColor);
+        a.eye.emissiveIntensity = 1.6;
+      }
       break;
     }
     case "marine": {

@@ -27,6 +27,11 @@ export class Hud {
     this.minimap.addEventListener("pointerdown", (e) => this.minimapClick(e));
     this.minimap.addEventListener("pointermove", (e) => { if (e.buttons & 1) this.minimapClick(e); });
 
+    // idle worker button
+    this.$idle = document.getElementById("btn-idle");
+    this.$idle.addEventListener("pointerdown", (e) => e.stopPropagation());
+    this.$idle.addEventListener("click", () => this.input?.selectIdleWorker());
+
     // mute toggle
     this.$mute = document.getElementById("btn-mute");
     this.updateMuteIcon();
@@ -50,6 +55,13 @@ export class Hud {
     this.$minerals.textContent = this.sim.minerals[this.pid];
     this.$supply.textContent = `${s.used} / ${s.cap}`;
     this.$supply.classList.toggle("warn", s.used >= s.cap);
+
+    // idle-worker button: visible only when someone is slacking
+    const idle = this.sim.entities.filter((e) =>
+      e.owner === this.pid && e.type === "worker" && e.order.kind === "idle").length;
+    this.$idle.classList.toggle("hidden", idle === 0);
+    if (idle > 0) this.$idle.querySelector("b").textContent = idle;
+
     this.drawMinimap();
     this.refreshSelection();
   }
@@ -80,6 +92,7 @@ export class Hud {
       const e = sel[0];
       if (e.type === "mineral") html += `<div class="sel-sub">${e.amount} remaining</div>`;
       else html += `<div class="sel-sub">${Math.max(0, e.hp | 0)} / ${e.maxHp} HP</div>`;
+      if (e.unit) html += `<div class="sel-sub status">${this.orderLabel(e)}</div>`;
       if (e.building && !e.done) {
         const pct = ((e.progress / BUILDINGS[e.type].buildTime) * 100) | 0;
         html += `<div class="sel-sub">Constructing ${pct}%</div>`;
@@ -121,6 +134,24 @@ export class Hud {
     for (const b of this.$cmdCard.querySelectorAll("button")) {
       b.addEventListener("pointerdown", (e) => e.stopPropagation());
       b.addEventListener("click", () => this.command(b.dataset.cmd, building));
+    }
+  }
+
+  orderLabel(e) {
+    const o = e.order;
+    switch (o.kind) {
+      case "idle": return "Idle";
+      case "move": return "Moving";
+      case "attackmove": return "Attack-moving";
+      case "attack": return "Attacking";
+      case "build": {
+        const site = this.sim.byId.get(o.targetId);
+        return site ? `Constructing ${BUILDINGS[site.type].name}` : "Constructing";
+      }
+      case "gather":
+        return o.phase === "return" ? "Returning minerals"
+          : o.phase === "mining" ? "Mining" : "Heading to minerals";
+      default: return "";
     }
   }
 

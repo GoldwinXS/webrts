@@ -32,9 +32,9 @@
       <div id="code-display" class="code hidden"></div>
       <div id="menu-msg" class="menu-msg"></div>
       <div class="menu-help">
-        <div>Left-drag select · Right-click move / gather / attack / set rally</div>
-        <div>A attack-move · S stop · Ctrl+1-9 group · 1-9 recall (double-tap centers)</div>
-        <div>Arrows / edge pan · Q,E rotate · Wheel zoom</div>
+        <div>Left-drag select · Double-click selects same type · Right-click move / gather / attack / set rally</div>
+        <div>A attack-move · S stop · Shift queues orders · I selects idle worker</div>
+        <div>Ctrl+1-9 group · 1-9 recall (double-tap centers) · Arrows / edge pan · Q,E rotate · Wheel zoom</div>
       </div>
     </div>
   </div>
@@ -64,7 +64,13 @@
     <div id="select-box" class="hidden"></div>
 
     <div id="bottombar">
-      <canvas id="minimap" width="192" height="192"></canvas>
+      <div id="minimap-col">
+        <button id="btn-idle" class="idle-btn hidden" title="Select idle worker (I)">
+          <svg viewBox="0 0 16 16" width="14" height="14"><circle cx="8" cy="6" r="3.4" fill="currentColor"/><path d="M3 14 a5 5 0 0 1 10 0 Z" fill="currentColor"/></svg>
+          <b>0</b> idle
+        </button>
+        <canvas id="minimap" width="192" height="192"></canvas>
+      </div>
       <div id="sel-panel"></div>
       <div id="cmd-card"></div>
     </div>
