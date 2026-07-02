@@ -52,6 +52,9 @@ export class Renderer {
     this.ringMat = new THREE.MeshBasicMaterial({ color: 0x7cff6b, side: THREE.DoubleSide, transparent: true, opacity: 0.9, depthWrite: false });
     this.barBgMat = new THREE.MeshBasicMaterial({ color: 0x10141a });
     this.rallyFlag = this.makeRallyFlag();
+    this.rallyLine = this.makeRallyLine();
+    this.buildTargetRings();
+    this.taskFxTimers = new Map();   // entity id -> next spark time (render-only)
 
     // post-processing: MSAA target + bloom (threshold 1.0 = only HDR emissive blooms)
     const rt = new THREE.WebGLRenderTarget(innerWidth, innerHeight, { samples: 4, type: THREE.HalfFloatType });
@@ -217,6 +220,113 @@ export class Renderer {
     this.scene.add(stars);
   }
 
+  makeRallyLine() {
+    const geo = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(), new THREE.Vector3(),
+    ]);
+    const mat = new THREE.LineDashedMaterial({
+      color: 0x7cff6b, dashSize: 0.45, gapSize: 0.3,
+      transparent: true, opacity: 0.65, depthWrite: false,
+    });
+    const line = new THREE.Line(geo, mat);
+    line.visible = false;
+    line.frustumCulled = false;
+    this.scene.add(line);
+    return line;
+  }
+
+  // pool of pulsing rings that mark what selected units are working on
+  buildTargetRings() {
+    this.targetRings = [];
+    const geo = new THREE.RingGeometry(0.78, 0.9, 30);
+    for (let i = 0; i < 6; i++) {
+      const m = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+        color: 0xffffff, side: THREE.DoubleSide, transparent: true,
+        opacity: 0.7, depthWrite: false,
+      }));
+      m.rotation.x = -Math.PI / 2;
+      m.position.y = 0.04;
+      m.visible = false;
+      this.scene.add(m);
+      this.targetRings.push(m);
+    }
+  }
+
+  // Collect the targets of selected units (patch being mined, depot being
+  // returned to, site being built, enemy being attacked) and ring them.
+  updateOrderMarkers(t) {
+    const sim = this.sim;
+    const targets = new Map(); // id -> color
+    for (const id of this.selection) {
+      const e = sim.byId.get(id);
+      if (!e || e.owner !== this.localPlayer || !e.unit) continue;
+      const o = e.order;
+      if (o.kind === "gather") {
+        if (o.phase === "return") {
+          const depot = sim.nearestEntity(e.x, e.y, 60 * FP, (b) =>
+            b.building && b.done && b.owner === e.owner && BUILDINGS[b.type].deposit);
+          if (depot) targets.set(depot.id, 0x63e8db);
+        } else if (sim.byId.has(o.targetId)) targets.set(o.targetId, 0x63e8db);
+      } else if (o.kind === "build" && sim.byId.has(o.targetId)) {
+        targets.set(o.targetId, 0xffb347);
+      } else if (o.kind === "attack" && sim.byId.has(o.targetId)) {
+        targets.set(o.targetId, 0xff5f4c);
+      }
+      if (targets.size >= this.targetRings.length) break;
+    }
+    let i = 0;
+    for (const [tid, color] of targets) {
+      const target = sim.byId.get(tid);
+      const ring = this.targetRings[i++];
+      ring.visible = true;
+      ring.position.set(W2(target.x), 0.04, W2(target.y));
+      const base = target.building ? target.size * 0.75 : 0.8;
+      ring.scale.setScalar(base + Math.sin(t * 4) * 0.06);
+      ring.material.color.setHex(color);
+      ring.material.opacity = 0.5 + Math.sin(t * 4) * 0.2;
+    }
+    for (; i < this.targetRings.length; i++) this.targetRings[i].visible = false;
+  }
+
+  // While a worker mines or welds, face it toward its target and emit
+  // periodic sparks at the contact point. Render-only.
+  updateTaskSparks(t) {
+    const sim = this.sim;
+    for (const e of sim.entities) {
+      if (e.type !== "worker") continue;
+      const g = this.meshes.get(e.id);
+      if (!g || !g.visible) continue;
+      const o = e.order;
+      let target = null, color = null, count = 3;
+      if (o.kind === "gather" && o.phase === "mining") {
+        target = sim.byId.get(o.targetId);
+        color = 0x63e8db;
+      } else if (o.kind === "build") {
+        const site = sim.byId.get(o.targetId);
+        if (site && sim.gapTo(e, site) <= FP) { target = site; color = 0xffb347; count = 4; }
+      }
+      if (!target) continue;
+
+      // face the work
+      if (g.userData.body) {
+        const yaw = Math.atan2(target.x - e.x, target.y - e.y);
+        let dy = yaw - g.userData.body.rotation.y;
+        while (dy > Math.PI) dy -= Math.PI * 2;
+        while (dy < -Math.PI) dy += Math.PI * 2;
+        g.userData.body.rotation.y += dy * 0.15;
+      }
+
+      // sparks at the contact point (biased toward the target's edge)
+      const next = this.taskFxTimers.get(e.id) || 0;
+      if (t >= next) {
+        this.taskFxTimers.set(e.id, t + 0.28 + (e.id % 5) * 0.05);
+        const cx = W2(e.x) + (W2(target.x) - W2(e.x)) * 0.55;
+        const cz = W2(e.y) + (W2(target.y) - W2(e.y)) * 0.55;
+        this.fx.sparks.burst(cx, 0.4, cz, count, color, 1.1, 0.3, 1.4);
+      }
+    }
+  }
+
   makeRallyFlag() {
     const g = new THREE.Group();
     const pole = new THREE.Mesh(SHARED.pole, new THREE.MeshBasicMaterial({ color: 0xcccccc }));
@@ -377,16 +487,28 @@ export class Renderer {
       }
     }
 
-    // rally flag for the selected building
+    // rally flag + dashed line for the selected building
     this.rallyFlag.visible = false;
+    this.rallyLine.visible = false;
     if (this.rallySelection) {
       const b = sim.byId.get(this.rallySelection);
       if (b?.rally && this.selection.has(b.id)) {
         this.rallyFlag.visible = true;
         this.rallyFlag.position.set(W2(b.rally.x), 0, W2(b.rally.y));
         this.rallyFlag.userData.flag.rotation.y = Math.sin(t * 3) * 0.15;
+        this.rallyLine.visible = true;
+        const pts = this.rallyLine.geometry.attributes.position;
+        pts.setXYZ(0, W2(b.x), 0.12, W2(b.y));
+        pts.setXYZ(1, W2(b.rally.x), 0.12, W2(b.rally.y));
+        pts.needsUpdate = true;
+        this.rallyLine.computeLineDistances();
+        this.rallyLine.material.color.setHex(
+          b.rally.targetId && sim.byId.get(b.rally.targetId)?.type === "mineral" ? 0x63e8db : 0x7cff6b);
       }
     }
+
+    this.updateOrderMarkers(t);
+    this.updateTaskSparks(t);
 
     this.fx.update(dt);
     this.composer.render();

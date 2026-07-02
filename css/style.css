@@ -179,13 +179,12 @@ body.attack-cursor #game { cursor: cell; }
 
 #toasts {
   position: absolute;
-  top: 90px;
-  left: 50%;
-  transform: translateX(-50%);
+  top: 52px;
+  left: 14px;
   display: flex;
   flex-direction: column;
   gap: 6px;
-  align-items: center;
+  align-items: flex-start;
 }
 .toast {
   padding: 6px 16px;

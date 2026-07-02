@@ -175,8 +175,23 @@ export class Input {
       return;
     }
 
+    // own unfinished building: send workers to (resume) constructing it
+    if (target && target.building && target.owner === this.pid && !target.done) {
+      const wids = this.mySelectedWorkers().map((w) => w.id);
+      if (wids.length) {
+        this.game.issue({ t: "resume", ids: wids, targetId: target.id, q });
+        this.renderer.orderPing(target.x / FP, target.y / FP, "#ffb347");
+        this.audio.ack();
+        // non-workers in the selection just move next to the site
+        const others = ids.filter((id) => !wids.includes(id));
+        if (others.length && g) this.game.issue({ t: "move", ids: others, x: g.x, y: g.y, q });
+        return;
+      }
+    }
+
     if (target && target.type === "mineral") {
       this.game.issue({ t: "gather", ids, targetId: target.id, q });
+      this.renderer.orderPing(target.x / FP, target.y / FP, "#63e8db");
       this.audio.gatherAck();
     } else if (target && target.owner >= 0 && target.owner !== this.pid) {
       this.game.issue({ t: "attack", ids, targetId: target.id, q });

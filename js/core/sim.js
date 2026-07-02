@@ -219,6 +219,16 @@ export class Sim {
         worker.path = null;
         break;
       }
+      case "resume": {
+        // send workers (back) to an unfinished building of ours
+        const site = this.byId.get(c.targetId);
+        if (!site || !site.building || site.owner !== pid || site.done) break;
+        for (const id of c.ids) {
+          const e = own(id);
+          if (e && e.type === "worker") this.setOrder(e, { kind: "build", targetId: site.id }, c.q);
+        }
+        break;
+      }
       case "rally": {
         const b = own(c.buildingId);
         if (!b || !b.building) break;
@@ -378,8 +388,10 @@ export class Sim {
         // send the fresh unit to the rally point (workers rally onto minerals)
         if (b.rally) {
           const target = b.rally.targetId ? this.byId.get(b.rally.targetId) : null;
-          if (u.type === "worker" && target?.type === "mineral" && target.amount > 0) {
-            u.order = { kind: "gather", targetId: target.id, phase: "to" };
+          if (u.type === "worker" && target?.type === "mineral") {
+            // rally onto minerals: balance across the line, not one patch
+            const patch = this.pickPatch(target, FP * 6) || (target.amount > 0 ? target : null);
+            if (patch) u.order = { kind: "gather", targetId: patch.id, phase: "to" };
           } else {
             u.order = { kind: "move", x: b.rally.x, y: b.rally.y };
           }
@@ -395,7 +407,7 @@ export class Sim {
     if (o.phase === "to") {
       const patch = this.byId.get(o.targetId);
       if (!patch || patch.amount <= 0) {
-        const next = this.nearestEntity(u.x, u.y, FP * 14, (e) => e.type === "mineral" && e.amount > 0);
+        const next = this.pickPatch(u, FP * 14);
         if (next) { o.targetId = next.id; u.path = null; }
         else this.popNext(u);
         return;
@@ -434,8 +446,34 @@ export class Sim {
     }
   }
 
+  // How many workers are already assigned to a patch.
+  gatherersOn(patchId) {
+    let n = 0;
+    for (const e of this.entities) {
+      if (e.unit && e.order.kind === "gather" && e.order.targetId === patchId) n++;
+    }
+    return n;
+  }
+
+  // Pick the best patch near a point: fewest assigned workers first, then
+  // nearest, then lowest id — fully deterministic, spreads workers across
+  // the mineral line instead of stacking them on the closest patch.
+  pickPatch(at, maxDist) {
+    let best = null, bestLoad = 0, bestD2 = 0;
+    for (const e of this.entities) {
+      if (e.type !== "mineral" || e.amount <= 0) continue;
+      const d2 = dist2(at.x, at.y, e.x, e.y);
+      if (d2 > maxDist * maxDist) continue;
+      const load = this.gatherersOn(e.id);
+      if (!best || load < bestLoad || (load === bestLoad && d2 < bestD2)) {
+        best = e; bestLoad = load; bestD2 = d2;
+      }
+    }
+    return best;
+  }
+
   autoGather(u) {
-    const patch = this.nearestEntity(u.x, u.y, FP * 12, (e) => e.type === "mineral" && e.amount > 0);
+    const patch = this.pickPatch(u, FP * 12);
     if (patch) u.order = { kind: "gather", targetId: patch.id, phase: "to" };
   }
 

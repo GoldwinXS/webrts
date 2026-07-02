@@ -9,6 +9,8 @@ const G = {
   dronePod: new THREE.SphereGeometry(0.3, 14, 12),
   droneThruster: new THREE.CylinderGeometry(0.07, 0.1, 0.16, 8),
   droneEye: new THREE.BoxGeometry(0.26, 0.06, 0.05),
+  droneArm: new THREE.BoxGeometry(0.06, 0.06, 0.3).translate(0, 0, 0.15),
+  droneDrill: new THREE.ConeGeometry(0.05, 0.16, 6).rotateX(Math.PI / 2).translate(0, 0, 0.36),
   crystal: new THREE.OctahedronGeometry(0.14),
   // marine
   torso: new THREE.CapsuleGeometry(0.2, 0.28, 4, 10),
@@ -94,11 +96,22 @@ export function makeUnitVisual(e, color) {
     const carry = new THREE.Mesh(G.crystal, glowMat(0x63e8db, 1.4));
     carry.position.set(0, -0.18, 0.22);
     carry.visible = false;
-    body.add(pod, eye, tl, tr, carry);
+    // manipulator arm: drill for mining, torch for welding
+    const arm = new THREE.Group();
+    const armMesh = new THREE.Mesh(G.droneArm, GUNMETAL);
+    const drill = new THREE.Mesh(G.droneDrill, glowMat(0x63e8db, 0.6));
+    arm.add(armMesh, drill);
+    arm.position.set(0.12, -0.08, 0.18);
+    arm.rotation.x = 0.35;       // retracted by default
+    arm.scale.setScalar(0.75);
+    body.add(pod, eye, tl, tr, carry, arm);
     body.position.y = 0.42;
     // the eye doubles as a task light: team color when moving/idle,
     // cyan while mining, amber while constructing
-    anim = { kind: "worker", carry, hover: e.id % 7, eye: eye.material, baseColor: new THREE.Color(color) };
+    anim = {
+      kind: "worker", carry, hover: e.id % 7, eye: eye.material,
+      baseColor: new THREE.Color(color), arm, drill: drill.material,
+    };
   } else if (e.type === "marine") {
     const torso = new THREE.Mesh(G.torso, team);
     torso.position.y = 0.46;
@@ -249,8 +262,9 @@ export function animateVisual(g, e, t, moveAmt) {
       g.userData.body.rotation.x = moveAmt * 0.18;
       a.carry.visible = e.carry > 0;
       if (e.carry > 0) a.carry.rotation.y = t * 2;
-      // task light
+      // task light + arm pose
       const kind = e.order?.kind;
+      const mining = kind === "gather" && e.order.phase === "mining";
       if (kind === "gather") {
         a.eye.color.setHex(0x63e8db); a.eye.emissive.setHex(0x63e8db);
         a.eye.emissiveIntensity = 1.8;
@@ -263,6 +277,29 @@ export function animateVisual(g, e, t, moveAmt) {
       } else {
         a.eye.color.copy(a.baseColor); a.eye.emissive.copy(a.baseColor);
         a.eye.emissiveIntensity = 1.6;
+      }
+      if (mining) {
+        // drill: arm level, extended, vibrating hard
+        a.arm.rotation.x = -0.1 + Math.sin(t * 40 + e.id) * 0.05;
+        a.arm.scale.setScalar(1);
+        a.arm.position.z = 0.22 + Math.sin(t * 40 + e.id) * 0.02;
+        a.drill.color.setHex(0x63e8db); a.drill.emissive.setHex(0x63e8db);
+        a.drill.emissiveIntensity = 1.6;
+      } else if (kind === "build") {
+        // welding torch: slow sweeping passes
+        a.arm.rotation.x = -0.25 + Math.sin(t * 3 + e.id) * 0.35;
+        a.arm.rotation.y = Math.sin(t * 1.7 + e.id) * 0.3;
+        a.arm.scale.setScalar(1);
+        a.arm.position.z = 0.2;
+        a.drill.color.setHex(0xffb347); a.drill.emissive.setHex(0xffb347);
+        a.drill.emissiveIntensity = 1.4 + Math.sin(t * 13) * 0.8;
+      } else {
+        // stowed
+        a.arm.rotation.x = 0.35;
+        a.arm.rotation.y = 0;
+        a.arm.scale.setScalar(0.75);
+        a.arm.position.z = 0.18;
+        a.drill.emissiveIntensity = 0.4;
       }
       break;
     }
