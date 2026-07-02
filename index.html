@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>webRTS</title>
+  <link rel="stylesheet" href="./css/style.css" />
+  <script type="importmap">
+    { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" } }
+  </script>
+  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+</head>
+<body>
+  <canvas id="game"></canvas>
+
+  <!-- main menu -->
+  <div id="menu">
+    <div class="menu-box">
+      <h1>web<b>RTS</b></h1>
+      <p class="tagline">A classic real-time strategy game. Gather, build, destroy.</p>
+      <button id="btn-skirmish" class="menu-btn">Skirmish vs AI</button>
+      <div class="menu-row">
+        <button id="btn-host" class="menu-btn">Create Match</button>
+        <div class="join-group">
+          <input id="join-code" maxlength="5" placeholder="CODE" autocomplete="off" spellcheck="false" />
+          <button id="btn-join" class="menu-btn">Join</button>
+        </div>
+      </div>
+      <div id="code-display" class="code hidden"></div>
+      <div id="menu-msg" class="menu-msg"></div>
+      <div class="menu-help">
+        <div>Left-drag select · Right-click move / gather / attack</div>
+        <div>A attack-move · S stop · Arrows / edge pan · Q,E rotate · Wheel zoom</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- in-game HUD -->
+  <div id="hud" class="hidden">
+    <div id="topbar">
+      <span class="logo">web<b>RTS</b></span>
+      <span class="res"><svg viewBox="0 0 16 16" width="14" height="14"><path d="M8 1 L14 8 L8 15 L2 8 Z" fill="#4adfd2"/></svg>
+        <span id="res-minerals">0</span></span>
+      <span class="res"><svg viewBox="0 0 16 16" width="14" height="14"><rect x="2" y="6" width="12" height="8" rx="1" fill="#8b949e"/><rect x="5" y="2" width="6" height="4" rx="1" fill="#8b949e"/></svg>
+        <span id="res-supply">0 / 0</span></span>
+      <span id="net-status" class="status hidden"></span>
+    </div>
+
+    <div id="hint" class="hint hidden"></div>
+    <div id="toasts"></div>
+    <div id="select-box" class="hidden"></div>
+
+    <div id="bottombar">
+      <canvas id="minimap" width="192" height="192"></canvas>
+      <div id="sel-panel"></div>
+      <div id="cmd-card"></div>
+    </div>
+  </div>
+
+  <!-- end screen -->
+  <div id="gameover" class="hidden">
+    <div class="menu-box">
+      <h1></h1>
+      <button id="btn-again" class="menu-btn">Play Again</button>
+    </div>
+  </div>
+
+  <script type="module" src="./js/main.js"></script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "webrts",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "http.server", "1338"],
+      "port": 1338
+    }
+  ]
+}
