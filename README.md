@@ -79,6 +79,13 @@ js/ui/hud.js          resource bar, command card, minimap, toasts
 js/net/net.js         PeerJS transport (host / join by code)
 ```
 
+## Documentation
+
+- [docs/DEVLOG.md](docs/DEVLOG.md) — the story of the build: why lockstep,
+  the verification numbers, and the three bugs
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — technical reference with
+  diagrams: lockstep protocol, determinism rules, sim structure, balance data
+
 ## Roadmap
 
 - More unit types (air, siege) and a second resource
