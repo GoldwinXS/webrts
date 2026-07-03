@@ -61,8 +61,22 @@ export class Input {
     this.ray.setFromCamera(
       { x: (sx / innerWidth) * 2 - 1, y: -(sy / innerHeight) * 2 + 1 },
       this.renderer.camera.cam);
+    const ray = this.ray.ray;
     const pt = new THREE.Vector3();
-    if (!this.ray.ray.intersectPlane(this.groundPlane, pt)) return null;
+    if (!ray.intersectPlane(this.groundPlane, pt)) return null;
+    // Terrain has elevation (mains sit on plateaus). A flat y=0 plane
+    // parallaxes the pick off tall ground, so refine against the actual
+    // surface height: re-intersect a plane at the sampled terrain height a
+    // few times until the ray meets the surface under the cursor.
+    const hf = this.renderer.heightAt;
+    if (hf) {
+      if (!this._pickPlane) this._pickPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+      for (let i = 0; i < 5; i++) {
+        const h = hf.call(this.renderer, pt.x, pt.z);
+        this._pickPlane.constant = -h;              // plane at y = h
+        if (!ray.intersectPlane(this._pickPlane, pt)) break;
+      }
+    }
     return { x: (pt.x * FP) | 0, y: (pt.z * FP) | 0, wx: pt.x, wz: pt.z };
   }
 
