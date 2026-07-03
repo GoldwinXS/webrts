@@ -9,9 +9,9 @@ import { generateMap } from "./map.js";
 import { findPath, nearestFree } from "./path.js";
 
 export class Sim {
-  constructor(seed) {
+  constructor(seed, opts) {
     this.seed = seed;
-    this.map = generateMap(seed);
+    this.map = generateMap(seed, opts);
     this.tick = 0;
     this.nextId = 1;
     this.entities = [];

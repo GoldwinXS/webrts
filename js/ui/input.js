@@ -432,6 +432,8 @@ export class Input {
     this.ghost.position.set(tx + d.size / 2, gy + 0.4, ty + d.size / 2);
     const ok = this.sim.canPlace(this.placing, tx, ty) && this.sim.canAfford(this.pid, d.cost);
     this.ghostMat.color.set(ok ? 0x7cff6b : 0xff5f4c);
+    // build-grid overlay: centered on the cursor tile, recomputed on move only
+    this.renderer.setPlacementGrid?.(this.placing, fpToTile(g.x), fpToTile(g.y));
   }
 
   confirmPlace() {
@@ -454,6 +456,7 @@ export class Input {
     }
     this.ghost = null;
     this.placing = null;
+    this.renderer.clearPlacementGrid?.();
     this.hud.setHint("");
   }
 

@@ -249,6 +249,61 @@ kbd {
 .menu-msg { margin-top: 12px; min-height: 20px; color: var(--muted); font-size: var(--fs-sm); }
 .menu-msg.error { color: var(--bad); }
 
+/* map options — segmented glass selectors */
+.map-opts {
+  margin-top: 22px;
+  padding-top: 20px;
+  border-top: 1px solid var(--edge);
+  text-align: left;
+}
+.map-opts-title {
+  font-size: var(--fs-xs);
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 14px;
+}
+.map-opt-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.map-opt-row:last-child { margin-bottom: 0; }
+.map-opt-label {
+  flex-shrink: 0;
+  font-size: var(--fs-sm);
+  color: var(--ink-dim);
+}
+.seg {
+  display: inline-flex;
+  gap: 3px;
+  padding: 3px;
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid var(--edge);
+  border-radius: 10px;
+  box-shadow: var(--inner-hi);
+}
+.seg-btn {
+  padding: 5px 11px;
+  font-family: inherit;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  cursor: pointer;
+  transition: background 0.14s, color 0.14s, border-color 0.14s;
+}
+.seg-btn:hover { color: var(--ink-dim); background: rgba(255, 255, 255, 0.05); }
+.seg-btn.is-active {
+  color: var(--accent);
+  background: var(--glass-hi);
+  border-color: rgba(76, 194, 255, 0.4);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
 /* controls reference — two-column key grid */
 .menu-help {
   margin-top: 26px;

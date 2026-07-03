@@ -14,11 +14,11 @@ const HASH_EVERY = 50;     // desync check cadence
 
 export class Game {
   // mode: 'ai' | 'host' | 'client'
-  constructor(mode, seed, net) {
+  constructor(mode, seed, net, opts) {
     this.mode = mode;
     this.net = net || null;
     this.localPlayer = mode === "client" ? 1 : 0;
-    this.sim = new Sim(seed);
+    this.sim = new Sim(seed, opts || {});
     this.ai = mode === "ai" ? new AI(1) : null;
 
     this.pending = [];       // local commands captured this tick

@@ -160,19 +160,44 @@ export class Effects {
     });
   }
 
-  // traveling projectile from a to b; sparks on arrival
-  bolt(ax, az, bx, bz, color) {
-    const ay = this.gy(ax, az), by = this.gy(bx, bz);
+  // traveling projectile from a to b; sparks on arrival. fromY/toY are ABSOLUTE
+  // world heights for the muzzle/impact (used for air combat so bolts angle
+  // correctly). When omitted, the legacy behavior applies: terrain lift + 0.62.
+  bolt(ax, az, bx, bz, color, fromY, toY) {
+    const ay = fromY !== undefined ? fromY : 0.62 + this.gy(ax, az);
+    const by = toY !== undefined ? toY : 0.55 + this.gy(bx, bz);
     const m = new THREE.Mesh(this.boltGeo, this.basic(color));
-    m.position.set(ax, 0.62 + ay, az);
-    m.lookAt(bx, 0.55 + by, bz);
+    m.position.set(ax, ay, az);
+    m.lookAt(bx, by, bz);
     const d = Math.hypot(bx - ax, bz - az);
     const dur = Math.max(0.06, d / 34);
-    this.add(m, { kind: "bolt", t: 0, dur, ax, ay, az, bx, by, bz, color });
-    // muzzle flash
+    // store absolute endpoint heights so update() lerps in world space
+    this.add(m, { kind: "bolt", t: 0, dur, ax, ay, az, bx, by, bz, color, absY: true });
+    // muzzle flash at the muzzle height
     const f = new THREE.Mesh(this.flashGeo, this.basic(color, 0.95));
-    f.position.set(ax + (bx - ax) / d * 0.35, 0.62 + ay, az + (bz - az) / d * 0.35);
+    f.position.set(ax + (bx - ax) / d * 0.35, ay, az + (bz - az) / d * 0.35);
     this.add(f, { kind: "flash", t: 0, dur: 0.07 });
+  }
+
+  // A render-only falling wreck: an object (silhouette or generic chunk) that
+  // tumbles and drops from `fromY` to the terrain over ~0.7s, then a ground
+  // explosion. Used when a flyer dies mid-air.
+  fallingWreck(x, z, fromY, color, silhouette) {
+    let obj = silhouette;
+    if (!obj) {
+      obj = new THREE.Mesh(
+        new THREE.DodecahedronGeometry(0.32),
+        new THREE.MeshStandardMaterial({ color, roughness: 0.6, metalness: 0.4, emissive: color, emissiveIntensity: 0.3 }));
+    }
+    obj.position.set(x, fromY, z);
+    const groundY = this.gy(x, z);
+    this.add(obj, {
+      kind: "wreck", t: 0, dur: 0.7, x, z, fromY, groundY, color,
+      spinx: (Math.random() - 0.5) * 12, spinz: (Math.random() - 0.5) * 12,
+      trail: 0,
+    });
+    // a little smoke plume trailing the fall
+    this.smoke.puff(x, fromY, z, 0.7, 0.9);
   }
 
   meleeHit(x, z, color) {
@@ -231,16 +256,33 @@ export class Effects {
       fx.t += dt;
       const p = fx.t / fx.dur;
       if (p >= 1) {
-        if (fx.kind === "bolt") this.sparks.burst(fx.bx, 0.55 + (fx.by || 0), fx.bz, 5, fx.color, 2, 0.3, 1);
+        if (fx.kind === "bolt") this.sparks.burst(fx.bx, fx.by || 0, fx.bz, 5, fx.color, 2, 0.3, 1);
+        if (fx.kind === "wreck") {
+          // impact: ground explosion where the wreck landed
+          this.unitDeath(fx.x, fx.z, fx.color);
+        }
         this.scene.remove(fx.obj);
-        fx.obj.material.dispose();
+        if (fx.obj.material?.dispose) fx.obj.material.dispose();
         this.live.splice(i, 1);
         continue;
       }
       switch (fx.kind) {
-        case "bolt":
-          fx.obj.position.set(fx.ax + (fx.bx - fx.ax) * p, 0.62 + (fx.ay || 0) + ((fx.by || 0) - (fx.ay || 0)) * p, fx.az + (fx.bz - fx.az) * p);
+        case "bolt": {
+          // absY bolts store absolute endpoint heights; legacy adds the 0.62 lift
+          const y0 = fx.absY ? fx.ay : 0.62 + (fx.ay || 0);
+          const y1 = fx.absY ? fx.by : 0.62 + (fx.by || 0);
+          fx.obj.position.set(fx.ax + (fx.bx - fx.ax) * p, y0 + (y1 - y0) * p, fx.az + (fx.bz - fx.az) * p);
           break;
+        }
+        case "wreck": {
+          // ease-in fall (accelerating), tumbling, occasional smoke trail
+          const yy = fx.fromY + (fx.groundY - fx.fromY) * (p * p);
+          fx.obj.position.set(fx.x, yy, fx.z);
+          fx.obj.rotation.x += fx.spinx * dt;
+          fx.obj.rotation.z += fx.spinz * dt;
+          if (fx.t - fx.trail > 0.12) { fx.trail = fx.t; this.smoke.puff(fx.x, yy, fx.z, 0.5, 0.6); }
+          break;
+        }
         case "flash":
           fx.obj.scale.setScalar(1 + p * 2.2);
           fx.obj.material.opacity = 0.95 * (1 - p);

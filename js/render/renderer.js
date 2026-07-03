@@ -10,7 +10,8 @@ import { FP, fpToTile } from "../core/fixed.js";
 import { makeRng } from "../core/fixed.js";
 import { BUILDINGS, PLAYER_COLORS } from "../core/data.js";
 import { RtsCamera } from "./camera.js";
-import { makeUnitVisual, makeBuildingVisual, makeMineralVisual, animateVisual, SHARED } from "./models.js";
+import { makeUnitVisual, makeBuildingVisual, makeMineralVisual, makeGeyserVisual, makeShrubVisual, animateVisual, animateShrub, SHARED } from "./models.js";
+import { UNITS } from "../core/data.js";
 import { THEMES } from "../core/map.js";
 import { Effects } from "./fx.js";
 
@@ -59,6 +60,7 @@ export class Renderer {
     this.buildRallyPool();
     this.buildQueuePaths();
     this.buildTargetRings();
+    this.buildPlacementGrid();
     this.taskFxTimers = new Map();   // entity id -> next spark time (render-only)
 
     // post-processing: MSAA target + bloom (threshold 1.0 = only HDR emissive blooms)
@@ -284,9 +286,21 @@ export class Renderer {
   buildDecos() {
     const decos = this.sim.map.decos || [];
     if (!decos.length) return;
-    const buckets = [[], [], []];               // by kind
+    const buckets = [[], [], [], []];           // by kind (3 = tall shrub)
     for (const d of decos) if (buckets[d.kind]) buckets[d.kind].push(d);
     const [c0, c1, c2] = this.theme.deco;
+
+    // kind 3: tall shrubs (LoS blockers) — animated groups, subtle sway.
+    this.shrubs = [];
+    for (const d of buckets[3]) {
+      const wx = d.x + 0.5, wz = d.y + 0.5;
+      // theme-tinted, biased toward the darker mid flora color
+      const g = makeShrubVisual(c2, (d.x * 13 + d.y * 7) & 0xff);
+      g.position.set(wx, this.heightAt(wx, wz), wz);
+      g.scale.setScalar(0.9 + ((d.x + d.y) % 4) / 8);
+      this.scene.add(g);
+      this.shrubs.push(g);
+    }
 
     // kind 0: crystal shard cluster (emissive octahedron)
     this.addDecoInstances(buckets[0], new THREE.OctahedronGeometry(0.22),
@@ -521,6 +535,66 @@ export class Renderer {
     }
   }
 
+  // ---------- build-grid placement overlay ----------
+
+  // Pool of 81 thin translucent quads (a 9x9 grid of tiles) for the placement
+  // overlay. Each cell is colored green (valid) / red (invalid) per canPlace.
+  buildPlacementGrid() {
+    this.gridSpan = 4;                      // 9x9 (center +/- 4)
+    this.gridPool = [];
+    // one shared quad geo, per-cell material so colors differ
+    const geo = new THREE.PlaneGeometry(0.9, 0.9);
+    for (let i = 0; i < 81; i++) {
+      const mat = new THREE.MeshBasicMaterial({
+        color: 0x7cff6b, transparent: true, opacity: 0.28,
+        depthWrite: false, side: THREE.DoubleSide,
+      });
+      const q = new THREE.Mesh(geo, mat);
+      q.rotation.x = -Math.PI / 2;
+      q.visible = false;
+      q.renderOrder = 2;
+      this.scene.add(q);
+      this.gridPool.push(q);
+    }
+    this.placementGrid = null;              // { type, tx, ty } while placing
+  }
+
+  // Called by input.updateGhost: show the overlay centered on the cursor tile.
+  // Recomputes cell colors only when the center tile changed (ghost moved).
+  setPlacementGrid(type, tx, ty) {
+    if (this.placementGrid && this.placementGrid.type === type &&
+        this.placementGrid.tx === tx && this.placementGrid.ty === ty) return;
+    this.placementGrid = { type, tx, ty };
+    this.refreshPlacementGrid();
+  }
+
+  clearPlacementGrid() {
+    this.placementGrid = null;
+    for (const q of this.gridPool) q.visible = false;
+  }
+
+  // Recompute cell positions + validity colors. Each CELL is colored by
+  // "if I clicked here" — canPlace(type, cellX - floor(size/2), ...).
+  refreshPlacementGrid() {
+    const g = this.placementGrid;
+    if (!g) return;
+    const d = BUILDINGS[g.type];
+    const off = d ? (d.size >> 1) : 0;
+    const span = this.gridSpan;
+    let i = 0;
+    for (let dz = -span; dz <= span; dz++) {
+      for (let dx = -span; dx <= span; dx++) {
+        const cellX = g.tx + dx, cellY = g.ty + dz;
+        const q = this.gridPool[i++];
+        const wx = cellX + 0.5, wz = cellY + 0.5;
+        q.position.set(wx, this.heightAt(wx, wz) + 0.05, wz);
+        const ok = this.sim.canPlace(g.type, cellX - off, cellY - off);
+        q.material.color.setHex(ok ? 0x7cff6b : 0xff5f4c);
+        q.visible = true;
+      }
+    }
+  }
+
   // Collect the targets of selected units (patch being mined, depot being
   // returned to, site being built, enemy being attacked) and ring them.
   updateOrderMarkers(t) {
@@ -614,11 +688,14 @@ export class Renderer {
   makeMesh(e) {
     let group;
     const color = e.owner >= 0 ? this.playerColors[e.owner] : null;
-    if (e.type === "mineral" || e.type === "geyser") {
-      group = makeMineralVisual(e);   // placeholder geyser visual; Wave 2 gives it its own
+    if (e.type === "geyser") {
+      group = makeGeyserVisual(e, this.theme.rock);
+    } else if (e.type === "mineral") {
+      group = makeMineralVisual(e);
     } else if (e.unit) {
       group = makeUnitVisual(e, color);
       this.addRingAndBar(group, e, 0.55, 1.25);
+      if (e.fly) this.setupFlyer(group, e);
     } else {
       group = makeBuildingVisual(e, color, e.size);
       this.addRingAndBar(group, e, e.size * 0.62, BUILDINGS[e.type].size + 0.6);
@@ -650,6 +727,92 @@ export class Renderer {
     group.userData.barFg = barFg;
   }
 
+  // Flyer extras: a scene-level blob shadow on the terrain below, and the
+  // selection ring is detached from the group so it stays at terrain level
+  // (the group itself rides at cruise altitude). Health bar stays in the group,
+  // lifted higher. Body-space bob/bank are driven per frame in render().
+  setupFlyer(group, e) {
+    const u = UNITS[e.type];
+    const radius = (u.radius || 100) / FP;
+    if (!this.blobShadowMat) {
+      this.blobShadowMat = new THREE.MeshBasicMaterial({
+        color: 0x000000, transparent: true, opacity: 0.32,
+        depthWrite: false,
+      });
+    }
+    const shadow = new THREE.Mesh(SHARED.blob, this.blobShadowMat);
+    shadow.rotation.x = -Math.PI / 2;
+    shadow.scale.setScalar(radius * 1.35);
+    shadow.renderOrder = -1;
+    this.scene.add(shadow);
+    group.userData.blobShadow = shadow;
+    group.userData.flyer = true;
+    group.userData.cruise = 2.2;
+    group.userData.yawPrev = 0;
+    // detach the selection ring so it draws at terrain level, not at altitude
+    const ring = group.userData.ring;
+    if (ring) {
+      group.remove(ring);
+      ring.rotation.x = -Math.PI / 2;
+      this.scene.add(ring);
+      group.userData.ringDetached = ring;
+    }
+    // lift the health bar above the flyer body
+    if (group.userData.bar) group.userData.bar.position.y = 1.4;
+    // higher bar altitude is applied on top of the group's cruise height
+  }
+
+  // Tank turret aim: face the current attack target if any, else the body's
+  // travel yaw. Writes g.userData.aimYaw (models.js smooths onto the turret).
+  updateTankAim(g, e, alpha) {
+    const o = e.order;
+    let aim;
+    if ((o?.kind === "attack") && this.sim.byId.has(o.targetId)) {
+      const tgt = this.sim.byId.get(o.targetId);
+      aim = Math.atan2(tgt.x - e.x, tgt.y - e.y);
+    } else if (e.x !== e.px || e.y !== e.py) {
+      aim = Math.atan2(e.x - e.px, e.y - e.py);
+    }
+    if (aim !== undefined) {
+      // aim is world yaw; the turret lives inside body (already yawed), so
+      // express it relative to the body's yaw.
+      g.userData.aimYaw = aim - (g.userData.body ? g.userData.body.rotation.y : 0);
+    }
+  }
+
+  // Turret pod tracking: each armed-building visual pivots toward the nearest
+  // visible enemy within ~7 tiles. Cheap render-side scan; aimYaw is smoothed
+  // in models.js. Called per frame for turret meshes.
+  updateTurretAim(g, e) {
+    const range = 7;
+    let best = null, bestD2 = range * range * FP * FP;
+    for (const o of this.sim.entities) {
+      if (o.owner < 0 || o.owner === e.owner || o.hp <= 0) continue;
+      if (!o.unit && !o.building) continue;
+      if (!this.entityVisible(o)) continue;
+      const dx = o.x - e.x, dy = o.y - e.y;
+      const d2 = dx * dx + dy * dy;
+      if (d2 < bestD2) { bestD2 = d2; best = o; }
+    }
+    if (best) g.userData.aimYaw = Math.atan2(best.x - e.x, best.y - e.y);
+  }
+
+  // Whether a refinery is actively being harvested (any own worker gathering
+  // from it). Cached per second to keep this off the per-frame hot path.
+  refineryHarvesting(e) {
+    const now = performance.now();
+    if (!this._harvestCache) this._harvestCache = new Map();
+    const c = this._harvestCache.get(e.id);
+    if (c && now - c.t < 1000) return c.v;
+    let v = false;
+    for (const u of this.sim.entities) {
+      if (u.unit && u.order?.kind === "gather" &&
+          u.order.targetId === e.id && u.order.resource === "gas") { v = true; break; }
+    }
+    this._harvestCache.set(e.id, { t: now, v });
+    return v;
+  }
+
   // ---------- per-frame sync ----------
 
   render(alpha, dt = 1 / 60) {
@@ -677,11 +840,26 @@ export class Renderer {
       }
       seen.add(e.id);
       g.visible = visible;
-      if (!visible) continue;
+      if (!visible) {
+        // keep the flyer's detached extras in sync with fog visibility
+        if (g.userData.blobShadow) g.userData.blobShadow.visible = false;
+        if (g.userData.ringDetached) g.userData.ringDetached.visible = false;
+        continue;
+      }
 
       const x = W2(e.px + (e.x - e.px) * alpha);
       const z = W2(e.py + (e.y - e.py) * alpha);
-      g.position.set(x, this.heightAt(x, z), z);
+      const terrainY = this.heightAt(x, z);
+      if (g.userData.flyer) {
+        // cruise altitude above terrain + gentle idle bob
+        const bob = Math.sin(t * 1.6 + e.id * 1.3) * 0.14;
+        g.position.set(x, terrainY + g.userData.cruise + bob, z);
+        // blob shadow directly below on the terrain surface
+        const sh = g.userData.blobShadow;
+        if (sh) { sh.position.set(x, terrainY + 0.03, z); sh.visible = g.visible; }
+      } else {
+        g.position.set(x, terrainY, z);
+      }
 
       // smoothed motion amount drives walk cycles
       const moving = (e.x !== e.px || e.y !== e.py) ? 1 : 0;
@@ -693,7 +871,23 @@ export class Renderer {
         let dy = targetYaw - g.userData.body.rotation.y;
         while (dy > Math.PI) dy -= Math.PI * 2;
         while (dy < -Math.PI) dy += Math.PI * 2;
-        g.userData.body.rotation.y += dy * Math.min(1, dt * 12);
+        const rate = g.userData.flyer ? Math.min(1, dt * 6) : Math.min(1, dt * 12);
+        g.userData.body.rotation.y += dy * rate;
+        // flyers bank/roll into turns: roll proportional to yaw delta, clamped
+        if (g.userData.flyer) {
+          const roll = Math.max(-0.6, Math.min(0.6, -dy * 2.2));
+          g.userData.body.rotation.z += (roll - g.userData.body.rotation.z) * Math.min(1, dt * 5);
+        }
+      } else if (g.userData.flyer && g.userData.body) {
+        // level out when not turning
+        g.userData.body.rotation.z += (0 - g.userData.body.rotation.z) * Math.min(1, dt * 3);
+      }
+      // turret/tank aim: face the attack target (or travel direction)
+      if (g.userData.anim) {
+        const k = g.userData.anim.kind;
+        if (k === "tank") this.updateTankAim(g, e, alpha);
+        else if (k === "turret" && e.done) this.updateTurretAim(g, e);
+        else if (k === "refinery" && e.done) g.userData.harvesting = this.refineryHarvesting(e);
       }
       animateVisual(g, e, t, amt);
 
@@ -731,7 +925,15 @@ export class Renderer {
 
       // selection ring + health bar
       const sel = this.selection.has(e.id);
-      if (g.userData.ring) {
+      if (g.userData.ringDetached) {
+        // flyer ring rides on the terrain below the unit, not at altitude
+        const r = g.userData.ringDetached;
+        r.visible = sel && g.visible;
+        if (sel) {
+          r.position.set(x, terrainY + 0.04, z);
+          r.material.opacity = 0.75 + Math.sin(t * 5) * 0.2;
+        }
+      } else if (g.userData.ring) {
         g.userData.ring.visible = sel;
         if (sel) g.userData.ring.material.opacity = 0.75 + Math.sin(t * 5) * 0.2;
       }
@@ -751,6 +953,8 @@ export class Renderer {
     for (const [id, g] of this.meshes) {
       if (!seen.has(id) && !this.sim.byId.has(id)) {
         this.scene.remove(g);
+        if (g.userData.blobShadow) this.scene.remove(g.userData.blobShadow);
+        if (g.userData.ringDetached) this.scene.remove(g.userData.ringDetached);
         this.meshes.delete(id);
         this.moveAmt.delete(id);
       }
@@ -762,6 +966,9 @@ export class Renderer {
 
     this.updateOrderMarkers(t);
     this.updateTaskSparks(t);
+
+    // subtle shrub sway (LoS-blocker concealment tufts)
+    if (this.shrubs) for (const s of this.shrubs) animateShrub(s, t);
 
     this.fx.update(dt);
     this.composer.render();
@@ -786,15 +993,35 @@ export class Renderer {
           const g = this.meshes.get(ev.attackerId);
           if (g?.userData.anim) g.userData.anim.recoil = 0.08;
           if (!vis && !this.sim.fog[this.localPlayer][fpToTile(ev.fy) * this.sim.map.w + fpToTile(ev.fx)]) break;
-          if (ev.ranged) this.fx.bolt(W2(ev.fx), W2(ev.fy), W2(ev.tx), W2(ev.ty), PLAYER_COLORS[ev.owner]);
-          else this.fx.meleeHit(W2(ev.tx), W2(ev.ty), PLAYER_COLORS[ev.owner]);
+          if (ev.ranged) {
+            // muzzle/impact heights: a flyer endpoint sits at cruise altitude,
+            // a ground endpoint at ~0.62. Attacker altitude = attacker unit's
+            // fly flag; target altitude = the shot's `air` flag.
+            const fromY = this.shotHeight(ev.attackerId, W2(ev.fx), W2(ev.fy), false);
+            const toY = this.shotHeight(ev.targetId, W2(ev.tx), W2(ev.ty), ev.air);
+            this.fx.bolt(W2(ev.fx), W2(ev.fy), W2(ev.tx), W2(ev.ty), PLAYER_COLORS[ev.owner], fromY, toY);
+          } else {
+            this.fx.meleeHit(W2(ev.tx), W2(ev.ty), PLAYER_COLORS[ev.owner]);
+          }
           break;
         }
-        case "death":
+        case "death": {
           if (!vis && ev.owner !== this.localPlayer) break;
-          if (ev.building) this.fx.buildingDeath(W2(ev.x), W2(ev.y), ev.size || 2);
-          else this.fx.unitDeath(W2(ev.x), W2(ev.y), PLAYER_COLORS[ev.owner]);
+          if (ev.building) { this.fx.buildingDeath(W2(ev.x), W2(ev.y), ev.size || 2); break; }
+          // a dying flyer: explode at altitude, then a falling wreck that drops
+          // to the terrain and detonates on the ground.
+          const flyer = !!UNITS[ev.type]?.fly;
+          if (flyer) {
+            const wx = W2(ev.x), wz = W2(ev.y);
+            const alt = this.heightAt(wx, wz) + 2.2;
+            this.fx.sparks.burst(wx, alt, wz, 22, PLAYER_COLORS[ev.owner], 4, 0.6);
+            this.fx.sparks.burst(wx, alt, wz, 8, 0xffb347, 2.5, 0.5);
+            this.fx.fallingWreck(wx, wz, alt, PLAYER_COLORS[ev.owner], null);
+          } else {
+            this.fx.unitDeath(W2(ev.x), W2(ev.y), PLAYER_COLORS[ev.owner]);
+          }
           break;
+        }
         case "complete":
           if (ev.owner === this.localPlayer) this.fx.shockRing(W2(ev.x), W2(ev.y), 0x7cff6b, 2.2, 0.6);
           break;
@@ -802,6 +1029,17 @@ export class Renderer {
           break; // spawn poof handled on mesh creation
       }
     }
+  }
+
+  // World height of a shot endpoint. `airHint` (the shot's `air` flag) forces
+  // altitude for the target; for the attacker we look up its entity fly flag.
+  // Turret/building attackers sit low; their muzzle is ~0.9 up their body.
+  shotHeight(entId, wx, wz, airHint) {
+    const e = this.sim.byId.get(entId);
+    const terrain = this.heightAt(wx, wz);
+    if (airHint || (e && e.fly)) return terrain + 2.2;   // cruise altitude
+    if (e && e.building) return terrain + 1.0;            // turret pod height
+    return terrain + 0.62;                                // ground muzzle
   }
 
   orderPing(wx, wz, color) { this.fx.ping(wx, wz, color); }
