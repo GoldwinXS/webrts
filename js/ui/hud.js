@@ -334,6 +334,8 @@ export class Hud {
   update() {
     const s = this.sim.supplyOf(this.pid);
     this.$minerals.textContent = this.sim.minerals[this.pid];
+    const gasEl = document.getElementById("res-gas");
+    if (gasEl) gasEl.textContent = this.sim.gas ? this.sim.gas[this.pid] : 0;
     this.$supply.textContent = `${s.used} / ${s.cap}`;
     this.$supply.classList.toggle("warn", s.used >= s.cap);
 
@@ -429,17 +431,22 @@ export class Hud {
 
     const slots = [];
     if (this.activeType === "worker") {
-      const order = ["depot", "barracks", "hq"];
-      const keys = ["q", "w", "e"];
-      order.forEach((b, i) =>
-        slots.push({ key: keys[i], cmd: `build-${b}`, label: BUILDINGS[b].name, sub: `${BUILDINGS[b].cost}` }));
+      const order = ["depot", "barracks", "refinery", "hq", "factory", "starport", "turret"];
+      const keys = ["q", "w", "e", "r", "t", "g", "v"];
+      order.forEach((b, i) => {
+        const d = BUILDINGS[b];
+        if (!d) return;
+        const cost = d.gasCost ? `${d.cost}m ${d.gasCost}g` : `${d.cost}`;
+        slots.push({ key: keys[i], cmd: `build-${b}`, label: d.name, sub: cost });
+      });
     }
     const activeBuilding = mine.find((e) => e.type === this.activeType && e.building && e.done);
     if (activeBuilding) {
       const keys = ["q", "w", "e", "r"];
       (BUILDINGS[activeBuilding.type].trains || []).forEach((t, i) => {
         const d = UNITS[t];
-        slots.push({ key: keys[i], cmd: `train-${t}`, label: d.name, sub: `${d.cost} · ${d.supply} supply` });
+        const cost = d.gasCost ? `${d.cost}m ${d.gasCost}g` : `${d.cost}`;
+        slots.push({ key: keys[i], cmd: `train-${t}`, label: d.name, sub: `${cost} · ${d.supply} supply` });
       });
     }
     if (anyUnits) {
@@ -498,7 +505,18 @@ export class Hud {
   }
 
   command(cmd) {
-    if (cmd.startsWith("build-")) this.input?.startPlacing(cmd.slice(6));
+    if (cmd.startsWith("build-")) {
+      const b = BUILDINGS[cmd.slice(6)];
+      if (b?.requires && !this.sim.hasBuilding(this.pid, b.requires)) {
+        this.audio.error();
+        return this.toast(`Requires ${BUILDINGS[b.requires].name}`);
+      }
+      if (b && !this.sim.canAfford(this.pid, b.cost, b.gasCost || 0)) {
+        this.audio.error();
+        return this.toast(b.gasCost && this.sim.gas[this.pid] < b.gasCost ? "Not enough gas" : "Not enough minerals");
+      }
+      this.input?.startPlacing(cmd.slice(6));
+    }
     else if (cmd.startsWith("train-")) {
       const t = cmd.slice(6);
       const d = UNITS[t];
@@ -517,7 +535,10 @@ export class Hud {
         .sort((a, b) => load(a) - load(b) || a.id - b.id);
       if (!candidates.length) { this.audio.error(); return this.toast("Production queues are full"); }
       const s = this.sim.supplyOf(this.pid);
-      if (!this.sim.canAfford(this.pid, d.cost)) { this.audio.error(); return this.toast("Not enough minerals"); }
+      if (!this.sim.canAfford(this.pid, d.cost, d.gasCost || 0)) {
+        this.audio.error();
+        return this.toast(d.gasCost && this.sim.gas[this.pid] < d.gasCost ? "Not enough gas" : "Not enough minerals");
+      }
       // supply is claimed when production starts, so queuing is allowed —
       // just warn that the queue will stall until a depot finishes
       if (s.used + d.supply > s.cap) this.toastInfo("Queued - waiting on supply");
