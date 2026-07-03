@@ -6,21 +6,34 @@ export class GameAudio {
     this.ctx = null;
     this.master = null;
     this.muted = localStorage.getItem("webrts-muted") === "1";
+    this.volume = 0.5;     // 0..1 user volume; scaled to gain in gainValue()
     this.lastAt = {};      // rate limiting per sound key
   }
 
   init() {
     if (this.ctx) return;
+    const stored = parseFloat(localStorage.getItem("webrts-volume"));
+    if (!Number.isNaN(stored)) this.volume = Math.max(0, Math.min(1, stored));
     this.ctx = new (window.AudioContext || window.webkitAudioContext)();
     this.master = this.ctx.createGain();
-    this.master.gain.value = this.muted ? 0 : 0.35;
+    this.master.gain.value = this.gainValue();
     this.master.connect(this.ctx.destination);
   }
+
+  // full volume (v=1) maps to gain 0.7; the historical full-volume level was
+  // 0.35, which is now the default v=0.5.
+  gainValue() { return this.muted ? 0 : this.volume * 0.7; }
 
   setMuted(m) {
     this.muted = m;
     localStorage.setItem("webrts-muted", m ? "1" : "0");
-    if (this.master) this.master.gain.value = m ? 0 : 0.35;
+    if (this.master) this.master.gain.value = this.gainValue();
+  }
+
+  setVolume(v) {
+    this.volume = Math.max(0, Math.min(1, v));
+    localStorage.setItem("webrts-volume", String(this.volume));
+    if (this.master && !this.muted) this.master.gain.value = this.gainValue();
   }
 
   limited(key, ms) {

@@ -19,24 +19,44 @@
   <!-- main menu -->
   <div id="menu">
     <div class="menu-box">
-      <h1>web<b>RTS</b></h1>
-      <p class="tagline">A classic real-time strategy game. Gather, build, destroy.</p>
-      <button id="btn-skirmish" class="menu-btn">Skirmish vs AI</button>
-      <div class="menu-row">
-        <button id="btn-host" class="menu-btn">Create Match</button>
-        <div class="join-group">
-          <input id="join-code" maxlength="5" placeholder="CODE" autocomplete="off" spellcheck="false" />
-          <button id="btn-join" class="menu-btn">Join</button>
-        </div>
+      <div class="menu-hero">
+        <h1>web<b>RTS</b></h1>
+        <p class="tagline">A classic real-time strategy game. Gather, build, destroy.</p>
       </div>
-      <div id="code-display" class="code hidden"></div>
-      <div id="menu-msg" class="menu-msg"></div>
+
+      <div class="menu-controls">
+        <button id="btn-skirmish" class="menu-btn primary">Skirmish vs AI</button>
+        <div class="menu-row">
+          <button id="btn-host" class="menu-btn">Create Match</button>
+          <div class="join-group">
+            <input id="join-code" maxlength="5" placeholder="CODE" autocomplete="off" spellcheck="false" />
+            <button id="btn-join" class="menu-btn">Join</button>
+          </div>
+        </div>
+        <div id="code-display" class="code hidden"></div>
+        <div id="menu-msg" class="menu-msg"></div>
+      </div>
+
       <div class="menu-help">
-        <div>Left-drag select · Double-click selects same type · Right-click move / gather / attack / set rally</div>
-        <div>Grid hotkeys on buttons (Q,W,E / A,S,D,F) · Tab cycles subgroup · Shift queues orders</div>
-        <div>Ctrl+1-9 set group · Shift+1-9 add · 1-9 recall (double-tap centers) · buildings groupable</div>
-        <div>F1 idle worker · F2 army · Ctrl+F5-F8 save camera, F5-F8 recall · Backspace cycles bases</div>
-        <div>Right-click minimap orders · Arrows / edge pan · Comma,Period rotate · Wheel zoom</div>
+        <div class="help-title">Reference</div>
+        <div class="help-grid">
+          <div class="help-item"><span class="help-keys"><kbd>L-drag</kbd></span><span class="help-desc">Box select units</span></div>
+          <div class="help-item"><span class="help-keys"><kbd>Dbl-click</kbd></span><span class="help-desc">Select same type</span></div>
+          <div class="help-item"><span class="help-keys"><kbd>R-click</kbd></span><span class="help-desc">Move / gather / attack / rally</span></div>
+          <div class="help-item"><span class="help-keys"><kbd>Q</kbd><kbd>W</kbd><kbd>E</kbd> <kbd>A</kbd><kbd>S</kbd><kbd>D</kbd><kbd>F</kbd></span><span class="help-desc">Command-card grid</span></div>
+          <div class="help-item"><span class="help-keys"><kbd>Tab</kbd></span><span class="help-desc">Cycle subgroup</span></div>
+          <div class="help-item"><span class="help-keys"><kbd>Shift</kbd></span><span class="help-desc">Queue orders</span></div>
+          <div class="help-item"><span class="help-keys"><kbd>Ctrl</kbd>+<kbd>1-9</kbd></span><span class="help-desc">Set control group</span></div>
+          <div class="help-item"><span class="help-keys"><kbd>Shift</kbd>+<kbd>1-9</kbd></span><span class="help-desc">Add to group</span></div>
+          <div class="help-item"><span class="help-keys"><kbd>1-9</kbd></span><span class="help-desc">Recall (dbl-tap centers)</span></div>
+          <div class="help-item"><span class="help-keys"><kbd>F1</kbd></span><span class="help-desc">Idle worker</span></div>
+          <div class="help-item"><span class="help-keys"><kbd>F2</kbd></span><span class="help-desc">Select army</span></div>
+          <div class="help-item"><span class="help-keys"><kbd>Backspace</kbd></span><span class="help-desc">Cycle bases</span></div>
+          <div class="help-item"><span class="help-keys"><kbd>Ctrl</kbd>+<kbd>F5-F8</kbd></span><span class="help-desc">Save camera</span></div>
+          <div class="help-item"><span class="help-keys"><kbd>F5-F8</kbd></span><span class="help-desc">Recall camera</span></div>
+          <div class="help-item"><span class="help-keys"><kbd>Arrows</kbd> / edge</span><span class="help-desc">Pan camera</span></div>
+          <div class="help-item"><span class="help-keys"><kbd>,</kbd><kbd>.</kbd> / <kbd>Wheel</kbd></span><span class="help-desc">Rotate / zoom</span></div>
+        </div>
       </div>
     </div>
   </div>
@@ -50,15 +70,23 @@
       <span class="res"><svg viewBox="0 0 16 16" width="14" height="14"><rect x="2" y="6" width="12" height="8" rx="1" fill="#8b949e"/><rect x="5" y="2" width="6" height="4" rx="1" fill="#8b949e"/></svg>
         <span id="res-supply">0 / 0</span></span>
       <span id="net-status" class="status hidden"></span>
-      <button id="btn-mute" class="icon-btn" title="Mute">
-        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" fill="currentColor" stroke="none"/>
-          <path class="wave" d="M15.5 8.5a5 5 0 0 1 0 7"/>
-          <path class="wave" d="M18 6a8.5 8.5 0 0 1 0 12"/>
-          <line class="cross" x1="15" y1="9" x2="21" y2="15"/>
-          <line class="cross" x1="21" y1="9" x2="15" y2="15"/>
-        </svg>
-      </button>
+      <div class="topbar-actions">
+        <button id="btn-mute" class="icon-btn" title="Mute">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" fill="currentColor" stroke="none"/>
+            <path class="wave" d="M15.5 8.5a5 5 0 0 1 0 7"/>
+            <path class="wave" d="M18 6a8.5 8.5 0 0 1 0 12"/>
+            <line class="cross" x1="15" y1="9" x2="21" y2="15"/>
+            <line class="cross" x1="21" y1="9" x2="15" y2="15"/>
+          </svg>
+        </button>
+        <button id="btn-settings" class="icon-btn" title="Settings">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+          </svg>
+        </button>
+      </div>
     </div>
 
     <div id="hint" class="hint hidden"></div>
@@ -82,7 +110,43 @@
   <div id="gameover" class="hidden">
     <div class="menu-box">
       <h1></h1>
-      <button id="btn-again" class="menu-btn">Play Again</button>
+      <button id="btn-again" class="menu-btn primary">Play Again</button>
+    </div>
+  </div>
+
+  <!-- settings modal -->
+  <div id="settings" class="hidden">
+    <div id="settings-backdrop"></div>
+    <div class="settings-panel" role="dialog" aria-modal="true" aria-label="Settings">
+      <div class="settings-head">
+        <h2>Settings</h2>
+        <button id="btn-settings-close" class="icon-btn" title="Close">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="6" y1="6" x2="18" y2="18"/>
+            <line x1="18" y1="6" x2="6" y2="18"/>
+          </svg>
+        </button>
+      </div>
+      <div class="settings-body">
+        <section class="settings-section">
+          <div class="settings-label">Audio</div>
+          <div class="settings-row">
+            <label for="set-volume">Master volume</label>
+            <div class="vol-control">
+              <input id="set-volume" type="range" min="0" max="100" step="1" />
+              <span id="set-volume-val" class="vol-val">50%</span>
+            </div>
+          </div>
+          <div class="settings-row">
+            <span>Sound</span>
+            <button id="set-mute" class="toggle-btn" type="button">On</button>
+          </div>
+        </section>
+        <section class="settings-section">
+          <div class="settings-label">Keybindings</div>
+          <div id="keybind-table" class="keybind-table"></div>
+        </section>
+      </div>
     </div>
   </div>
 

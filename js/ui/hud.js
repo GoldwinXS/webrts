@@ -1,6 +1,7 @@
 // DOM HUD: resource bar, selection panel, command card, minimap, toasts.
 import { FP, fpToTile } from "../core/fixed.js";
 import { UNITS, BUILDINGS, PLAYER_COLORS, MAX_QUEUE } from "../core/data.js";
+import { KEYS } from "./keys.js";
 
 export class Hud {
   constructor(game, renderer, audio) {
@@ -45,7 +46,10 @@ export class Hud {
     this.$mute.addEventListener("click", () => {
       this.audio.setMuted(!this.audio.muted);
       this.updateMuteIcon();
+      this.syncSettings();
     });
+
+    this.initSettings();
 
     document.getElementById("hud").classList.remove("hidden");
   }
@@ -53,6 +57,83 @@ export class Hud {
   updateMuteIcon() {
     this.$mute.classList.toggle("muted", this.audio.muted);
     this.$mute.title = this.audio.muted ? "Unmute" : "Mute";
+  }
+
+  // ---------- settings modal ----------
+
+  initSettings() {
+    this.$settings = document.getElementById("settings");
+    this.$volume = document.getElementById("set-volume");
+    this.$volumeVal = document.getElementById("set-volume-val");
+    this.$setMute = document.getElementById("set-mute");
+
+    document.getElementById("btn-settings").addEventListener("click", () => this.openSettings());
+    document.getElementById("btn-settings-close").addEventListener("click", () => this.closeSettings());
+    document.getElementById("settings-backdrop").addEventListener("click", () => this.closeSettings());
+
+    // master volume slider (0..100 -> 0..1)
+    this.$volume.addEventListener("input", () => {
+      const v = this.$volume.value / 100;
+      this.audio.setVolume(v);
+      this.$volumeVal.textContent = `${this.$volume.value}%`;
+    });
+
+    // mute toggle inside the modal
+    this.$setMute.addEventListener("click", () => {
+      this.audio.setMuted(!this.audio.muted);
+      this.updateMuteIcon();
+      this.syncSettings();
+    });
+
+    this.buildKeybindTable();
+    this.syncSettings();
+  }
+
+  // reflect current audio state into the modal controls
+  syncSettings() {
+    const pct = Math.round((this.audio.volume ?? 0.5) * 100);
+    this.$volume.value = pct;
+    this.$volumeVal.textContent = `${pct}%`;
+    this.$setMute.textContent = this.audio.muted ? "Off" : "On";
+    this.$setMute.classList.toggle("off", this.audio.muted);
+  }
+
+  openSettings() { this.syncSettings(); this.$settings.classList.remove("hidden"); }
+  closeSettings() { this.$settings.classList.add("hidden"); }
+
+  // read-only keybind reference: rebindable actions from KEYS + fixed keys
+  buildKeybindTable() {
+    const table = document.getElementById("keybind-table");
+    if (!table) return;
+    const chip = (k) => `<kbd>${k}</kbd>`;
+    const row = (action, keys) =>
+      `<div class="keybind-row"><span class="kb-action">${action}</span><span class="kb-keys">${keys}</span></div>`;
+    const seq = (arr, sep = " / ") => arr.map((k) => chip(k.toUpperCase())).join(sep);
+
+    const rebindable = [
+      ["Idle worker", seq(KEYS.idleWorker)],
+      ["Select army", seq(KEYS.selectArmy)],
+      ["Save / recall camera", `${chip("Ctrl")}+${seq(KEYS.cameraSlots, "/")} · ${seq(KEYS.cameraSlots, "/")}`],
+      ["Cycle bases", seq(KEYS.cycleBase)],
+      ["Rotate left / right", `${seq(KEYS.rotateLeft)} / ${seq(KEYS.rotateRight)}`],
+    ];
+
+    const fixed = [
+      ["Command-card grid", `${chip("Q")}${chip("W")}${chip("E")}${chip("A")}${chip("S")}${chip("D")}${chip("F")}`],
+      ["Cycle subgroup", chip("Tab")],
+      ["Queue orders", chip("Shift")],
+      ["Set control group", `${chip("Ctrl")}+${chip("1-9")}`],
+      ["Add to group", `${chip("Shift")}+${chip("1-9")}`],
+      ["Recall group", `${chip("1-9")} (dbl-tap centers)`],
+      ["Pan camera", `${chip("Arrows")} / edge`],
+      ["Zoom", chip("Wheel")],
+    ];
+
+    let html = `<div class="keybind-sep">Rebindable</div>`;
+    for (const [a, k] of rebindable) html += row(a, k);
+    html += `<div class="keybind-sep">Fixed</div>`;
+    for (const [a, k] of fixed) html += row(a, k);
+    table.innerHTML = html;
   }
 
   // ---------- per-frame ----------
