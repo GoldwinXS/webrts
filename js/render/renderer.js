@@ -805,17 +805,19 @@ export class Renderer {
       const { line, flag } = slot;
 
       const rx = W2(b.rally.x), rz = W2(b.rally.y);
+      const bx = W2(b.x), bz = W2(b.y);
       line.visible = true;
       const pts = line.geometry.attributes.position;
-      pts.setXYZ(0, W2(b.x), 0.12, W2(b.y));
-      pts.setXYZ(1, rx, 0.12, rz);
+      // follow the terrain at both ends so the line/flag sit on the ground
+      pts.setXYZ(0, bx, this.heightAt(bx, bz) + 0.12, bz);
+      pts.setXYZ(1, rx, this.heightAt(rx, rz) + 0.12, rz);
       pts.needsUpdate = true;
       line.computeLineDistances();
       const onMineral = b.rally.targetId && sim.byId.get(b.rally.targetId)?.type === "mineral";
       line.material.color.setHex(onMineral ? 0x63e8db : 0x7cff6b);
 
       flag.visible = true;
-      flag.position.set(rx, 0, rz);
+      flag.position.set(rx, this.heightAt(rx, rz), rz);
       flag.userData.flag.rotation.y = Math.sin(t * 3) * 0.15;
     }
     for (; i < this.rallyPool.length; i++) {
@@ -900,7 +902,8 @@ export class Renderer {
         const wx = cellX + 0.5, wz = cellY + 0.5;
         q.position.set(wx, this.heightAt(wx, wz) + 0.05, wz);
         let ok = cellX >= 0 && cellY >= 0 && cellX < w && cellY < h &&
-          !sim.blocked[cellY * w + cellX];
+          !sim.blocked[cellY * w + cellX] &&
+          !(sim.map.rampTiles && sim.map.rampTiles[cellY * w + cellX]);
         if (ok) {
           const gey = sim.geyserInFootprint?.(cellX, cellY, 1);
           if (d?.onGeyser) { /* refinery: geyser tiles are the point */ }

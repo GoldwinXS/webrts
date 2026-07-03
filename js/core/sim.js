@@ -173,9 +173,12 @@ export class Sim {
     if (!d) return false;
     const { w, h } = this.map;
     if (tx < 0 || ty < 0 || tx + d.size > w || ty + d.size > h) return false;
+    const ramps = this.map.rampTiles;
     for (let y = ty; y < ty + d.size; y++)
-      for (let x = tx; x < tx + d.size; x++)
+      for (let x = tx; x < tx + d.size; x++) {
         if (this.blocked[y * w + x]) return false;
+        if (ramps && ramps[y * w + x]) return false;   // no building on ramps
+      }
     // don't allow placement on top of mineral patches or units
     const cx = tx * FP + (d.size * FP >> 1), cy = ty * FP + (d.size * FP >> 1);
     for (const e of this.entities) {
@@ -1057,6 +1060,16 @@ export class Sim {
   travelTo(u, x, y, speed, chasing) {
     const far = dist2(u.x, u.y, x, y);
     if (far <= FP * FP / 16) { u.path = null; return true; }
+
+    // Ground units slow on ramps: the sim moves in 2D at a constant tile
+    // rate, but a ramp also gains elevation, so at constant 2D speed a unit
+    // visibly races up the slope. Slowing it here keeps ramp travel looking
+    // right and makes ramps the tactical slow-chokes they should be.
+    // (Deterministic: rampTiles + fpToTile are integer sim data.)
+    if (!u.fly && this.map.rampTiles &&
+        this.map.rampTiles[fpToTile(u.y) * this.map.w + fpToTile(u.x)]) {
+      speed = (speed * 60 / 100) | 0;
+    }
 
     // Flyers ignore terrain entirely: straight-line beeline every tick, no
     // pathfinding and no blocked-tile ejection (they live on the air layer).
