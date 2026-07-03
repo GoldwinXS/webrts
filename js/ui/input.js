@@ -185,7 +185,7 @@ export class Input {
       const v = new THREE.Vector3();
       for (const ent of this.sim.entities) {
         if (ent.owner !== this.pid || !ent.unit) continue;
-        v.set(ent.x / FP, 0.4, ent.y / FP).project(this.renderer.camera.cam);
+        v.set(ent.x / FP, this.renderer.heightAt(ent.x / FP, ent.y / FP) + (ent.fly ? 2.2 : 0.4), ent.y / FP).project(this.renderer.camera.cam);
         const sx = (v.x + 1) / 2 * innerWidth, sy = (-v.y + 1) / 2 * innerHeight;
         if (sx >= x0 && sx <= x1 && sy >= y0 && sy <= y1) this.selection.add(ent.id);
       }

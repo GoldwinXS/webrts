@@ -743,7 +743,6 @@ export class Renderer {
     const arr = this.queuePathPos.array;
     const col = this.queuePathCol.array;
     const cap = this.queueMaxSegments;
-    const Y = 0.14;
     let seg = 0;
 
     const KIND_COLORS = {
@@ -755,11 +754,12 @@ export class Renderer {
       build: [1.0, 0.70, 0.28],
     };
 
+    // follow the terrain: each endpoint sits at ground height + a small lift
     const push = (ax, az, bx, bz, c) => {
       if (seg >= cap) return false;
       const i = seg * 6;
-      arr[i] = ax; arr[i + 1] = Y; arr[i + 2] = az;
-      arr[i + 3] = bx; arr[i + 4] = Y; arr[i + 5] = bz;
+      arr[i] = ax; arr[i + 1] = this.heightAt(ax, az) + 0.14; arr[i + 2] = az;
+      arr[i + 3] = bx; arr[i + 4] = this.heightAt(bx, bz) + 0.14; arr[i + 5] = bz;
       col[i] = c[0]; col[i + 1] = c[1]; col[i + 2] = c[2];
       col[i + 3] = c[0]; col[i + 4] = c[1]; col[i + 5] = c[2];
       seg++;
@@ -949,7 +949,8 @@ export class Renderer {
       const target = sim.byId.get(tid);
       const ring = this.targetRings[i++];
       ring.visible = true;
-      ring.position.set(W2(target.x), 0.04, W2(target.y));
+      const trx = W2(target.x), trz = W2(target.y);
+      ring.position.set(trx, this.heightAt(trx, trz) + 0.04, trz);
       const base = target.building ? target.size * 0.75 : 0.8;
       ring.scale.setScalar(base + Math.sin(t * 4) * 0.06);
       ring.material.color.setHex(color);
@@ -992,7 +993,7 @@ export class Renderer {
         this.taskFxTimers.set(e.id, t + 0.28 + (e.id % 5) * 0.05);
         const cx = W2(e.x) + (W2(target.x) - W2(e.x)) * 0.55;
         const cz = W2(e.y) + (W2(target.y) - W2(e.y)) * 0.55;
-        this.fx.sparks.burst(cx, 0.4, cz, count, color, 1.1, 0.3, 1.4);
+        this.fx.sparks.burst(cx, this.heightAt(cx, cz) + 0.4, cz, count, color, 1.1, 0.3, 1.4);
       }
     }
   }
