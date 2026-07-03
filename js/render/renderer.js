@@ -6,7 +6,7 @@ import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
 import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
-import { FP, fpToTile } from "../core/fixed.js";
+import { FP, HALF, fpToTile } from "../core/fixed.js";
 import { makeRng } from "../core/fixed.js";
 import { BUILDINGS, PLAYER_COLORS } from "../core/data.js";
 import { RtsCamera } from "./camera.js";
@@ -371,9 +371,11 @@ export class Renderer {
     ]);
     const mat = new THREE.LineDashedMaterial({
       color: 0x7cff6b, dashSize: 0.45, gapSize: 0.3,
-      transparent: true, opacity: 0.65, depthWrite: false,
+      transparent: true, opacity: 0.65,
+      depthWrite: false, depthTest: false,   // UI overlay: never hide under terrain
     });
     const line = new THREE.Line(geo, mat);
+    line.renderOrder = 5;
     line.visible = false;
     line.frustumCulled = false;
     this.scene.add(line);
@@ -403,9 +405,11 @@ export class Renderer {
     geo.setAttribute("color", this.queuePathCol);
     geo.setDrawRange(0, 0);
     const mat = new THREE.LineBasicMaterial({
-      vertexColors: true, transparent: true, opacity: 0.5, depthWrite: false,
+      vertexColors: true, transparent: true, opacity: 0.5,
+      depthWrite: false, depthTest: false,   // UI overlay: never hide under terrain
     });
     this.queuePaths = new THREE.LineSegments(geo, mat);
+    this.queuePaths.renderOrder = 5;
     this.queuePaths.frustumCulled = false;
     this.scene.add(this.queuePaths);
   }
@@ -546,7 +550,7 @@ export class Renderer {
     const geo = new THREE.PlaneGeometry(0.9, 0.9);
     for (let i = 0; i < 81; i++) {
       const mat = new THREE.MeshBasicMaterial({
-        color: 0x7cff6b, transparent: true, opacity: 0.28,
+        color: 0x7cff6b, transparent: true, opacity: 0.16,
         depthWrite: false, side: THREE.DoubleSide,
       });
       const q = new THREE.Mesh(geo, mat);
@@ -573,14 +577,19 @@ export class Renderer {
     for (const q of this.gridPool) q.visible = false;
   }
 
-  // Recompute cell positions + validity colors. Each CELL is colored by
-  // "if I clicked here" — canPlace(type, cellX - floor(size/2), ...).
+  // Recompute cell positions + validity colors. SC2 semantics: each CELL
+  // shows whether THAT TILE is buildable ground (the ghost's own green/red
+  // still communicates whether the whole footprint fits). For deposit
+  // buildings the resource-clearance zone shows red so the "no-CP ring"
+  // around minerals/geysers is visible.
   refreshPlacementGrid() {
     const g = this.placementGrid;
     if (!g) return;
     const d = BUILDINGS[g.type];
-    const off = d ? (d.size >> 1) : 0;
+    const sim = this.sim;
+    const { w, h } = sim.map;
     const span = this.gridSpan;
+    const clearFp = (d?.deposit ? 6 : 0) * FP; // HQ_RESOURCE_CLEARANCE
     let i = 0;
     for (let dz = -span; dz <= span; dz++) {
       for (let dx = -span; dx <= span; dx++) {
@@ -588,7 +597,20 @@ export class Renderer {
         const q = this.gridPool[i++];
         const wx = cellX + 0.5, wz = cellY + 0.5;
         q.position.set(wx, this.heightAt(wx, wz) + 0.05, wz);
-        const ok = this.sim.canPlace(g.type, cellX - off, cellY - off);
+        let ok = cellX >= 0 && cellY >= 0 && cellX < w && cellY < h &&
+          !sim.blocked[cellY * w + cellX];
+        if (ok) {
+          const gey = sim.geyserInFootprint?.(cellX, cellY, 1);
+          if (d?.onGeyser) { /* refinery: geyser tiles are the point */ }
+          else if (gey) ok = false;
+          // deposit clearance ring: tile too close to any resource
+          if (ok && clearFp) {
+            const cx = cellX * FP + HALF, cy = cellY * FP + HALF;
+            const near = sim.nearestEntity(cx, cy, clearFp,
+              (e) => e.type === "mineral" || e.type === "geyser");
+            if (near) ok = false;
+          }
+        }
         q.material.color.setHex(ok ? 0x7cff6b : 0xff5f4c);
         q.visible = true;
       }
