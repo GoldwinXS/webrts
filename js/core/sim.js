@@ -174,10 +174,15 @@ export class Sim {
     const { w, h } = this.map;
     if (tx < 0 || ty < 0 || tx + d.size > w || ty + d.size > h) return false;
     const ramps = this.map.rampTiles;
+    const H = this.map.height;
+    let lvl = -1;
     for (let y = ty; y < ty + d.size; y++)
       for (let x = tx; x < tx + d.size; x++) {
-        if (this.blocked[y * w + x]) return false;
-        if (ramps && ramps[y * w + x]) return false;   // no building on ramps
+        const idx = y * w + x;
+        if (this.blocked[idx]) return false;
+        if (ramps && ramps[idx]) return false;          // no building on ramps
+        // footprint must be one flat level — no straddling a cliff/slope edge
+        if (H) { if (lvl < 0) lvl = H[idx]; else if (H[idx] !== lvl) return false; }
       }
     // don't allow placement on top of mineral patches or units
     const cx = tx * FP + (d.size * FP >> 1), cy = ty * FP + (d.size * FP >> 1);
@@ -384,6 +389,22 @@ export class Sim {
       }
       case "ability": {
         this.applyAbility(pid, c);
+        break;
+      }
+      case "cancel": {
+        // remove a queued item and refund its cost
+        const b = own(c.buildingId);
+        if (!b || !b.building || !b.queue.length) break;
+        const idx = Math.min(Math.max(c.index | 0, 0), b.queue.length - 1);
+        const item = b.queue[idx];
+        if (item.research) {
+          const up = UPGRADES[item.research];
+          if (up) { this.minerals[pid] += up.cost; this.gas[pid] += up.gasCost || 0; }
+        } else {
+          const d = UNITS[item.type];
+          if (d) { this.minerals[pid] += d.cost; this.gas[pid] += d.gasCost || 0; }
+        }
+        b.queue.splice(idx, 1);
         break;
       }
     }
@@ -809,6 +830,12 @@ export class Sim {
             // rally onto minerals: balance across the line, not one patch
             const patch = this.pickPatch(target, FP * 6) || (target.amount > 0 ? target : null);
             if (patch) u.order = { kind: "gather", targetId: patch.id, phase: "to", resource: "minerals" };
+          } else if (u.type === "worker" && target && (target.type === "refinery" || target.type === "geyser")) {
+            // rally onto gas: send workers to a finished refinery on that spot
+            const ref = target.type === "refinery" ? target
+              : this.entities.find((e) => e.type === "refinery" && e.done && e.geyserId === target.id);
+            if (ref && ref.done) u.order = { kind: "gather", targetId: ref.id, phase: "to", resource: "gas" };
+            else u.order = { kind: "move", x: b.rally.x, y: b.rally.y };
           } else {
             u.order = { kind: "move", x: b.rally.x, y: b.rally.y };
           }

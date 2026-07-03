@@ -408,11 +408,12 @@ export class Hud {
         // research items carry {research} instead of {type}; chip shows "R%".
         const total = item.research ? UPGRADES[item.research].time : UNITS[item.type].buildTime;
         const glyph = item.research ? "R" : UNITS[item.type].name.charAt(0);
+        const attrs = `class="q-item${i === 0 ? " q-head" : ""}" data-cancel="${b.id}:${i}" title="Cancel (click)"`;
         if (i === 0) {
           const pct = (100 - (item.remaining / total) * 100) | 0;
-          chips += `<span class="q-item q-head">${item.research ? "R" : ""}${pct}%</span>`;
+          chips += `<span ${attrs}>${item.research ? "R" : ""}${pct}%</span>`;
         } else {
-          chips += `<span class="q-item">${glyph}</span>`;
+          chips += `<span ${attrs}>${glyph}</span>`;
         }
       });
       html += `<div class="queue-row"><span class="q-name">${name}</span><span class="q-items">${chips}</span></div>`;
@@ -423,6 +424,15 @@ export class Hud {
       row.addEventListener("click", () => {
         this.activeType = row.dataset.type;
         this.cardSig = "";
+        this.refreshSelection();
+      });
+    }
+    for (const chip of this.$selPanel.querySelectorAll(".q-item[data-cancel]")) {
+      chip.addEventListener("pointerdown", (e) => e.stopPropagation());
+      chip.addEventListener("click", () => {
+        const [bid, idx] = chip.dataset.cancel.split(":").map(Number);
+        this.game.issue({ t: "cancel", buildingId: bid, index: idx });
+        this.audio.ack();
         this.refreshSelection();
       });
     }

@@ -185,6 +185,19 @@ export class Renderer {
     return top + (bot - top) * fz;
   }
 
+  // Discrete flat height of the tile under a world point. Buildings and
+  // resources sit on this (not the smoothed heightAt) so they stay level
+  // instead of tilting onto the smoothed cliff-edge slope.
+  tileFlatHeight(wx, wz) {
+    const H = this.sim.map.height;
+    if (!H) return 0;
+    const w = this.sim.map.w, h = this.sim.map.h;
+    let tx = wx | 0, tz = wz | 0;
+    if (tx < 0) tx = 0; else if (tx >= w) tx = w - 1;
+    if (tz < 0) tz = 0; else if (tz >= h) tz = h - 1;
+    return H[tz * w + tx] * HSCALE;
+  }
+
   buildGround() {
     const { w, h } = this.sim.map;
     // static terrain painted once; fog composited over it on updates
@@ -1185,6 +1198,17 @@ export class Renderer {
         // blob shadow directly below on the terrain surface
         const sh = g.userData.blobShadow;
         if (sh) { sh.position.set(x, terrainY + 0.03, z); sh.visible = g.visible; }
+      } else if (e.building || e.type === "geyser" || e.type === "mineral") {
+        // buildings & resources sit flat on their tile level (not the smoothed
+        // slope). A refinery snaps onto the geyser it covers.
+        let px = x, pz = z;
+        if (e.type === "refinery" && e.geyserId) {
+          const gey = this.sim.byId.get(e.geyserId);
+          if (gey) { px = W2(gey.x); pz = W2(gey.y); }
+        }
+        g.position.set(px, this.tileFlatHeight(px, pz), pz);
+        // hide a geyser vent once a refinery is built over it
+        if (e.type === "geyser") g.visible = g.visible && !this.sim.refineryOnGeyser(e.id);
       } else {
         g.position.set(x, terrainY, z);
       }

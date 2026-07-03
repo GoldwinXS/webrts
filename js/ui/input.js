@@ -207,21 +207,26 @@ export class Input {
       if (near && !(target && target.owner >= 0)) target = near;
     }
 
-    // no units selected but finished buildings are: set rally on ALL of them
+    // no units selected but finished buildings are: set rally on ALL of them.
+    // Rally can target the ground, a mineral/geyser/refinery (gather rally),
+    // or any entity/unit (flag snaps to it).
     if (!ids.length) {
       const buildings = this.mySelected().filter((e) => e.building && e.done);
       if (buildings.length && g) {
-        const onMineral = target?.type === "mineral";
-        // rallying onto minerals snaps the flag to the patch itself
-        const rx = onMineral ? target.x : g.x;
-        const ry = onMineral ? target.y : g.y;
+        // gather-rally when the target is a resource or our own refinery
+        const gatherTarget = target && (target.type === "mineral" || target.type === "geyser" ||
+          (target.type === "refinery" && target.owner === this.pid && target.done));
+        // snap the flag onto whatever entity was clicked (resource or unit)
+        const rx = target ? target.x : g.x;
+        const ry = target ? target.y : g.y;
         for (const b of buildings) {
-          this.game.issue({ t: "rally", buildingId: b.id, x: rx, y: ry, targetId: onMineral ? target.id : 0 });
+          this.game.issue({ t: "rally", buildingId: b.id, x: rx, y: ry, targetId: gatherTarget ? target.id : 0 });
         }
-        this.renderer.orderPing(rx / FP, ry / FP, onMineral ? "#63e8db" : "#7cff6b");
+        const gas = target && (target.type === "geyser" || target.type === "refinery");
+        this.renderer.orderPing(rx / FP, ry / FP, gatherTarget ? (gas ? "#7cd94f" : "#63e8db") : "#7cff6b");
         this.audio.rally();
-        this.hud.toastInfo(onMineral
-          ? "Rally set: workers will mine"
+        this.hud.toastInfo(gatherTarget
+          ? (gas ? "Rally set: workers will gather gas" : "Rally set: workers will mine")
           : buildings.length > 1 ? `Rally set for ${buildings.length} buildings` : "Rally point set");
       }
       return;
