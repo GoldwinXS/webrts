@@ -10,14 +10,21 @@ import { FP, HALF, fpToTile } from "../core/fixed.js";
 import { makeRng } from "../core/fixed.js";
 import { BUILDINGS, PLAYER_COLORS } from "../core/data.js";
 import { RtsCamera } from "./camera.js";
-import { makeUnitVisual, makeBuildingVisual, makeMineralVisual, makeGeyserVisual, makeShrubVisual, animateVisual, animateShrub, SHARED } from "./models.js";
+import { makeUnitVisual, makeBuildingVisual, makeMineralVisual, makeGeyserVisual, makeShrubVisual, animateVisual, animateShrub, SHARED, propToon, toonGradient, barrierMaterials } from "./models.js";
 import { UNITS } from "../core/data.js";
 import { THEMES } from "../core/map.js";
 import { Effects } from "./fx.js";
 
 const W2 = (v) => v / FP;   // fp -> world units (1 tile = 1.0)
-const PX = 12;              // ground texture pixels per tile
+const PX = 16;              // ground texture pixels per tile (56*16=896, fine)
 const HSCALE = 0.55;        // world units of elevation per height level
+
+// clamp a 0..255 channel
+const CH = (v) => (v < 0 ? 0 : v > 255 ? 255 : v | 0);
+// lighten/shift an [r,g,b] toward white by k (0..1) — for stepped elevation tones
+const lift = (c, k) => [CH(c[0] + (255 - c[0]) * k), CH(c[1] + (255 - c[1]) * k), CH(c[2] + (255 - c[2]) * k)];
+const rgbStr = (c) => `rgb(${c[0] | 0},${c[1] | 0},${c[2] | 0})`;
+const hexToRgb = (h) => [(h >> 16) & 255, (h >> 8) & 255, h & 255];
 
 export class Renderer {
   constructor(canvas, sim, localPlayer) {
@@ -29,7 +36,7 @@ export class Renderer {
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.35;
+    this.renderer.toneMappingExposure = 1.25;
 
     this.theme = THEMES[sim.map.theme || 0] || THEMES[0];
     this.scene = new THREE.Scene();
@@ -49,7 +56,7 @@ export class Renderer {
     this.buildHeightGrid();
     this.buildLights();
     this.buildGround();
-    this.buildRocks();
+    this.buildBarriers();
     this.buildDecos();
     this.buildStars();
     this.fx = new Effects(this.scene);
@@ -79,8 +86,10 @@ export class Renderer {
   }
 
   buildLights() {
-    this.scene.add(new THREE.AmbientLight(0x8a9cbd, 0.65));
-    const sun = new THREE.DirectionalLight(0xffe8c8, 1.9);
+    // Toon pass: raised ambient lifts shadow floors (softer, lighter shadows)
+    // so the stepped gradient ramps read as clean bands, not muddy darkness.
+    this.scene.add(new THREE.AmbientLight(0x9fb0cf, 0.9));
+    const sun = new THREE.DirectionalLight(0xffe8c8, 1.7);   // warm key light
     sun.position.set(this.sim.map.w * 0.3, 42, this.sim.map.h * 0.15);
     sun.castShadow = true;
     sun.shadow.mapSize.set(2048, 2048);
@@ -88,10 +97,12 @@ export class Renderer {
     c.left = -30; c.right = 30; c.top = 30; c.bottom = -30;
     c.near = 5; c.far = 110;
     sun.shadow.bias = -0.0006;
+    // lighter shadow: don't let shadowed terrain go fully dark
+    this.renderer.shadowMap.enabled = true;
     sun.target.position.set(this.sim.map.w / 2, 0, this.sim.map.h / 2);
     this.scene.add(sun, sun.target);
     this.sun = sun;
-    const fill = new THREE.DirectionalLight(0x3a4d7a, 0.5);
+    const fill = new THREE.DirectionalLight(0x5a6da0, 0.6);  // cool sky fill
     fill.position.set(-25, 28, -32);
     this.scene.add(fill);
   }
@@ -115,17 +126,38 @@ export class Renderer {
         raw[cy * gw + cx] = m * HSCALE;
       }
     }
-    // one-pass smoothing so ramp corners aren't a vertical wall
+    // Crisper cliff profile: keep plateaus dead flat and steepen faces by
+    // smoothing ONLY corners that sit in a gentle (<=1 level) transition. A
+    // corner straddling a >=2-level jump (a real cliff wall) keeps its raw max
+    // height so the wall stays vertical and tall. This tightens the blur so
+    // 0..3 elevation reads as clean stepped terraces.
     const grid = new Float32Array(gw * gh);
+    const step = HSCALE;
     for (let cy = 0; cy < gh; cy++) {
       for (let cx = 0; cx < gw; cx++) {
+        // local relief around this corner (max - min of the 3x3 raw window)
+        let lo = Infinity, hi = -Infinity;
+        for (let dy = -1; dy <= 1; dy++)
+          for (let dx = -1; dx <= 1; dx++) {
+            const x = cx + dx, y = cy + dy;
+            if (x < 0 || y < 0 || x >= gw || y >= gh) continue;
+            const v = raw[y * gw + x];
+            if (v < lo) lo = v; if (v > hi) hi = v;
+          }
+        const relief = hi - lo;
+        if (relief > step * 1.5) {
+          // cliff wall: no blur, keep the crisp raw height (vertical face)
+          grid[cy * gw + cx] = raw[cy * gw + cx];
+          continue;
+        }
+        // gentle slope / ramp: strong center weight keeps plateaus flat while
+        // softening single-level transitions into walkable slopes.
         let sum = 0, n = 0;
         for (let dy = -1; dy <= 1; dy++)
           for (let dx = -1; dx <= 1; dx++) {
             const x = cx + dx, y = cy + dy;
             if (x < 0 || y < 0 || x >= gw || y >= gh) continue;
-            // weight the center more so plateaus keep their level
-            const wt = (dx === 0 && dy === 0) ? 4 : 1;
+            const wt = (dx === 0 && dy === 0) ? 6 : 1;
             sum += raw[y * gw + x] * wt; n += wt;
           }
         grid[cy * gw + cx] = sum / n;
@@ -186,7 +218,9 @@ export class Renderer {
     pos.needsUpdate = true;
     geo.computeVertexNormals();
 
-    const mat = new THREE.MeshStandardMaterial({ map: this.groundTex, roughness: 0.95, metalness: 0 });
+    // stepped-toon terrain: the painted canvas supplies color, the shared
+    // gradient ramp supplies hard cartoon light bands.
+    const mat = new THREE.MeshToonMaterial({ map: this.groundTex, gradientMap: toonGradient() });
     const mesh = new THREE.Mesh(geo, mat);
     mesh.rotation.x = -Math.PI / 2;
     mesh.position.set(w / 2, 0, h / 2);
@@ -195,45 +229,182 @@ export class Renderer {
     this.lastFogPaint = -1;
   }
 
+  // Hand-painted stylized terrain: ZERO per-pixel noise. One saturated base
+  // tone per elevation level (each level distinctly lighter), soft organic
+  // color blobs for life, crisp dark outlines along cliff edges + barrier
+  // blobs, a worn-path ramp treatment, and denser/darker losBlock tiles.
   paintTerrain() {
     const { w, h, rock, height } = this.sim.map;
     const ctx = this.baseCanvas.getContext("2d");
-    const rng = makeRng(this.sim.seed ^ 0x5eed);
-    const rnd = () => rng() / 0xffffffff;
     const th = this.theme;
-    const [gr, gg, gb] = th.ground;        // lowland base
-    const [hr, hg, hb] = th.groundHi;      // highland (plateau top) tint
-    const [pr, pg, pb] = th.patch;          // patch accent delta
-    const [tr, tg, tb] = th.cliffTop;       // cliff-top rocky tint
+    const lvlAt = (x, y) => (x < 0 || y < 0 || x >= w || y >= h) ? 0 : (height ? height[y * w + x] : 0);
+    const rockAt = (x, y) => (x < 0 || y < 0 || x >= w || y >= h) ? 0 : rock[y * w + x];
 
+    // Defensive reads of the (possibly-not-yet-present) new map fields.
+    const rampTiles = this.sim.map.rampTiles;     // Uint8Array | undefined
+    const barrierKind = this.sim.map.barrierKind; // Uint8Array | undefined
+    const losBlock = this.sim.map.losBlock;
+
+    // A rock tile is a CLIFF FACE if it borders a lower-elevation tile (a real
+    // height wall). Otherwise it's a flat-ground obstacle (a barrier blob).
+    const isCliffFace = (x, y) => {
+      if (!rockAt(x, y)) return false;
+      const l = lvlAt(x, y);
+      return lvlAt(x - 1, y) < l || lvlAt(x + 1, y) < l ||
+             lvlAt(x, y - 1) < l || lvlAt(x, y + 1) < l ||
+             // also treat a raised rock ring beside lower ground as a face
+             (l > 0 && (lvlAt(x - 1, y) !== l || lvlAt(x + 1, y) !== l ||
+                        lvlAt(x, y - 1) !== l || lvlAt(x, y + 1) !== l));
+    };
+    // Is this a ramp tile? Prefer the explicit field; else detect a passable
+    // tile whose neighbors span two elevation levels (a height transition).
+    const isRamp = (x, y) => {
+      if (rampTiles) return rampTiles[y * w + x] !== 0;
+      // fallback: a passable tile whose passable neighbors span >=2 elevation
+      // levels is a walkable height transition (a ramp/slope).
+      if (rockAt(x, y)) return false;
+      let lo = Infinity, hi = -Infinity;
+      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        if (rockAt(x + dx, y + dy)) continue;
+        const nl = lvlAt(x + dx, y + dy);
+        if (nl < lo) lo = nl; if (nl > hi) hi = nl;
+      }
+      return hi > lo;   // neighbors on two different passable levels
+    };
+
+    // Per-level base tones: lowland from theme.ground, each level up lightened
+    // and hue-shifted toward theme.groundHi. cliff tops sit at the top step.
+    const base = th.ground, hiTone = th.groundHi;
+    const toneFor = (lvl) => {
+      const t = Math.min(1, lvl / 3);                 // 0..1 across 0..3 levels
+      // blend ground->groundHi by elevation, then add a per-step brightening
+      const r = base[0] + (hiTone[0] - base[0]) * t;
+      const g = base[1] + (hiTone[1] - base[1]) * t;
+      const b = base[2] + (hiTone[2] - base[2]) * t;
+      return lift([r, g, b], lvl * 0.05);
+    };
+    const patch = th.patch;
+
+    // ---- 1. flat fill: one saturated tone per tile by its elevation --------
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
-        const i = y * w + x;
-        const isRock = rock[i];
-        const lvl = height ? height[i] : 0;
-        for (let sy = 0; sy < PX; sy += 3) {
-          for (let sx = 0; sx < PX; sx += 3) {
-            const n = rnd();
-            let r, g, b;
-            if (isRock) {
-              // cliff / rock texel: rocky theme tint, slightly noisy
-              r = tr - 6 + n * 16; g = tg - 6 + n * 16; b = tb - 6 + n * 16;
-            } else {
-              const patch = rnd() > 0.94;
-              // blend lowland->highland by elevation so plateaus read distinct
-              const t = Math.min(1, lvl * 0.5);
-              r = (gr + (hr - gr) * t) + n * 16 + (patch ? pr : 0);
-              g = (gg + (hg - gg) * t) + n * 22 + (patch ? pg : 0);
-              b = (gb + (hb - gb) * t) + n * 13 + (patch ? pb : 0);
-            }
-            ctx.fillStyle = `rgb(${r | 0},${g | 0},${b | 0})`;
-            ctx.fillRect(x * PX + sx, y * PX + sy, 3, 3);
-          }
+        const lvl = lvlAt(x, y);
+        ctx.fillStyle = rgbStr(toneFor(lvl));
+        ctx.fillRect(x * PX, y * PX, PX, PX);
+      }
+    }
+
+    // ---- 2. soft organic color blobs (2-3 sibling-tone stamps per region) --
+    // Deterministic, low-contrast, blurred — hand-painted life, not noise.
+    const rng = makeRng(this.sim.seed ^ 0x5eed);
+    const rnd = () => rng() / 0xffffffff;
+    ctx.save();
+    ctx.globalAlpha = 0.28;
+    const blobs = 22 + (rng() % 10);
+    for (let i = 0; i < blobs; i++) {
+      const bx = rnd() * w, by = rnd() * h;
+      const lvl = lvlAt(bx | 0, by | 0);
+      // sibling tone: a lifted or patch-shifted version of the level tone
+      const sib = rnd() > 0.5
+        ? lift(toneFor(lvl), 0.12)
+        : [toneFor(lvl)[0] + patch[0] * 0.6, toneFor(lvl)[1] + patch[1] * 0.6, toneFor(lvl)[2] + patch[2] * 0.6].map(CH);
+      const r = (2.5 + rnd() * 3.5) * PX;
+      const grad = ctx.createRadialGradient(bx * PX, by * PX, 0, bx * PX, by * PX, r);
+      grad.addColorStop(0, rgbStr(sib));
+      grad.addColorStop(1, rgbStr(sib).replace("rgb", "rgba").replace(")", ",0)"));
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(bx * PX, by * PX, r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+
+    // ---- 3. losBlock tiles: slightly darker + denser ------------------------
+    if (losBlock) {
+      ctx.save();
+      ctx.globalAlpha = 0.22;
+      ctx.fillStyle = "rgb(0,0,0)";
+      for (let y = 0; y < h; y++)
+        for (let x = 0; x < w; x++)
+          if (losBlock[y * w + x]) ctx.fillRect(x * PX, y * PX, PX, PX);
+      ctx.restore();
+    }
+
+    // ---- 4. crisp dark outline along cliff edges + around barrier blobs -----
+    // Draw a 2-3 texel dark band on the ground-side of every cliff face, and a
+    // border around flat-ground barrier tiles so stands/outcrops read as blobs.
+    const outline = "rgba(12,14,18,0.62)";
+    const OW = Math.max(2, (PX / 6) | 0);             // outline band width
+    ctx.fillStyle = outline;
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const cliff = isCliffFace(x, y);
+        const kind = barrierKind ? barrierKind[y * w + x] : (rockAt(x, y) && !cliff ? 4 : 0);
+        const isBarrier = rockAt(x, y) && !cliff && kind;
+        if (!cliff && !isBarrier) continue;
+        // draw an inset border on the sides that face open/lower ground
+        const px = x * PX, py = y * PX;
+        const lowerOrOpen = (nx, ny) => {
+          if (cliff) return lvlAt(nx, ny) < lvlAt(x, y) && !isCliffFace(nx, ny) || (!rockAt(nx, ny));
+          return !(rockAt(nx, ny) && !isCliffFace(nx, ny) && (barrierKind ? barrierKind[ny * w + nx] : 4));
+        };
+        if (lowerOrOpen(x - 1, y)) ctx.fillRect(px, py, OW, PX);
+        if (lowerOrOpen(x + 1, y)) ctx.fillRect(px + PX - OW, py, OW, PX);
+        if (lowerOrOpen(x, y - 1)) ctx.fillRect(px, py, PX, OW);
+        if (lowerOrOpen(x, y + 1)) ctx.fillRect(px, py + PX - OW, PX, OW);
+      }
+    }
+
+    // ---- 5. cliff FACE fill: rocky cliff tone, darker than the plateau top --
+    // Paint cliff-face tiles with the theme cliffTop tone (rocky), so vertical
+    // walls read distinctly from the grassy plateau. A top-edge highlight line
+    // makes ledges pop.
+    const cliffTone = th.cliffTop;
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        if (!isCliffFace(x, y)) continue;
+        const px = x * PX, py = y * PX;
+        // darker rocky band across the face tile
+        ctx.fillStyle = rgbStr([cliffTone[0] * 0.72, cliffTone[1] * 0.72, cliffTone[2] * 0.72].map(CH));
+        ctx.fillRect(px + OW, py + OW, PX - 2 * OW, PX - 2 * OW);
+        // top-edge highlight: bright line on the upper side toward higher ground
+        const l = lvlAt(x, y);
+        if (lvlAt(x, y - 1) >= l) {
+          ctx.fillStyle = "rgba(255,255,255,0.16)";
+          ctx.fillRect(px, py, PX, Math.max(1, (OW / 2) | 0));
         }
       }
     }
-    // faint tile grid for placement legibility
-    ctx.strokeStyle = "rgba(140,200,255,0.045)";
+
+    // ---- 6. ramps: worn-path lighter tone + perpendicular ladder bands ------
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        if (!isRamp(x, y)) continue;
+        const px = x * PX, py = y * PX;
+        const l = lvlAt(x, y);
+        // worn path: distinctly lighter, slightly desaturated dirt tone
+        const path = lift(toneFor(l), 0.22);
+        ctx.fillStyle = rgbStr([path[0] * 0.95 + 20, path[1] * 0.92 + 14, path[2] * 0.85 + 8].map(CH));
+        ctx.fillRect(px, py, PX, PX);
+        // determine ramp travel axis from which neighbors are also ramps
+        const horiz = (isRamp(x - 1, y) || isRamp(x + 1, y));
+        // perpendicular stripe bands (ladder rungs)
+        ctx.fillStyle = "rgba(30,24,16,0.35)";
+        const bands = 3;
+        for (let b = 0; b < bands; b++) {
+          const o = (b + 0.5) * (PX / bands);
+          if (horiz) ctx.fillRect(px, py + o - 1, PX, 2);      // rungs across
+          else ctx.fillRect(px + o - 1, py, 2, PX);
+        }
+        // side edging lines along the ramp direction
+        ctx.fillStyle = "rgba(20,16,10,0.5)";
+        if (horiz) { ctx.fillRect(px, py, PX, 2); ctx.fillRect(px, py + PX - 2, PX, 2); }
+        else { ctx.fillRect(px, py, 2, PX); ctx.fillRect(px + PX - 2, py, 2, PX); }
+      }
+    }
+
+    // ---- 7. faint tile grid for placement legibility ------------------------
+    ctx.strokeStyle = "rgba(150,200,255,0.035)";
     ctx.lineWidth = 1;
     ctx.beginPath();
     for (let x = 0; x <= w; x++) { ctx.moveTo(x * PX + 0.5, 0); ctx.lineTo(x * PX + 0.5, h * PX); }
@@ -257,28 +428,159 @@ export class Renderer {
     this.groundTex.needsUpdate = true;
   }
 
-  buildRocks() {
-    const { w, h, rock } = this.sim.map;
-    const positions = [];
+  // Instanced, theme-tinted barrier props keyed by map.barrierKind:
+  //   1 forest (trees)  2 lava (basalt + crack)  3 ice (spires)  4 rock (boulders).
+  // Cliff-face rock tiles are terrain (painted, displaced mesh) and get NO prop.
+  // Degrades gracefully: when barrierKind is absent, every blocked flat-ground
+  // tile becomes a kind-4 boulder cluster (the old behavior's replacement).
+  buildBarriers() {
+    const { w, h, rock, height } = this.sim.map;
+    const barrierKind = this.sim.map.barrierKind;     // may be undefined
+    const lvlAt = (x, y) => (x < 0 || y < 0 || x >= w || y >= h) ? 0 : (height ? height[y * w + x] : 0);
+    const rockAt = (x, y) => (x < 0 || y < 0 || x >= w || y >= h) ? 0 : rock[y * w + x];
+    // cliff-face detection (same rule as paintTerrain): a raised/bordering wall
+    const isCliffFace = (x, y) => {
+      if (!rockAt(x, y)) return false;
+      const l = lvlAt(x, y);
+      return lvlAt(x - 1, y) < l || lvlAt(x + 1, y) < l ||
+             lvlAt(x, y - 1) < l || lvlAt(x, y + 1) < l ||
+             (l > 0 && (lvlAt(x - 1, y) !== l || lvlAt(x + 1, y) !== l ||
+                        lvlAt(x, y - 1) !== l || lvlAt(x, y + 1) !== l));
+    };
+
+    // bucket barrier tiles by kind
+    const tiles = { 1: [], 2: [], 3: [], 4: [] };
     for (let y = 0; y < h; y++)
-      for (let x = 0; x < w; x++)
-        if (rock[y * w + x]) positions.push([x + 0.5, y + 0.5]);
-    const geo = new THREE.DodecahedronGeometry(0.55);
-    const mat = new THREE.MeshStandardMaterial({ color: this.theme.rock, roughness: 0.85 });
-    const inst = new THREE.InstancedMesh(geo, mat, positions.length);
-    inst.castShadow = true;
-    inst.receiveShadow = true;
-    const m = new THREE.Matrix4();
-    const q = new THREE.Quaternion();
-    positions.forEach(([x, z], i) => {
-      const s = 0.75 + ((x * 7 + z * 13) % 6) / 9;
-      q.setFromEuler(new THREE.Euler(((x * 3) % 7) / 7, ((z * 5) % 9) / 9 * Math.PI, 0));
-      // sit the rock chunk on the terrain surface (cliff tops sit higher)
-      const gy = this.heightAt(x, z);
-      m.compose(new THREE.Vector3(x, gy + 0.22 + (s - 0.75) * 0.2, z), q, new THREE.Vector3(s, s * 0.75, s));
-      inst.setMatrixAt(i, m);
-    });
-    this.scene.add(inst);
+      for (let x = 0; x < w; x++) {
+        if (!rockAt(x, y) || isCliffFace(x, y)) continue;   // walls are terrain
+        let kind = barrierKind ? barrierKind[y * w + x] : 4;
+        if (kind < 1 || kind > 4) kind = 4;
+        tiles[kind].push([x, y]);
+      }
+
+    const mats = barrierMaterials(this.theme);
+    const M = new THREE.Matrix4();
+    const Q = new THREE.Quaternion();
+    const V = new THREE.Vector3();
+    // deterministic per-tile pseudo-random in [0,1)
+    const rand = (x, y, s) => { const n = Math.sin(x * 127.1 + y * 311.7 + s * 74.7) * 43758.5453; return n - Math.floor(n); };
+
+    // helper: build an InstancedMesh from a list of poses
+    const buildInst = (geo, mat, poses, cast = true) => {
+      if (!poses.length) return null;
+      const inst = new THREE.InstancedMesh(geo, mat, poses.length);
+      inst.castShadow = cast;
+      inst.receiveShadow = true;
+      inst.frustumCulled = false;
+      poses.forEach((p, i) => {
+        Q.setFromEuler(new THREE.Euler(p.rx || 0, p.ry || 0, p.rz || 0));
+        M.compose(V.set(p.x, p.y, p.z), Q, p.s);
+        inst.setMatrixAt(i, M);
+      });
+      this.scene.add(inst);
+      return inst;
+    };
+
+    this.barrierMeshes = [];
+
+    // ---- kind 4: ROUNDED boulders, clustered 2-4 with size falloff ----------
+    {
+      const poses = [];
+      for (const [tx, ty] of tiles[4]) {
+        const n = 2 + ((rand(tx, ty, 1) * 3) | 0);        // 2..4 per tile
+        for (let k = 0; k < n; k++) {
+          const ang = rand(tx, ty, k + 2) * Math.PI * 2;
+          const rad = rand(tx, ty, k + 5) * 0.34;
+          const wx = tx + 0.5 + Math.cos(ang) * rad;
+          const wz = ty + 0.5 + Math.sin(ang) * rad;
+          const fall = 1 - k / (n + 1);                    // size falloff
+          const s = (0.42 + rand(tx, ty, k + 8) * 0.34) * fall + 0.22;
+          const gy = this.heightAt(wx, wz);
+          poses.push({ x: wx, y: gy + s * 0.32 - 0.14, z: wz,   // sunk in
+            ry: rand(tx, ty, k + 3) * Math.PI * 2,
+            rz: (rand(tx, ty, k + 4) - 0.5) * 0.5,
+            s: new THREE.Vector3(s, s * (0.62 + rand(tx, ty, k) * 0.2), s) });
+        }
+      }
+      this.barrierMeshes.push(buildInst(SHARED.boulder, mats.boulder, poses));
+    }
+
+    // ---- kind 1: FOREST — trunk + double-sphere canopy, hue/size variants ---
+    {
+      const trunkP = [], canLoP = [], canHiP = [];
+      for (const [tx, ty] of tiles[1]) {
+        const n = 1 + ((rand(tx, ty, 1) > 0.55) ? 1 : 0);  // 1-2 trees, overhang
+        for (let k = 0; k < n; k++) {
+          // trees slightly overhang tile edges so stands read as woods
+          const wx = tx + 0.5 + (rand(tx, ty, k + 2) - 0.5) * 0.9;
+          const wz = ty + 0.5 + (rand(tx, ty, k + 3) - 0.5) * 0.9;
+          const sv = 0.85 + rand(tx, ty, k + 4) * 0.5;      // size variant
+          const gy = this.heightAt(wx, wz);
+          const ry = rand(tx, ty, k + 5) * Math.PI * 2;
+          trunkP.push({ x: wx, y: gy, z: wz, ry, s: new THREE.Vector3(sv, sv, sv) });
+          canLoP.push({ x: wx, y: gy + 0.62 * sv, z: wz, ry,
+            s: new THREE.Vector3(sv * (0.9 + rand(tx, ty, k + 6) * 0.3), sv * 0.85, sv) });
+          canHiP.push({ x: wx, y: gy + 0.95 * sv, z: wz, ry,
+            s: new THREE.Vector3(sv * 0.8, sv * 0.8, sv * 0.8) });
+        }
+      }
+      this.barrierMeshes.push(buildInst(SHARED.treeTrunk, mats.treeTrunk, trunkP));
+      this.barrierMeshes.push(buildInst(SHARED.treeCanopyLo, mats.treeCanopy, canLoP));
+      this.barrierMeshes.push(buildInst(SHARED.treeCanopyHi, mats.treeCanopy, canHiP));
+    }
+
+    // ---- kind 2: LAVA — clustered hex basalt prisms + emissive crack decal ---
+    {
+      const basaltP = [], crackP = [];
+      for (const [tx, ty] of tiles[2]) {
+        const n = 2 + ((rand(tx, ty, 1) * 3) | 0);
+        for (let k = 0; k < n; k++) {
+          const ang = rand(tx, ty, k + 2) * Math.PI * 2;
+          const rad = rand(tx, ty, k + 5) * 0.3;
+          const wx = tx + 0.5 + Math.cos(ang) * rad;
+          const wz = ty + 0.5 + Math.sin(ang) * rad;
+          const hgt = 0.55 + rand(tx, ty, k + 6) * 0.75;    // varied heights
+          const sc = 0.55 + rand(tx, ty, k + 7) * 0.3;
+          const gy = this.heightAt(wx, wz);
+          basaltP.push({ x: wx, y: gy + hgt * 0.5 - 0.1, z: wz,
+            ry: rand(tx, ty, k + 3) * Math.PI,
+            s: new THREE.Vector3(sc, hgt, sc) });
+        }
+        // one glowing crack decal laid flat between the prisms
+        const gy = this.heightAt(tx + 0.5, ty + 0.5);
+        crackP.push({ x: tx + 0.5, y: gy + 0.03, z: ty + 0.5,
+          rx: -Math.PI / 2, ry: rand(tx, ty, 9) * Math.PI,
+          s: new THREE.Vector3(1.05, 1.05, 1.05) });
+      }
+      this.barrierMeshes.push(buildInst(SHARED.basalt, mats.basalt, basaltP));
+      // crack decals: flat additive planes, no shadow
+      const crackGeo = new THREE.PlaneGeometry(1, 1);
+      const crackInst = buildInst(crackGeo, mats.crack, crackP, false);
+      if (crackInst) this.emberMat = mats.crack;   // pulsed in render()
+    }
+
+    // ---- kind 3: ICE — translucent crystal spires, clustered, varied lean ---
+    {
+      const poses = [];
+      for (const [tx, ty] of tiles[3]) {
+        const n = 2 + ((rand(tx, ty, 1) * 3) | 0);          // 2..4 spires
+        for (let k = 0; k < n; k++) {
+          const ang = rand(tx, ty, k + 2) * Math.PI * 2;
+          const rad = rand(tx, ty, k + 5) * 0.32;
+          const wx = tx + 0.5 + Math.cos(ang) * rad;
+          const wz = ty + 0.5 + Math.sin(ang) * rad;
+          const hgt = 0.7 + rand(tx, ty, k + 6) * 0.9;
+          const sc = 0.5 + rand(tx, ty, k + 7) * 0.35;
+          const lean = (rand(tx, ty, k + 8) - 0.5) * 0.5;   // varied lean
+          const gy = this.heightAt(wx, wz);
+          poses.push({ x: wx, y: gy - 0.1, z: wz,
+            ry: rand(tx, ty, k + 3) * Math.PI * 2, rz: lean,
+            s: new THREE.Vector3(sc, hgt, sc) });
+        }
+      }
+      // ice spires don't cast shadow (translucent) so they read as glassy
+      this.barrierMeshes.push(buildInst(SHARED.iceSpire, mats.ice, poses, false));
+    }
   }
 
   // Instanced, theme-colored decorations (crystal shards, rock piles, glowing
@@ -302,20 +604,20 @@ export class Renderer {
       this.shrubs.push(g);
     }
 
-    // kind 0: crystal shard cluster (emissive octahedron)
-    this.addDecoInstances(buckets[0], new THREE.OctahedronGeometry(0.22),
-      new THREE.MeshStandardMaterial({ color: c0, emissive: c0, emissiveIntensity: 0.8, roughness: 0.3, metalness: 0.4 }),
-      (d) => ({ y: 0.24, s: 0.7 + ((d.x * 5 + d.y * 3) % 5) / 8, spin: (d.x + d.y) % 6 }));
+    // kind 0: crystal shard cluster — rounded, saturated, slight emissive (toon)
+    this.addDecoInstances(buckets[0], SHARED.crystalShard,
+      propToon({ color: c0, emissive: c0, emissiveIntensity: 0.7 }),
+      (d) => ({ y: 0.22, s: 0.7 + ((d.x * 5 + d.y * 3) % 5) / 8, spin: (d.x + d.y) % 6 }));
 
-    // kind 1: small rock pile (dark, matte)
-    this.addDecoInstances(buckets[1], new THREE.DodecahedronGeometry(0.28),
-      new THREE.MeshStandardMaterial({ color: this.theme.rock, roughness: 0.95, metalness: 0.05 }),
-      (d) => ({ y: 0.14, s: 0.5 + ((d.x * 7 + d.y) % 5) / 10, spin: (d.x * 2 + d.y) % 6 }));
+    // kind 1: small rock pile — ROUNDED boulder (kill the dodecahedron), toon
+    this.addDecoInstances(buckets[1], SHARED.boulder,
+      propToon({ color: this.theme.rock }),
+      (d) => ({ y: 0.1, s: 0.34 + ((d.x * 7 + d.y) % 5) / 12, spin: (d.x * 2 + d.y) % 6 }));
 
-    // kind 2: glowing flora tuft (emissive cone)
-    this.addDecoInstances(buckets[2], new THREE.ConeGeometry(0.13, 0.42, 6),
-      new THREE.MeshStandardMaterial({ color: c1, emissive: c2, emissiveIntensity: 0.9, roughness: 0.4 }),
-      (d) => ({ y: 0.21, s: 0.7 + ((d.x + d.y * 4) % 5) / 8, spin: (d.x + d.y * 3) % 6 }));
+    // kind 2: glowing flora tuft — rounded blob, emissive (toon)
+    this.addDecoInstances(buckets[2], SHARED.floraBlob,
+      propToon({ color: c1, emissive: c2, emissiveIntensity: 0.8 }),
+      (d) => ({ y: 0.18, s: 0.7 + ((d.x + d.y * 4) % 5) / 8, spin: (d.x + d.y * 3) % 6 }));
   }
 
   addDecoInstances(list, geo, mat, poseFn) {
@@ -991,6 +1293,9 @@ export class Renderer {
 
     // subtle shrub sway (LoS-blocker concealment tufts)
     if (this.shrubs) for (const s of this.shrubs) animateShrub(s, t);
+
+    // faint ember pulse on lava-barrier crack decals
+    if (this.emberMat) this.emberMat.opacity = 0.55 + Math.sin(t * 2.2) * 0.35;
 
     this.fx.update(dt);
     this.composer.render();

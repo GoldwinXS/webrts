@@ -114,6 +114,15 @@ export class GameAudio {
     }
   }
 
+  // ---------- ability cues (subtle, distinct) ----------
+  stim() { if (this.limited("stim", 120)) return; this.beep(160, 90, 0.05, "sine", 0.11); this.beep(150, 80, 0.05, "sine", 0.10, 0.09); }
+  siegeUp() { this.noise(0.18, 400, 0.22, "lowpass"); this.beep(240, 70, 0.22, "square", 0.12); }
+  siegeDown() { this.beep(80, 260, 0.2, "square", 0.11); this.noise(0.14, 600, 0.16, "lowpass", 0.04); }
+  leap() { if (this.limited("leap", 120)) return; this.noise(0.22, 1400, 0.14, "bandpass"); this.beep(500, 1400, 0.18, "sine", 0.07); }
+  burners() { if (this.limited("burn", 120)) return; this.beep(220, 900, 0.28, "sawtooth", 0.08); }
+  barrage() { if (this.limited("barr", 150)) return; for (let i = 0; i < 3; i++) this.beep(300, 160, 0.05, "square", 0.09, i * 0.06); }
+  researchDone() { this.beep(523, 523, 0.09, "triangle", 0.1); this.beep(659, 659, 0.09, "triangle", 0.1, 0.09); this.beep(587, 587, 0.16, "triangle", 0.11, 0.18); }
+
   victory() {
     [523, 659, 784, 1047].forEach((f, i) => this.beep(f, f, 0.22, "triangle", 0.14, i * 0.16));
   }

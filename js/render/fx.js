@@ -185,9 +185,11 @@ export class Effects {
   fallingWreck(x, z, fromY, color, silhouette) {
     let obj = silhouette;
     if (!obj) {
+      // rounded low-poly chunk (no polyhedra in the environment)
       obj = new THREE.Mesh(
-        new THREE.DodecahedronGeometry(0.32),
+        new THREE.SphereGeometry(0.32, 8, 6),
         new THREE.MeshStandardMaterial({ color, roughness: 0.6, metalness: 0.4, emissive: color, emissiveIntensity: 0.3 }));
+      obj.scale.set(1, 0.7, 1.15);
     }
     obj.position.set(x, fromY, z);
     const groundY = this.gy(x, z);

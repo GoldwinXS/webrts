@@ -4,7 +4,8 @@
 // what makes lockstep multiplayer possible.
 import { FP, HALF, tileToFp, fpToTile, isqrt, dist, dist2, makeHash } from "./fixed.js";
 import { UNITS, BUILDINGS, START_MINERALS, START_GAS, CARRY_AMOUNT, GATHER_TICKS, PATCH_AMOUNT, MAX_QUEUE,
-  GAS_CARRY, GAS_GATHER_TICKS, GAS_AMOUNT, GAS_DEPLETED, HQ_RESOURCE_CLEARANCE } from "./data.js";
+  GAS_CARRY, GAS_GATHER_TICKS, GAS_AMOUNT, GAS_DEPLETED, HQ_RESOURCE_CLEARANCE,
+  UPGRADES, UPGRADE_BITS, ABILITIES, PLATING_HP, SERVOS_SPEED_NUM, SERVOS_SPEED_DEN } from "./data.js";
 import { generateMap } from "./map.js";
 import { findPath, nearestFree } from "./path.js";
 
@@ -18,6 +19,8 @@ export class Sim {
     this.byId = new Map();
     this.minerals = [START_MINERALS, START_MINERALS];
     this.gas = [START_GAS, START_GAS];
+    // researched-upgrade bitmasks, one per player (see UPGRADE_BITS in data.js)
+    this.upgrades = [0, 0];
     this.winner = -1;
     this.events = [];
 
@@ -60,11 +63,27 @@ export class Sim {
 
   spawnUnit(pid, type, x, y) {
     const d = UNITS[type];
-    return this.addEntity({
+    const e = this.addEntity({
       type, owner: pid, x, y, hp: d.hp, maxHp: d.hp, radius: d.radius,
       unit: true, fly: !!d.fly, order: { kind: "idle" }, next: [], path: null, pathI: 0,
       cooldown: 0, carry: 0, carryKind: 0, gatherTimer: 0,
+      // ability state (all sim-visible, mixed into checksum):
+      abilityCd: 0,        // ticks until this unit's ability is ready again
+      stimUntil: 0,        // marine: stim buff active while tick < stimUntil
+      burnUntil: 0,        // wraith: afterburner buff active while tick < burnUntil
+      sieged: 0,           // tank: 1 while in siege mode
+      transformUntil: 0,   // tank: transforming (immobile) while tick < transformUntil
+      leapUntil: 0,        // brute: leaping (airborne) while tick < leapUntil
+      leapTo: null,        // brute: landing point {x,y}
+      channelUntil: 0,     // banshee: barrage channel end tick
+      channel: null,       // banshee: barrage state {x,y,fired}
     });
+    // FUTURE-unit plating: marines/brutes built after plating completes get +12 maxHp.
+    if ((type === "marine" || type === "brute") && (this.upgrades[pid] & UPGRADE_BITS.plating)) {
+      e.maxHp += PLATING_HP;
+      e.hp += PLATING_HP;
+    }
+    return e;
   }
 
   spawnBuilding(pid, type, tx, ty, done) {
@@ -129,7 +148,7 @@ export class Sim {
         // only the unit actually in production consumes supply; the rest of
         // the queue waits (production stalls when supply-blocked)
         const head = e.queue[0];
-        if (head?.started) used += UNITS[head.type].supply;
+        if (head?.started && head.type) used += UNITS[head.type].supply;
       }
     }
     return { used, cap: Math.min(cap, 200) };
@@ -345,6 +364,210 @@ export class Sim {
         b.queue.push({ type: c.unit, remaining: d.buildTime, started: false });
         break;
       }
+      case "research": {
+        const b = own(c.buildingId);
+        const up = UPGRADES[c.research];
+        if (!b || !b.building || !b.done || !up) break;
+        if (b.type !== up.building) break;                 // wrong building
+        if (this.upgrades[pid] & up.bit) break;            // already owned
+        if (this.upgradeQueued(pid, c.research)) break;    // already queued anywhere
+        if (b.queue.length >= MAX_QUEUE) break;
+        if (!this.canAfford(pid, up.cost, up.gasCost || 0)) break;
+        this.minerals[pid] -= up.cost;
+        this.gas[pid] -= (up.gasCost || 0);
+        // research never supply-blocks, so it starts immediately (started:true)
+        b.queue.push({ research: c.research, remaining: up.time, started: true });
+        break;
+      }
+      case "ability": {
+        this.applyAbility(pid, c);
+        break;
+      }
+    }
+  }
+
+  // Is an upgrade already in-progress in ANY of this player's queues?
+  upgradeQueued(pid, upg) {
+    for (const e of this.entities) {
+      if (!e.building || e.owner !== pid) continue;
+      for (const item of e.queue) if (item.research === upg) return true;
+    }
+    return false;
+  }
+
+  // Finish an upgrade: set the player's bit, apply retroactive effects, notify.
+  completeResearch(pid, upg) {
+    const up = UPGRADES[upg];
+    if (!up) return;
+    this.upgrades[pid] |= up.bit;
+    // plating: +12 max & current hp to all LIVING marines/brutes of this player
+    // (future units get it at spawn — see spawnUnit).
+    if (upg === "plating") {
+      for (const e of this.entities) {
+        if (e.owner === pid && (e.type === "marine" || e.type === "brute")) {
+          e.maxHp += PLATING_HP;
+          e.hp += PLATING_HP;
+        }
+      }
+    }
+    this.events.push({ t: "research", owner: pid, upg });
+  }
+
+  // ---------- abilities ----------
+  // Command shape: { t:"ability", ids:[...], ability:"stim"|..., x?, y? }
+  // Validated per-unit: correct type, research owned (if gated), not on cd, not
+  // mid-transform/leap/channel. Rejected units are silently skipped.
+  applyAbility(pid, c) {
+    const a = ABILITIES[c.ability];
+    if (!a) return;
+    const req = a.requires ? UPGRADE_BITS[a.requires] : 0;
+    if (req && !(this.upgrades[pid] & req)) return;   // research missing
+    for (const id of c.ids) {
+      const u = this.byId.get(id);
+      if (!u || u.owner !== pid || u.type !== a.unit || u.hp <= 0) continue;
+      // busy in another timed ability state? skip (siege toggle handles its own)
+      if (u.leapUntil || u.channelUntil || (u.type === "tank" && this.tick < u.transformUntil)) continue;
+      switch (c.ability) {
+        case "stim":   this.castStim(u, a); break;
+        case "leap":   this.castLeap(u, a, c.x, c.y); break;
+        case "siege":  this.castSiege(u, a); break;
+        case "burners":this.castBurners(u, a); break;
+        case "barrage":this.castBarrage(u, a, c.x, c.y); break;
+      }
+    }
+  }
+
+  castStim(u, a) {
+    if (u.abilityCd > 0) return;
+    u.hp = Math.max(1, u.hp - a.hpCost);       // costs hp, never lethal
+    u.stimUntil = this.tick + a.dur;
+    u.abilityCd = a.cd;
+    this.events.push({ t: "ability", kind: "stim", id: u.id, x: u.x, y: u.y, owner: u.owner });
+  }
+
+  castLeap(u, a, tx, ty) {
+    if (u.abilityCd > 0) return;
+    tx = this.clampX(tx | 0); ty = this.clampY(ty | 0);
+    // clamp the target to <= range tiles from the brute
+    const maxR = a.range * FP;
+    const dx = tx - u.x, dy = ty - u.y;
+    const dd = isqrt(dx * dx + dy * dy);
+    if (dd > maxR) { tx = u.x + ((dx * maxR / dd) | 0); ty = u.y + ((dy * maxR / dd) | 0); }
+    // must land on a passable, unblocked tile — else snap to the nearest free
+    const { w, h } = this.map;
+    if (this.blocked[fpToTile(ty) * w + fpToTile(tx)]) {
+      const free = nearestFree(this.blocked, w, h, fpToTile(tx), fpToTile(ty));
+      if (!free) return;
+      tx = tileToFp(free.x); ty = tileToFp(free.y);
+    }
+    u.leapFrom = { x: u.x, y: u.y };
+    u.leapTo = { x: tx, y: ty };
+    u.leapUntil = this.tick + a.dur;
+    u.abilityCd = a.cd;
+    u.path = null; u.next = [];
+    this.events.push({
+      t: "ability", kind: "leap", id: u.id, owner: u.owner,
+      fromX: u.x, fromY: u.y, toX: tx, toY: ty,
+    });
+  }
+
+  // Leaping brute: fly in a straight line to the landing point ignoring
+  // terrain/separation, then land and slam nearby enemy ground units.
+  updateLeap(u) {
+    const a = ABILITIES.leap;
+    const to = u.leapTo;
+    const remaining = u.leapUntil - this.tick; // ticks left including this one
+    if (remaining <= 0 || !to) { this.landLeap(u, a); return; }
+    // interpolate from leapFrom to leapTo by elapsed fraction (integer)
+    const total = a.dur;
+    const elapsed = total - remaining + 1;
+    const fr = u.leapFrom;
+    u.x = this.clampX(fr.x + (((to.x - fr.x) * elapsed) / total | 0));
+    u.y = this.clampY(fr.y + (((to.y - fr.y) * elapsed) / total | 0));
+    if (elapsed >= total) this.landLeap(u, a);
+  }
+
+  landLeap(u, a) {
+    const to = u.leapTo;
+    if (to) { u.x = this.clampX(to.x); u.y = this.clampY(to.y); }
+    u.leapUntil = 0; u.leapTo = null; u.leapFrom = null;
+    u.order = { kind: "idle" }; u.path = null;
+    // slam: damage all enemy GROUND units within `splash` tiles (id order)
+    const r = a.splash * FP;
+    for (const e of this.entities) {
+      if (!e.unit || e.fly || e.owner < 0 || e.owner === u.owner || e.hp <= 0) continue;
+      if (dist2(u.x, u.y, e.x, e.y) <= r * r) e.hp -= a.dmg;
+    }
+    this.events.push({ t: "ability", kind: "leap_land", id: u.id, owner: u.owner, x: u.x, y: u.y });
+  }
+
+  // Tank siege toggle: begin a 20-tick transform; the sieged flag flips at the
+  // START so range/dmg/immobility take effect immediately, matching the intent
+  // that the transform is the "windup" during which it can't fire (gated by
+  // transformUntil in updateUnit).
+  castSiege(u, a) {
+    if (u.abilityCd > 0) return; // shared per-unit cd guards spam
+    u.transformUntil = this.tick + a.transform;
+    u.abilityCd = a.transform;   // can't re-toggle until the transform finishes
+    u.order = { kind: "idle" }; u.path = null; u.next = [];
+    if (!u.sieged) {
+      u.sieged = 1;
+      this.events.push({ t: "ability", kind: "siege_up", id: u.id, owner: u.owner, x: u.x, y: u.y });
+    } else {
+      u.sieged = 0;
+      this.events.push({ t: "ability", kind: "siege_down", id: u.id, owner: u.owner, x: u.x, y: u.y });
+    }
+  }
+
+  castBurners(u, a) {
+    if (u.abilityCd > 0) return;
+    u.burnUntil = this.tick + a.dur;
+    u.abilityCd = a.cd;
+    this.events.push({ t: "ability", kind: "burners", id: u.id, owner: u.owner, x: u.x, y: u.y });
+  }
+
+  castBarrage(u, a, tx, ty) {
+    if (u.abilityCd > 0) return;
+    tx = this.clampX(tx | 0); ty = this.clampY(ty | 0);
+    // clamp target within range tiles of the banshee
+    const maxR = a.range * FP;
+    const dx = tx - u.x, dy = ty - u.y;
+    const dd = isqrt(dx * dx + dy * dy);
+    if (dd > maxR) { tx = u.x + ((dx * maxR / dd) | 0); ty = u.y + ((dy * maxR / dd) | 0); }
+    u.channel = { x: tx, y: ty, fired: 0 };
+    u.channelUntil = this.tick + a.channel;
+    u.abilityCd = a.cd;
+    u.order = { kind: "idle" }; u.path = null; u.next = [];
+    this.events.push({ t: "ability", kind: "barrage", id: u.id, owner: u.owner, x: tx, y: ty });
+  }
+
+  // Channeling banshee: immobile; fire one rocket every `interval` ticks at the
+  // target point (with a deterministic per-rocket spread), each hitting enemy
+  // ground units within `radius`. Ends after all rockets or the channel window.
+  updateBarrage(u) {
+    const a = ABILITIES.barrage;
+    const ch = u.channel;
+    const elapsed = a.channel - (u.channelUntil - this.tick); // ticks since start
+    // fire on ticks 0, interval, 2*interval, ... up to `rockets`
+    if (ch && ch.fired < a.rockets && elapsed >= ch.fired * a.interval) {
+      const i = ch.fired;
+      const ox = ((i * 97) % 129 - 64);
+      const oy = ((i * 61) % 129 - 64);
+      const ix = this.clampX(ch.x + ox), iy = this.clampY(ch.y + oy);
+      const r = a.radius;
+      for (const e of this.entities) {
+        if (!e.unit || e.fly || e.owner < 0 || e.owner === u.owner || e.hp <= 0) continue;
+        if (dist2(ix, iy, e.x, e.y) <= r * r) e.hp -= a.dmg;
+      }
+      this.events.push({ t: "ability", kind: "barrage_hit", id: u.id, owner: u.owner, x: ix, y: iy });
+      ch.fired++;
+    }
+    if (this.tick >= u.channelUntil && (!ch || ch.fired >= a.rockets)) {
+      u.channelUntil = 0; u.channel = null;
+      if (u.order.kind === "idle") u.order = { kind: "idle" };
+    } else if (this.tick >= u.channelUntil) {
+      // window elapsed but rockets remain: fire the rest, then end next check
+      u.channelUntil = this.tick + 1;
     }
   }
 
@@ -389,8 +612,20 @@ export class Sim {
 
   updateUnit(u) {
     if (u.cooldown > 0) u.cooldown--;
+    if (u.abilityCd > 0) u.abilityCd--;
     const d = UNITS[u.type];
     const o = u.order;
+
+    // ---- special ability states preempt the normal order machine ----
+    // Leaping brute: fly straight to the landing point, then slam.
+    if (u.type === "brute" && u.leapUntil) { this.updateLeap(u); return; }
+    // Channeling banshee: fire a timed volley of rockets, immobile.
+    if (u.type === "banshee" && u.channelUntil) { this.updateBarrage(u); return; }
+    // Transforming tank: immobile, can't fire; finish the toggle when the timer
+    // elapses. Weapon/acquire resumes next tick in its normal order.
+    if (u.type === "tank" && this.tick < u.transformUntil) return;
+
+    const speed = this.unitSpeed(u);
 
     switch (o.kind) {
       case "idle":
@@ -401,7 +636,8 @@ export class Sim {
         break;
 
       case "move":
-        if (this.travelTo(u, o.x, o.y, d.speed)) this.popNext(u);
+        if (u.sieged) { u.order = { kind: "idle" }; break; } // sieged tank ignores moves
+        if (this.travelTo(u, o.x, o.y, speed)) this.popNext(u);
         break;
 
       case "attackmove": {
@@ -417,7 +653,8 @@ export class Sim {
             break;
           }
         }
-        if (this.travelTo(u, o.x, o.y, d.speed)) this.popNext(u);
+        if (u.sieged) break; // sieged tank holds position, keeps acquiring
+        if (this.travelTo(u, o.x, o.y, speed)) this.popNext(u);
         break;
       }
 
@@ -431,7 +668,8 @@ export class Sim {
             break;
           }
         }
-        if (this.travelTo(u, o.x, o.y, d.speed)) {
+        if (u.sieged) break;
+        if (this.travelTo(u, o.x, o.y, speed)) {
           // arrived: swing back the other way
           u.order = { kind: "patrol", x: o.ox, y: o.oy, ox: o.x, oy: o.y };
         }
@@ -440,17 +678,11 @@ export class Sim {
 
       case "hold": {
         // stand ground: fire at anything in weapon range, never chase
+        const range = this.unitRange(u);
         if ((d.dmg > 0 || d.dmgAir > 0) && u.cooldown === 0) {
-          const target = this.acquireTarget(u, d.range + HALF);
-          if (target && this.gapTo(u, target) <= d.range) {
-            u.cooldown = d.cooldown;
-            const dmg = target.fly ? d.dmgAir : d.dmg;
-            target.hp -= dmg;
-            this.events.push({
-              t: "shot", fx: u.x, fy: u.y, tx: target.x, ty: target.y,
-              owner: u.owner, ranged: d.range > FP, air: !!target.fly,
-              attackerId: u.id, targetId: target.id, tOwner: target.owner,
-            });
+          const target = this.acquireTarget(u, range + HALF);
+          if (target && this.canSiegeHit(u, target) && this.gapTo(u, target) <= range) {
+            this.fireAt(u, target, d);
           }
         }
         break;
@@ -471,21 +703,22 @@ export class Sim {
           else this.popNext(u);
           break;
         }
+        // sieged tank can't hit a target inside its minimum range: drop it
+        if (!this.canSiegeHit(u, target)) {
+          if (o.resume) { u.order = o.resume; u.path = null; }
+          else this.popNext(u);
+          break;
+        }
+        const range = this.unitRange(u);
         const gap = this.gapTo(u, target);
-        if (gap <= d.range) {
+        if (gap <= range) {
           u.path = null;
-          if (u.cooldown === 0) {
-            u.cooldown = d.cooldown;
-            const dmg = target.fly ? d.dmgAir : d.dmg;
-            target.hp -= dmg;
-            this.events.push({
-              t: "shot", fx: u.x, fy: u.y, tx: target.x, ty: target.y,
-              owner: u.owner, ranged: d.range > FP, air: !!target.fly,
-              attackerId: u.id, targetId: target.id, tOwner: target.owner,
-            });
-          }
+          if (u.cooldown === 0) this.fireAt(u, target, d);
+        } else if (u.sieged || this.tick < u.transformUntil) {
+          // sieged/transforming tanks never move to chase — just wait
+          u.path = null;
         } else {
-          this.travelTo(u, target.x, target.y, d.speed, true);
+          this.travelTo(u, target.x, target.y, this.unitSpeed(u), true);
         }
         break;
       }
@@ -544,6 +777,14 @@ export class Sim {
     }
     if (!b.queue.length) return;
     const item = b.queue[0];
+    // research item: never supply-gated, completes into an upgrade bit.
+    if (item.research) {
+      if (--item.remaining <= 0) {
+        b.queue.shift();
+        this.completeResearch(b.owner, item.research);
+      }
+      return;
+    }
     if (!item.started) {
       // production begins only when supply is available; otherwise stall
       const d = UNITS[item.type];
@@ -697,12 +938,99 @@ export class Sim {
     return target.fly ? (d.dmgAir || 0) > 0 : (d.dmg || 0) > 0;
   }
 
+  // ---------- ability-aware stat reads ----------
+  // Effective movement speed: stim (marine x1.4), afterburners (wraith x1.8),
+  // servos (tank x1.3). Integer math, applied at read time so `data` is never
+  // mutated. Sieged/transforming tanks and leaping/channeling units are
+  // immobile — callers gate movement separately, this just scales the number.
+  unitSpeed(u) {
+    const d = UNITS[u.type];
+    let s = d.speed;
+    if (u.type === "marine" && this.tick < u.stimUntil) {
+      const a = ABILITIES.stim; s = (s * a.spdNum / a.spdDen) | 0;
+    }
+    if (u.type === "wraith" && this.tick < u.burnUntil) {
+      const a = ABILITIES.burners; s = (s * a.spdNum / a.spdDen) | 0;
+    }
+    if (u.type === "tank" && (this.upgrades[u.owner] & UPGRADE_BITS.servos)) {
+      s = (s * SERVOS_SPEED_NUM / SERVOS_SPEED_DEN) | 0;
+    }
+    return s;
+  }
+
+  // Effective attack cooldown: stim shortens the marine's (x0.6).
+  unitCooldown(u) {
+    const d = UNITS[u.type];
+    let c = d.cooldown;
+    if (u.type === "marine" && this.tick < u.stimUntil) {
+      const a = ABILITIES.stim; c = (c * a.cdNum / a.cdDen) | 0;
+    }
+    if (u.type === "tank" && u.sieged) c = ABILITIES.siege.cooldown;
+    return c;
+  }
+
+  // Effective weapon range: a sieged tank reaches 9 tiles.
+  unitRange(u) {
+    const d = UNITS[u.type];
+    if (u.type === "tank" && u.sieged) return ABILITIES.siege.range * FP;
+    return d.range;
+  }
+
+  // Effective ground damage: a sieged tank hits for 30.
+  unitDmg(u, target) {
+    const d = UNITS[u.type];
+    if (u.type === "tank" && u.sieged && !target.fly) return ABILITIES.siege.dmg;
+    return target.fly ? d.dmgAir : d.dmg;
+  }
+
+  // A sieged tank cannot fire at anything inside its minimum range (2.5 tiles).
+  // Every other unit/state can always hit a valid target.
+  canSiegeHit(u, target) {
+    if (u.type === "tank" && u.sieged) {
+      const min = (ABILITIES.siege.minRange * FP / 10) | 0;
+      if (this.gapTo(u, target) < min) return false;
+    }
+    return true;
+  }
+
+  // Fire `u`'s weapon at `target`, applying the shot, cooldown, and (for a
+  // sieged tank) splash to nearby enemy ground units. `d` is UNITS[u.type].
+  fireAt(u, target, d) {
+    u.cooldown = this.unitCooldown(u);
+    const dmg = this.unitDmg(u, target);
+    target.hp -= dmg;
+    this.events.push({
+      t: "shot", fx: u.x, fy: u.y, tx: target.x, ty: target.y,
+      owner: u.owner, ranged: this.unitRange(u) > FP, air: !!target.fly,
+      attackerId: u.id, targetId: target.id, tOwner: target.owner,
+      siege: u.type === "tank" && u.sieged ? 1 : 0,
+    });
+    // sieged-tank splash: all OTHER enemy ground units within 1 tile of the
+    // impact take splash damage too (deterministic id order via entities).
+    if (u.type === "tank" && u.sieged && !target.fly) {
+      const a = ABILITIES.siege;
+      const r = a.splash * FP;
+      for (const e of this.entities) {
+        if (e === target || !e.unit || e.fly || e.owner < 0 || e.owner === u.owner || e.hp <= 0) continue;
+        if (dist2(target.x, target.y, e.x, e.y) <= r * r) {
+          e.hp -= a.splashDmg;
+          this.events.push({
+            t: "shot", fx: u.x, fy: u.y, tx: e.x, ty: e.y,
+            owner: u.owner, ranged: true, air: false,
+            attackerId: u.id, targetId: e.id, tOwner: e.owner, siege: 1, splash: 1,
+          });
+        }
+      }
+    }
+  }
+
   acquireTarget(u, range) {
     // nearest visible enemy this unit can actually hit; deterministic because
-    // entities iterate in id order
+    // entities iterate in id order. A sieged tank skips targets inside its
+    // minimum range (they can't be shot).
     return this.nearestEntity(u.x, u.y, range, (e) =>
       e.owner >= 0 && e.owner !== u.owner && e.hp > 0 &&
-      this.canHit(u, e) && this.isVisible(u.owner, e.x, e.y));
+      this.canHit(u, e) && this.canSiegeHit(u, e) && this.isVisible(u.owner, e.x, e.y));
   }
 
   // ---------- movement ----------
@@ -903,9 +1231,11 @@ export class Sim {
     h.mix(this.tick);
     h.mix(this.minerals[0]); h.mix(this.minerals[1]);
     h.mix(this.gas[0]); h.mix(this.gas[1]);
+    h.mix(this.upgrades[0]); h.mix(this.upgrades[1]);   // researched-upgrade masks
     for (const e of this.entities) {
       h.mix(e.id); h.mix(e.x); h.mix(e.y); h.mix(e.hp | 0);
       if (e.amount !== undefined) h.mix(e.amount | 0);   // resource depletion
+      if (e.unit) { h.mix(e.abilityCd | 0); h.mix(e.sieged | 0); } // ability sim state
     }
     return h.value();
   }

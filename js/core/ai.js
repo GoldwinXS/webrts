@@ -2,13 +2,14 @@
 // command pipeline, so the sim stays authoritative. Rule-based build order:
 // saturate minerals -> keep supply ahead -> barracks -> army -> attack waves.
 import { FP, tileToFp, fpToTile, dist2 } from "./fixed.js";
-import { UNITS, BUILDINGS } from "./data.js";
+import { UNITS, BUILDINGS, UPGRADES, UPGRADE_BITS } from "./data.js";
 
 export class AI {
   constructor(pid) {
     this.pid = pid;
     this.nextWave = 1200;      // first attack around 2 min
     this.waveSize = 8;
+    this.tankIdleSince = {};   // tankId -> tick nothing was near (for unsiege)
   }
 
   // Called every tick; returns a command list (usually empty).
@@ -110,6 +111,56 @@ export class AI {
     }
     // (air units skipped for the AI for now — follow-up: build a starport and
     // mix wraiths/banshees, and use turrets for base anti-air defense.)
+
+    // 5c. research: stims once a barracks + refinery are up; siegetech once a
+    // factory is done. Crude one-shot: queue on the first idle-enough building.
+    const own = this.pid;
+    if (barracksDone && doneRefineries.length && !(sim.upgrades[own] & UPGRADE_BITS.stims) &&
+        !sim.upgradeQueued(own, "stims")) {
+      const bk = barracks.find((b) => b.done && b.queue.length < 2);
+      const u = UPGRADES.stims;
+      if (bk && sim.canAfford(own, u.cost, u.gasCost)) cmds.push({ t: "research", buildingId: bk.id, research: "stims" });
+    }
+    if (factories.some((f) => f.done) && !(sim.upgrades[own] & UPGRADE_BITS.siegetech) &&
+        !sim.upgradeQueued(own, "siegetech")) {
+      const fac = factories.find((f) => f.done && f.queue.length < 2);
+      const u = UPGRADES.siegetech;
+      if (fac && sim.canAfford(own, u.cost, u.gasCost)) cmds.push({ t: "research", buildingId: fac.id, research: "siegetech" });
+    }
+
+    // 5d. ability micro. Stim marines when the attack wave is within 8 tiles of
+    // an enemy building. Siege tanks when >=2 enemies are within 7 tiles.
+    if (sim.upgrades[own] & UPGRADE_BITS.stims) {
+      const enemyB = sim.entities.find((e) => e.building && e.owner >= 0 && e.owner !== own);
+      const marines = army.filter((u) => u.type === "marine" && u.abilityCd === 0 &&
+        sim.tick >= (u.stimUntil || 0) && u.hp > 12);
+      if (enemyB && marines.length) {
+        const near = marines.filter((u) => dist2(u.x, u.y, enemyB.x, enemyB.y) <= (FP * 8) * (FP * 8));
+        if (near.length) cmds.push({ t: "ability", ids: near.map((u) => u.id), ability: "stim" });
+      }
+    }
+    if (sim.upgrades[own] & UPGRADE_BITS.siegetech) {
+      for (const tank of army.filter((u) => u.type === "tank")) {
+        if (sim.tick < tank.transformUntil) continue;
+        const enemiesNear7 = sim.entities.filter((e) => e.owner >= 0 && e.owner !== own && e.unit &&
+          dist2(tank.x, tank.y, e.x, e.y) <= (FP * 7) * (FP * 7)).length;
+        const anyNear10 = sim.entities.some((e) => e.owner >= 0 && e.owner !== own && e.unit &&
+          dist2(tank.x, tank.y, e.x, e.y) <= (FP * 10) * (FP * 10));
+        if (!tank.sieged && enemiesNear7 >= 2 && tank.abilityCd === 0) {
+          cmds.push({ t: "ability", ids: [tank.id], ability: "siege" });
+          delete this.tankIdleSince[tank.id];
+        } else if (tank.sieged) {
+          if (anyNear10) delete this.tankIdleSince[tank.id];
+          else {
+            if (this.tankIdleSince[tank.id] === undefined) this.tankIdleSince[tank.id] = sim.tick;
+            if (sim.tick - this.tankIdleSince[tank.id] >= 100 && tank.abilityCd === 0) {
+              cmds.push({ t: "ability", ids: [tank.id], ability: "siege" }); // unsiege
+              delete this.tankIdleSince[tank.id];
+            }
+          }
+        }
+      }
+    }
 
     // 6. defense: enemy near base -> everyone in the army responds
     const threat = sim.nearestEntity(hq.x, hq.y, FP * 12,

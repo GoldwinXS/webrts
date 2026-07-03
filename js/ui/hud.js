@@ -1,6 +1,6 @@
 // DOM HUD: resource bar, selection panel, command card, minimap, toasts.
 import { FP, fpToTile } from "../core/fixed.js";
-import { UNITS, BUILDINGS, PLAYER_COLORS, MAX_QUEUE } from "../core/data.js";
+import { UNITS, BUILDINGS, PLAYER_COLORS, MAX_QUEUE, ABILITIES, UPGRADES, UPGRADE_BITS } from "../core/data.js";
 import { KEYS, DEFAULTS, rebind, resetBinds } from "./keys.js";
 
 export class Hud {
@@ -386,6 +386,7 @@ export class Hud {
       if (e.type === "mineral") html += `<div class="sel-sub">${e.amount} remaining</div>`;
       else html += `<div class="sel-sub">${Math.max(0, e.hp | 0)} / ${e.maxHp} HP</div>`;
       if (e.unit) html += `<div class="sel-sub status">${this.orderLabel(e)}</div>`;
+      if (e.unit) { const st = this.abilityStatus(e); if (st) html += `<div class="sel-sub status ability">${st}</div>`; }
       if (e.building && !e.done) {
         const pct = ((e.progress / BUILDINGS[e.type].buildTime) * 100) | 0;
         html += `<div class="sel-sub">Constructing ${pct}%</div>`;
@@ -404,11 +405,14 @@ export class Hud {
       const name = BUILDINGS[b.type].name;
       let chips = "";
       q.forEach((item, i) => {
+        // research items carry {research} instead of {type}; chip shows "R%".
+        const total = item.research ? UPGRADES[item.research].time : UNITS[item.type].buildTime;
+        const glyph = item.research ? "R" : UNITS[item.type].name.charAt(0);
         if (i === 0) {
-          const pct = (100 - (item.remaining / UNITS[item.type].buildTime) * 100) | 0;
-          chips += `<span class="q-item q-head">${pct}%</span>`;
+          const pct = (100 - (item.remaining / total) * 100) | 0;
+          chips += `<span class="q-item q-head">${item.research ? "R" : ""}${pct}%</span>`;
         } else {
-          chips += `<span class="q-item">${UNITS[item.type].name.charAt(0)}</span>`;
+          chips += `<span class="q-item">${glyph}</span>`;
         }
       });
       html += `<div class="queue-row"><span class="q-name">${name}</span><span class="q-items">${chips}</span></div>`;
@@ -425,7 +429,12 @@ export class Hud {
 
     // ---- command card: grid hotkeys (QWER row, AS pinned for combat) ----
     const anyUnits = mine.some((e) => e.unit);
-    const sig = `${types.join(",")}|${this.activeType}|${anyUnits}`;
+    // abilities available for the active subgroup (type matches + research owned)
+    const abilList = this.abilitiesFor(mine);
+    // ready-boolean per ability (some selected unit of that type off cooldown):
+    // folded into the signature so the card re-renders when cd state flips.
+    const readySig = abilList.map((ab) => this.abilityReady(mine, ab) ? 1 : 0).join("");
+    const sig = `${types.join(",")}|${this.activeType}|${anyUnits}|${abilList.map((a) => a.key).join("")}|${readySig}`;
     if (sig === this.cardSig) return;
     this.cardSig = sig;
 
@@ -443,10 +452,33 @@ export class Hud {
     const activeBuilding = mine.find((e) => e.type === this.activeType && e.building && e.done);
     if (activeBuilding) {
       const keys = ["q", "w", "e", "r"];
-      (BUILDINGS[activeBuilding.type].trains || []).forEach((t, i) => {
+      const trains = BUILDINGS[activeBuilding.type].trains || [];
+      trains.forEach((t, i) => {
         const d = UNITS[t];
         const cost = d.gasCost ? `${d.cost}m ${d.gasCost}g` : `${d.cost}`;
         slots.push({ key: keys[i], cmd: `train-${t}`, label: d.name, sub: `${cost} · ${d.supply} supply` });
+      });
+      // research buttons on R/T (slots after the train buttons), hidden once
+      // owned. Only upgrades that research at THIS building type appear.
+      const resKeys = ["r", "t"]; let ri = 0;
+      for (const [upg, up] of Object.entries(UPGRADES)) {
+        if (up.building !== activeBuilding.type) continue;
+        if (this.sim.upgrades[this.pid] & up.bit) continue; // already owned
+        if (ri >= resKeys.length) break;
+        const queued = this.sim.upgradeQueued(this.pid, upg);
+        const cost = up.gasCost ? `${up.cost}m ${up.gasCost}g` : `${up.cost}`;
+        slots.push({
+          key: resKeys[ri++], cmd: `research-${upg}`, label: up.name,
+          sub: queued ? "Researching..." : cost, disabled: queued,
+        });
+      }
+    }
+    // ---- ability buttons on Z/X/C for the active unit subgroup ----
+    for (const ab of abilList) {
+      const ready = this.abilityReady(mine, ab);
+      slots.push({
+        key: ab.key, cmd: `ability-${ab.name}`, label: ABILITIES[ab.name].name,
+        sub: ab.sub, cls: ready ? "" : "cooldown",
       });
     }
     if (anyUnits) {
@@ -460,7 +492,8 @@ export class Hud {
     let card = "";
     for (const s of slots) {
       this.hotkeys[s.key] = s.cmd;
-      card += `<button data-cmd="${s.cmd}"><kbd>${s.key.toUpperCase()}</kbd><span>${s.label}</span><small>${s.sub}</small></button>`;
+      const cls = [s.cls, s.disabled ? "cooldown" : ""].filter(Boolean).join(" ");
+      card += `<button data-cmd="${s.cmd}"${cls ? ` class="${cls}"` : ""}><kbd>${s.key.toUpperCase()}</kbd><span>${s.label}</span><small>${s.sub}</small></button>`;
     }
     this.$cmdCard.innerHTML = card;
     for (const b of this.$cmdCard.querySelectorAll("button")) {
@@ -484,6 +517,18 @@ export class Hud {
     this.audio.select();
   }
 
+  // Ability/state status line for a single selected unit ("Sieged", etc.).
+  abilityStatus(e) {
+    const t = this.sim.tick;
+    if (e.type === "tank" && t < e.transformUntil) return "Transforming";
+    if (e.type === "tank" && e.sieged) return "Sieged";
+    if (e.type === "marine" && t < e.stimUntil) return "Stimmed";
+    if (e.type === "wraith" && t < e.burnUntil) return "Afterburners";
+    if (e.type === "brute" && e.leapUntil) return "Leaping";
+    if (e.type === "banshee" && e.channelUntil) return "Barraging";
+    return "";
+  }
+
   orderLabel(e) {
     const o = e.order;
     switch (o.kind) {
@@ -502,6 +547,33 @@ export class Hud {
       case "hold": return "Holding position";
       default: return "";
     }
+  }
+
+  // Which abilities are available for the active-type units in `mine`? Returns
+  // [{name, key, sub, targeted}] on the Z/X/C grid (z = first ability of type).
+  abilitiesFor(mine) {
+    const type = this.activeType;
+    if (!type) return [];
+    const list = [];
+    const keys = ["z", "x", "c"];
+    for (const [name, a] of Object.entries(ABILITIES)) {
+      if (a.unit !== type) continue;
+      // research-gated abilities only show once the player owns the upgrade
+      if (a.requires && !(this.sim.upgrades[this.pid] & UPGRADE_BITS[a.requires])) continue;
+      const sub = a.toggle ? "toggle" : a.targeted ? "target" : "instant";
+      list.push({ name, key: keys[list.length] || "z", sub, targeted: !!a.targeted });
+      if (list.length >= keys.length) break;
+    }
+    return list;
+  }
+
+  // True if any selected unit of the ability's type is off cooldown (so the
+  // button is active). Used to toggle the `cooldown` CSS class.
+  abilityReady(mine, ab) {
+    const a = ABILITIES[ab.name];
+    return mine.some((e) => e.type === a.unit && e.abilityCd === 0 &&
+      !(e.type === "tank" && this.sim.tick < e.transformUntil) &&
+      !e.leapUntil && !e.channelUntil);
   }
 
   command(cmd) {
@@ -545,6 +617,10 @@ export class Hud {
       this.game.issue({ t: "train", buildingId: candidates[0].id, unit: t });
       this.recentTrains.push({ bid: candidates[0].id, until: now + 600 });
       this.audio.trained();
+    } else if (cmd.startsWith("research-")) {
+      this.doResearch(cmd.slice(9));
+    } else if (cmd.startsWith("ability-")) {
+      this.doAbility(cmd.slice(8));
     } else if (cmd === "attack") {
       if (this.input?.mySelectedUnitIds().length) this.input.setAttackMode(true);
     } else if (cmd === "patrol") {
@@ -556,6 +632,61 @@ export class Hud {
       const ids = this.input?.mySelectedUnitIds() || [];
       if (ids.length) { this.game.issue({ t: "stop", ids }); this.audio.ack(); }
     }
+  }
+
+  // Queue an upgrade at a selected finished building of the right type.
+  doResearch(upg) {
+    const up = UPGRADES[upg];
+    if (!up) return;
+    if (this.sim.upgrades[this.pid] & up.bit) return; // owned
+    if (this.sim.upgradeQueued(this.pid, upg)) { this.audio.error(); return this.toast("Already researching"); }
+    if (!this.sim.canAfford(this.pid, up.cost, up.gasCost || 0)) {
+      this.audio.error();
+      return this.toast(up.gasCost && this.sim.gas[this.pid] < up.gasCost ? "Not enough gas" : "Not enough minerals");
+    }
+    // pick the selected building of the matching type with the shortest queue
+    const b = this.mineOfType(up.building).filter((e) => e.building && e.done && e.queue.length < MAX_QUEUE)
+      .sort((a, c) => a.queue.length - c.queue.length || a.id - c.id)[0];
+    if (!b) { this.audio.error(); return this.toast("Production queue full"); }
+    this.game.issue({ t: "research", buildingId: b.id, research: upg });
+    this.audio.trained();
+    this.cardSig = ""; // re-render to show "Researching..."
+  }
+
+  // Issue an ability for all valid selected units of its type. Targeted
+  // abilities enter target mode instead of firing immediately.
+  doAbility(name) {
+    const a = ABILITIES[name];
+    if (!a) return;
+    const ids = this.mineOfType(a.unit)
+      .filter((e) => e.abilityCd === 0 &&
+        !(e.type === "tank" && this.sim.tick < e.transformUntil) &&
+        !e.leapUntil && !e.channelUntil)
+      .map((e) => e.id);
+    if (!ids.length) { this.audio.error(); return; }
+    if (a.targeted) {
+      this.input?.setTargetMode({ ability: name, ids });
+    } else {
+      this.game.issue({ t: "ability", ids, ability: name });
+      this.abilitySound(name);
+      this.cardSig = ""; // reflect the fresh cooldown on the card
+    }
+  }
+
+  // small per-ability audio cue on issue
+  abilitySound(name) {
+    if (name === "stim") this.audio.stim?.();
+    else if (name === "burners") this.audio.burners?.();
+    else if (name === "leap") this.audio.leap?.();
+    else if (name === "barrage") this.audio.barrage?.();
+    else if (name === "siege") this.audio.siegeUp?.(); // toggle: up/down sound also on event
+  }
+
+  // selected own entities of a given type
+  mineOfType(type) {
+    return [...this.renderer.selection]
+      .map((id) => this.sim.byId.get(id))
+      .filter((e) => e && e.owner === this.pid && e.type === type);
   }
 
   // ---------- minimap ----------

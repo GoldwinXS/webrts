@@ -97,6 +97,54 @@ export const BUILDINGS = {
   },
 };
 
+// ---------- upgrades (researched at buildings, global per player) ----------
+// sim.upgrades[pid] is a bitmask of these bits. Each upgrade is researched once.
+export const UPGRADE_BITS = {
+  stims: 1, plating: 2, siegetech: 4, servos: 8, afterburners: 16,
+};
+
+// Research definitions. `building` is the structure whose production queue the
+// research shares; cost is deducted at queue time like a unit.
+export const UPGRADES = {
+  stims:       { name: "Stim Pack",     building: "barracks", cost: 100, gasCost: 50,  time: 300, bit: 1 },
+  plating:     { name: "Combat Plating", building: "barracks", cost: 125, gasCost: 75,  time: 350, bit: 2 },
+  siegetech:   { name: "Siege Tech",    building: "factory",  cost: 150, gasCost: 100, time: 400, bit: 4 },
+  servos:      { name: "Servo Motors",  building: "factory",  cost: 100, gasCost: 100, time: 300, bit: 8 },
+  afterburners:{ name: "Afterburners",  building: "starport", cost: 100, gasCost: 100, time: 300, bit: 16 },
+};
+
+// Retroactive plating buff applied to living + future marines/brutes.
+export const PLATING_HP = 12;
+// Tank speed multiplier from servos (numerator/denominator, integer math).
+export const SERVOS_SPEED_NUM = 13, SERVOS_SPEED_DEN = 10;
+
+// ---------- abilities (per-unit, command-driven) ----------
+// Multipliers are numerator/denominator pairs so speed/cooldown math stays
+// integer-only and deterministic.
+export const ABILITIES = {
+  stim: {
+    name: "Stim Pack", unit: "marine", requires: "stims", targeted: false,
+    cd: 120, hpCost: 8, dur: 80, spdNum: 14, spdDen: 10, cdNum: 6, cdDen: 10,
+  },
+  leap: {
+    name: "Leap", unit: "brute", requires: null, targeted: true,
+    cd: 150, range: 4, dur: 6, dmg: 10, splash: 1, // range/splash in tiles
+  },
+  siege: {
+    name: "Siege Mode", unit: "tank", requires: "siegetech", targeted: false, toggle: true,
+    cd: 0, transform: 20, range: 9, dmg: 30, minRange: 25, // minRange in tenths of a tile (2.5)
+    splash: 1, splashDmg: 15, cooldown: 24,
+  },
+  burners: {
+    name: "Afterburners", unit: "wraith", requires: "afterburners", targeted: false,
+    cd: 150, dur: 40, spdNum: 18, spdDen: 10,
+  },
+  barrage: {
+    name: "Rocket Barrage", unit: "banshee", requires: null, targeted: true,
+    cd: 200, range: 6, channel: 15, rockets: 5, interval: 3, dmg: 8, radius: 192, // radius fp (0.75 tile)
+  },
+};
+
 export const HOTKEYS = {
   worker: "q", marine: "q", brute: "w", tank: "q", wraith: "q", banshee: "w",
   depot: "z", barracks: "x", hq: "c",

@@ -30,6 +30,7 @@ export class Input {
     this.baseCycle = 0;                    // Backspace base rotation
     this.camSlots = [null, null, null, null]; // F5-F8 camera locations
     this.patrolMode = false;
+    this.targetMode = null;   // { ability, ids } while aiming a targeted ability
 
     this.ray = new THREE.Raycaster();
     this.groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
@@ -105,6 +106,12 @@ export class Input {
     }
     if (e.button === 0) {
       if (this.placing) { this.confirmPlace(); return; }
+      if (this.targetMode) {
+        const g = this.groundAt(e.clientX, e.clientY);
+        if (g) this.issueTargetedAbility(g.x, g.y, g.wx, g.wz);
+        this.setTargetMode(null);
+        return;
+      }
       if (this.attackMode) {
         const g = this.groundAt(e.clientX, e.clientY);
         const target = this.entityAt(e.clientX, e.clientY);
@@ -126,6 +133,7 @@ export class Input {
       this.drag = { sx: e.clientX, sy: e.clientY, cx: e.clientX, cy: e.clientY };
     } else if (e.button === 2) {
       if (this.placing) { this.cancelPlace(); return; }
+      if (this.targetMode) { this.setTargetMode(null); return; }
       if (this.attackMode) { this.setAttackMode(false); return; }
       if (this.patrolMode) { this.setPatrolMode(false); return; }
       this.rightClick(e.clientX, e.clientY, e.shiftKey);
@@ -264,6 +272,7 @@ export class Input {
     if (!down) return;
     if (k === "escape") {
       if (this.placing) this.cancelPlace();
+      else if (this.targetMode) this.setTargetMode(null);
       else if (this.attackMode) this.setAttackMode(false);
       else if (this.patrolMode) this.setPatrolMode(false);
       else { this.selection.clear(); this.hud.refreshSelection(); }
@@ -364,9 +373,34 @@ export class Input {
 
   setAttackMode(on) {
     this.attackMode = on;
-    if (on) this.patrolMode = false;
+    if (on) { this.patrolMode = false; this.setTargetMode(null); }
     document.body.classList.toggle("attack-cursor", on || this.patrolMode);
     this.hud.setHint(on ? "Attack-move: click a target or location (right-click / Esc to cancel)" : "");
+  }
+
+  // Enter/leave aiming mode for a targeted ability (leap, barrage). While active
+  // the next left-click issues the ability at that ground point.
+  setTargetMode(spec) {
+    this.targetMode = spec;
+    if (spec) { this.attackMode = false; this.patrolMode = false; }
+    document.body.classList.toggle("attack-cursor", !!spec || this.attackMode || this.patrolMode);
+    if (spec) {
+      const name = spec.ability.charAt(0).toUpperCase() + spec.ability.slice(1);
+      this.hud.setHint(`${name}: click a target location (right-click / Esc to cancel)`);
+    } else if (!this.attackMode && !this.patrolMode) {
+      this.hud.setHint("");
+    }
+  }
+
+  issueTargetedAbility(fx, fy, wx, wz) {
+    const { ability, ids } = this.targetMode;
+    // re-filter to still-valid, off-cooldown units of the ability's type
+    const live = ids.filter((id) => this.sim.byId.has(id));
+    if (!live.length) return;
+    this.game.issue({ t: "ability", ids: live, ability, x: fx, y: fy });
+    this.hud.abilitySound?.(ability);
+    this.renderer.orderPing(wx, wz, "#ff9d4c");
+    this.hud.cardSig = "";
   }
 
   setPatrolMode(on) {

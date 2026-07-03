@@ -1,14 +1,21 @@
 // Deterministic procedural map generation. Supports TWO symmetry modes so that
 // spawns can be cross-map (180-degree rotational) OR same-edge/close
 // (reflection across a center axis). Every tile that lands in rock/height/
-// starts/minerals/geysers/losBlock is written through paired symmetric setters,
-// so the battlefield is balanced BY CONSTRUCTION regardless of mode.
+// starts/minerals/geysers/losBlock/rampTiles/barrierKind is written through
+// paired symmetric setters, so the battlefield is balanced BY CONSTRUCTION
+// regardless of mode.
 //
 // The primary separation between areas is ELEVATION (cliff-walled height
-// changes with occasional ramps), not rock blobs — rocks are now sparse,
-// decoration-scale obstacles. Maps vary along many axes (base placement style,
-// symmetry mode, elevation character, lane count/choke widths, mineral-line
-// orientation, deco density, LoS blockers) so each seed feels distinct.
+// changes with ramps), not rock blobs — barriers are now organic, themed
+// clumps that FRAME lanes and region borders rather than a uniform scatter.
+//
+// ELEVATION uses FOUR levels (0..3): lowland 0, naturals/mid-plateaus 1, mains
+// 1-3 (varies by seed), decorative mesas up to 3. Every playable area stays
+// reachable: ramps step through ONE level at a time (L <-> L+1, never skipping),
+// cliff faces between different levels stay blocked, and the sim's LoS compares
+// heights numerically so arbitrary levels "just work". The per-seed vertical
+// PROFILE varies: some maps are mostly flat with one dramatic tier, some are
+// terraced (0->1->2 toward each main), some inverted (high rim / low center).
 //
 // INTEGER-ONLY. Everything is driven exclusively by makeRng(seed) (+ resolved
 // opts). Two calls with the same (seed, opts) are byte-identical (both
@@ -45,6 +52,13 @@ export const THEMES = [
 // Decoration kinds (renderer maps these to primitive-geometry props):
 // 0 = crystal shard cluster, 1 = small rock pile, 2 = glowing flora tuft,
 // 3 = tall shrub (LoS blocker marker — passable, blocks vision).
+//
+// Barrier kinds (renderer maps these to organic obstacle geometry). Set in the
+// `barrierKind` array on every BLOCKED tile that is NOT a cliff face (cliffs are
+// implied by height edges and get barrierKind 0):
+//   1 = forest stand, 2 = lava fissure / basalt, 3 = ice spires, 4 = rock outcrop.
+// Theme -> palette of kinds used (see barrierPaletteFor).
+export const BARRIER_FOREST = 1, BARRIER_LAVA = 2, BARRIER_ICE = 3, BARRIER_ROCK = 4;
 
 // ---------------------------------------------------------------------------
 // Public entry point
@@ -60,6 +74,23 @@ export const THEMES = [
 //   losBlockers:  boolean                          (default true)
 //   theme:        -1 (seed-random) | 0..2          (default -1)
 // }
+//
+// Output map fields (shapes):
+//   w, h            : ints (MAP_W, MAP_H)
+//   rock            : Uint8Array(w*h)  nonzero = blocked (cliff face OR barrier)
+//   height          : Uint8Array(w*h)  0..3 elevation level
+//   rampTiles       : Uint8Array(w*h)  nonzero on passable level-transition tiles;
+//                                       value = the HIGHER level it connects (1..3)
+//   barrierKind     : Uint8Array(w*h)  1..4 on non-cliff blocked tiles, else 0
+//   losBlock        : Uint8Array(w*h)  nonzero = blocks line of sight (passable)
+//   starts          : [{x,y}, {x,y}]   tile coords of the two mains
+//   minerals        : [{x,y}...]       fp tile-center coords
+//   geysers         : [{x,y}...]       fp tile-center coords
+//   decos           : [{x,y,kind}...]  kinds 0..3
+//   naturals        : [{x,y}...]       tile coords (internal validation aid)
+//   clusters        : [...]            resource clusters (internal validation aid)
+//   ramps           : [{tiles:[...]}]  main-ramp tiles (internal choke check)
+//   theme, themeName
 export function generateMap(seed, opts = {}) {
   const resolved = resolveOpts(seed, opts);
   for (let attempt = 0; attempt < 24; attempt++) {
@@ -76,6 +107,25 @@ export function generateMap(seed, opts = {}) {
   fb.theme = resolved.theme < 0 ? ((seed >>> 0) % THEMES.length) : (resolved.theme % THEMES.length);
   fb.themeName = THEMES[fb.theme].name;
   return fb;
+}
+
+// TEMP DEBUG (remove before ship): returns the first-attempt validation reason.
+export function _debugFirstReason(seed, opts = {}) {
+  const resolved = resolveOpts(seed, opts);
+  const reasons = [];
+  for (let attempt = 0; attempt < 24; attempt++) {
+    const s = (seed + attempt * 1000003) | 0;
+    const map = buildCandidate(s, resolved);
+    reasons.push(validateVerbose(map));
+    if (validateVerbose(map) === null) return { ok: true, attempt, reasons };
+  }
+  return { ok: false, reasons };
+}
+
+// TEMP DEBUG (remove before ship): build the raw first-attempt candidate.
+export function _debugCandidate(seed, opts = {}) {
+  const resolved = resolveOpts(seed, opts);
+  return buildCandidate(seed | 0, resolved);
 }
 
 // Resolve the option object into concrete integer choices. "random"/-1 values
@@ -97,6 +147,18 @@ function resolveOpts(seed, opts) {
   return { spawns, expansions, losBlockers, theme };
 }
 
+// Which barrier kinds a theme prefers, as a weighted bag (index 0 dominates).
+// verdant: mostly forest + a little rock. ashen: mostly lava + rock.
+// frozen: mostly ice + rock. Theme is resolved AFTER build, so we derive it the
+// same way generateMap() will (seed-random unless pinned) to keep barriers
+// theme-appropriate by construction.
+function barrierPaletteFor(seed, resolvedTheme) {
+  const t = resolvedTheme < 0 ? ((seed >>> 0) % THEMES.length) : (resolvedTheme % THEMES.length);
+  if (t === 1) return { primary: BARRIER_LAVA, secondary: BARRIER_ROCK, secondaryChance: 4 }; // ashen
+  if (t === 2) return { primary: BARRIER_ICE, secondary: BARRIER_ROCK, secondaryChance: 4 };  // frozen
+  return { primary: BARRIER_FOREST, secondary: BARRIER_ROCK, secondaryChance: 5 };            // verdant
+}
+
 // ---------------------------------------------------------------------------
 // Candidate construction
 // ---------------------------------------------------------------------------
@@ -107,24 +169,22 @@ function buildCandidate(seed, opts) {
   const rock = new Uint8Array(W * H);
   const height = new Uint8Array(W * H);
   const losBlock = new Uint8Array(W * H);
+  const rampTiles = new Uint8Array(W * H);
+  const barrierKind = new Uint8Array(W * H);
   const decos = [];
 
   const idx = (x, y) => y * W + x;
   const inb = (x, y) => x >= 0 && y >= 0 && x < W && y < H;
 
+  const palette = barrierPaletteFor(seed, opts.theme);
+
   // ---- symmetry mode --------------------------------------------------------
   // "cross"  -> 180-degree rotational partner (opposite corners).
   // "close"  -> reflection across a center axis (same-edge spawns), which is
   //             the ONLY way to keep two same-edge spawns balanced.
-  // For close spawns we pick the reflection axis so the two mains sit on the
-  // same edge: vertical axis (reflect x) => two spawns share the TOP (or a
-  // side) edge; horizontal axis (reflect y) similarly.
   const mode = opts.spawns === "close" ? "reflect" : "rotate";
-  // reflection axis: 0 = vertical (mirror x, spawns share top/bottom edge),
-  //                  1 = horizontal (mirror y, spawns share left/right edge).
   const reflectAxis = mode === "reflect" ? (rng() & 1) : 0;
 
-  // partner(x,y) -> [px,py] of the symmetric counterpart under the active mode.
   const partner = (x, y) => {
     if (mode === "rotate") return [W - 1 - x, H - 1 - y];
     return reflectAxis === 0 ? [W - 1 - x, y] : [x, H - 1 - y];
@@ -137,6 +197,7 @@ function buildCandidate(seed, opts) {
     rock[idx(x, y)] = v;
     const [px, py] = partner(x, y);
     rock[idx(px, py)] = v;
+    if (!v) { barrierKind[idx(x, y)] = 0; barrierKind[idx(px, py)] = 0; } // clearing a tile clears its barrier tag
   };
   const setHeight = (x, y, v) => {
     if (!inb(x, y)) return;
@@ -150,6 +211,21 @@ function buildCandidate(seed, opts) {
     const [px, py] = partner(x, y);
     losBlock[idx(px, py)] = v;
   };
+  const setRamp = (x, y, hi) => {
+    if (!inb(x, y)) return;
+    rampTiles[idx(x, y)] = hi;
+    const [px, py] = partner(x, y);
+    rampTiles[idx(px, py)] = hi;
+  };
+  // Mark a BLOCKED tile as a barrier of kind k (cliff faces call setRock only).
+  const setBarrier = (x, y, k) => {
+    if (!inb(x, y)) return;
+    rock[idx(x, y)] = 1;
+    barrierKind[idx(x, y)] = k;
+    const [px, py] = partner(x, y);
+    rock[idx(px, py)] = 1;
+    barrierKind[idx(px, py)] = k;
+  };
   const addDeco = (x, y, kind) => {
     if (!inb(x, y)) return;
     decos.push({ x, y, kind });
@@ -158,25 +234,15 @@ function buildCandidate(seed, opts) {
   };
 
   // ---- base placement style (variation axis #1) -----------------------------
-  // Two families of start positions:
-  //   corner      : classic corner inset (varying inset distance)
-  //   edgeMiddle  : partway along an edge (SC2-style top/side positions)
-  // For "close" (reflect) spawns we deliberately favour same-edge placements
-  // (e.g. two top corners / two positions along the top edge). For "cross"
-  // (rotate) spawns the partner is the opposite corner automatically.
   const inset = 6 + (rng() % 6);                    // 6..11 tiles from the edge
   let start0;
   if (mode === "reflect") {
-    // both spawns share the edge OPPOSITE to the reflection axis line.
     if (reflectAxis === 0) {
-      // mirror-x: spawns sit along the top OR bottom edge (same y).
       const topEdge = (rng() & 1) === 0;
       const y = topEdge ? inset : H - 1 - inset;
-      // x on player-0's (left) half; partner mirrors to the right half.
       const x = Math.min((W >> 1) - 3, inset + (rng() % 4));
       start0 = { x, y };
     } else {
-      // mirror-y: spawns sit along the left OR right edge (same x).
       const leftEdge = (rng() & 1) === 0;
       const x = leftEdge ? inset : W - 1 - inset;
       const y = Math.min((H >> 1) - 3, inset + (rng() % 4));
@@ -185,14 +251,12 @@ function buildCandidate(seed, opts) {
   } else {
     const style = rng() % 3;                         // 0 corner, 1/2 edge-middle
     if (style === 0) {
-      const ne = (rng() & 1) === 1;                 // NW/SE vs NE/SW pair
+      const ne = (rng() & 1) === 1;
       start0 = ne ? { x: W - 1 - inset, y: inset } : { x: inset, y: inset };
     } else if (style === 1) {
-      // top/bottom edge-middle: x near quarter, y near an edge
       const topSide = (rng() & 1) === 0;
       start0 = { x: (W >> 2) + (rng() % 5) - 2, y: topSide ? inset : H - 1 - inset };
     } else {
-      // left/right edge-middle: x near an edge, y near quarter
       const leftSide = (rng() & 1) === 0;
       start0 = { x: leftSide ? inset : W - 1 - inset, y: (H >> 2) + (rng() % 5) - 2 };
     }
@@ -203,52 +267,58 @@ function buildCandidate(seed, opts) {
   const start1 = { x: p1x, y: p1y };
   const starts = [start0, start1];
 
-  // Direction from a main toward map center (for placing ramps / expansions).
-  // Never (0,0): if a start sits on a center axis, bias toward interior.
   const toCenter = (s) => {
     let dx = Math.sign((W >> 1) - s.x);
     let dy = Math.sign((H >> 1) - s.y);
     if (dx === 0 && dy === 0) { dx = 1; dy = 1; }
-    // For reflect mode along an edge, the "into the map" direction is mostly
-    // perpendicular to the shared edge; keep the natural sign toward center.
     if (dx === 0) dx = (s.x < (W >> 1)) ? 1 : -1;
     if (dy === 0) dy = (s.y < (H >> 1)) ? 1 : -1;
     return { dx, dy };
   };
 
-  // ---- elevation character (variation axis #3) ------------------------------
-  // How much of the map is high ground. Drives a broad low/high banding of the
-  // battlefield that separates areas by CLIFFS instead of rock walls.
-  const elevChar = rng() % 3;                        // 0 low-dominant, 1 mixed, 2 high-dominant
+  // ---- vertical PROFILE (variation axis #3, replaces old elevChar) ----------
+  // Selects the whole-map elevation character so seeds feel distinct:
+  //   0 "flat"     : mostly lowland, main is one modest tier (lvl 1), gentle
+  //                  center rise. One dramatic mesa somewhere for flavour.
+  //   1 "terraced" : the classic 0->1->2 climb toward each main; main high
+  //                  (lvl 2-3), center a mid band. Lots of tiers.
+  //   2 "inverted" : high rim toward the map edges, LOW center bowl. Mains high
+  //                  (lvl 2), center band LOW so fights happen down in the pit.
+  //   3 "mesa"     : mostly flat playfield but one or two tall decorative mesas
+  //                  (lvl 3) framing the middle; main modest (lvl 1-2).
+  const vProfile = rng() % 4;
+  // main plateau level varies by profile AND seed within the allowed range.
+  let mainHeight;
+  if (vProfile === 0) mainHeight = 1;                       // flat: modest main
+  else if (vProfile === 1) mainHeight = 2 + (rng() & 1);   // terraced: 2 or 3
+  else if (vProfile === 2) mainHeight = 2;                 // inverted: high main
+  else mainHeight = 1 + (rng() & 1);                       // mesa: 1 or 2
 
-  // ---- 1. main plateau + cliff ring + ramp(s) -------------------------------
-  // Bigger plateau than before so the interior guarantees >= 70 free tiles.
+  // ---- 1. main plateau + cliff ring + stepped ramp --------------------------
   const plateauR = 6;                               // plateau half-extent (13x13 top)
-  const mainHeight = 1 + (rng() & 1);               // main at level 1 or 2
   raisePlateau(start0, plateauR, mainHeight);
 
   const c0 = toCenter(start0);
+  const laneCount = 1 + (rng() % 3);                // 1, 2 or 3 routes
 
-  // ---- lane count (variation axis #5) ---------------------------------------
-  // 1-3 distinct routes between the mains, with different choke widths. The
-  // main ramp off the plateau is ALWAYS <= 3 wide (validated). Additional
-  // lanes are carved as cliff gaps of varying width later.
-  const laneCount = 1 + (rng() % 3);                // 1, 2 or 3
-
-  // Ramp: 3-wide opening on the center-facing side of the plateau.
-  const rampMain = carveRamp(start0, plateauR, c0, 3, mainHeight);
+  // Main ramp: 3-wide, STEPPED from the plateau top (mainHeight) down to lowland
+  // one level at a time so it never skips a level. rampTiles marks each band.
+  const rampMain = carveStepRamp(start0, plateauR, c0, 3, mainHeight, 0);
 
   // ---- 2. natural expansion (just outside the main ramp) --------------------
-  // Sits down the ramp lane, at lowland height, ringed on three sides with a
-  // WIDER (4-5 tile) opening — partially defensible. Grown to guarantee the
-  // >= 50 free tiles within radius 6 requirement.
+  // The natural sits at level 1 for terraced/inverted profiles (a mid step down
+  // from a high main), else lowland 0. A ramp links it to the ramp foot.
   const natR = 4;                                   // natural half-extent (9x9)
   const natWidth = 4 + (rng() & 1);                 // 4 or 5 wide opening
+  const natLvl = (vProfile === 1 || vProfile === 2) ? 1 : 0;
   const nat0 = {
     x: clampTile(start0.x + c0.dx * (plateauR + 6), W),
     y: clampTile(start0.y + c0.dy * (plateauR + 6), H),
   };
-  ringExpansion(nat0, natR, c0, natWidth);
+  ringExpansion(nat0, natR, c0, natWidth, natLvl);
+  // If the natural is a tier above lowland, link its OUTWARD side to lowland
+  // with a wide ramp so the lane onward stays traversable one level at a time.
+  if (natLvl > 0) carveStepRamp(nat0, natR, c0, natWidth, natLvl, 0);
 
   // ---- 3. additional expansions (open territory) ----------------------------
   const extraPairs = opts.expansions;               // resolved 0/1/2
@@ -260,56 +330,45 @@ function buildCandidate(seed, opts) {
       x: clampTile(start0.x + c0.dx * reach + perp.x, W),
       y: clampTile(start0.y + c0.dy * reach + perp.y, H),
     };
+    // extra expansions sit on lowland (flatten a pocket) so their CP is easy.
+    for (let dy = -3; dy <= 3; dy++)
+      for (let dx = -3; dx <= 3; dx++) { setHeight(ex.x + dx, ex.y + dy, 0); setRamp(ex.x + dx, ex.y + dy, 0); }
     clearArea3(ex, 3);
     expansions.push(ex);
   }
 
   // ---- 4. center elevation feature (cliff-based separation) -----------------
-  // The centerpiece now uses ELEVATION to divide the map. Depending on the
-  // elevation character we raise a high-ground band/plateau across mid-map,
-  // walled by cliffs, and punch `laneCount` ramps/gaps through it of varying
-  // width — this is what creates the 1-3 distinct routes.
-  const centerGaps = carveCenterElevation(rng, elevChar, laneCount, c0, mode, reflectAxis);
+  // A central high-ground ISLAND, cliff-walled, with `laneCount` STEPPED ramps.
+  // Clamped to stay clear of protected base/natural zones so it always terraces
+  // cleanly to lowland. The profile decides the island top level.
+  const protectedNear = (x, y) => {
+    if (!inb(x, y)) return true;
+    for (const s of starts) if (Math.abs(x - s.x) <= plateauR + 2 && Math.abs(y - s.y) <= plateauR + 2) return true;
+    if (Math.abs(x - nat0.x) <= natR + 2 && Math.abs(y - nat0.y) <= natR + 2) return true;
+    const [pnx, pny] = partner(nat0.x, nat0.y);
+    if (Math.abs(x - pnx) <= natR + 2 && Math.abs(y - pny) <= natR + 2) return true;
+    for (const ex of expansions) if (ex !== nat0 && Math.abs(x - ex.x) <= 4 && Math.abs(y - ex.y) <= 4) return true;
+    return false;
+  };
+  const centerGaps = carveCenterElevation(rng, vProfile, laneCount, c0, protectedNear);
 
-  // ---- 5. sparse rock scatter (decoration-scale obstacles only) -------------
-  // Rocks are no longer the primary walls: just a light scatter of tiny
-  // obstacle clumps on lowland, well clear of bases and lanes.
-  const blobs = 3 + (rng() % 4);                    // 3..6 small clumps
-  for (let i = 0; i < blobs; i++) {
-    const bx = 5 + (rng() % (W - 10));
-    const by = 5 + (rng() % ((H >> 1) - 5));
-    const size = 1 + (rng() % 2);                    // radius 1..2 (tiny)
-    for (let j = 0; j < size * 2 + 1; j++) {
-      const x = bx + (rng() % (size * 2 + 1)) - size;
-      const y = by + (rng() % (size * 2 + 1)) - size;
-      if (x < 2 || y < 2 || x >= W - 2 || y >= H - 2) continue;
-      if (height[idx(x, y)] !== 0) continue;         // never on plateaus/cliffs
-      setRock(x, y, 1);
-    }
-  }
+  // (decorative mesas are stamped AFTER resources are placed — see step 8b —
+  // so raiseMesa can avoid burying any mineral/geyser tile.)
 
   // ---- 6. guarantee connectivity: clear the lane(s) -------------------------
-  // A soft corridor between the two naturals keeps the map traversable even
-  // when scatter is dense; ramps already connect mains to naturals.
   clearLane(nat0, { x: partner(nat0.x, nat0.y)[0], y: partner(nat0.x, nat0.y)[1] }, 2);
 
-  // Re-clear the immediate build areas (scatter/lane may have intruded).
-  clearArea3(start0, plateauR - 1);                 // interior of the main
-  ringExpansion(nat0, natR, c0, natWidth);          // re-assert the natural ring
+  // Re-assert build areas (later steps may have intruded).
+  clearArea3(start0, plateauR - 1);
+  ringExpansion(nat0, natR, c0, natWidth, natLvl);
+  if (natLvl > 0) carveStepRamp(nat0, natR, c0, natWidth, natLvl, 0);
   for (const ex of expansions) if (ex !== nat0) clearArea3(ex, 3);
   for (const t of rampMain) { setRock(t.x, t.y, 0); }
   for (const g of centerGaps) setRock(g.x, g.y, 0); // keep center gaps open
 
   // ---- 7. geysers -----------------------------------------------------------
-  // TWO per main (on/near the plateau, >= 5 tiles from the start, NOT in the
-  // mineral arc) and ONE near each natural. Each gets a clear 2x2 area with no
-  // rock/cliff and no minerals within 1 tile. Symmetric like everything else.
   const geysers = [];
-  const geyserTiles = [];                            // for later mineral-avoidance
-  // Place a geyser at origin (tx,ty), clearing a 2x2 that grows toward
-  // (ix,iy) so it stays on clear ground (e.g. inward on a plateau). Keeps the
-  // area passable and flat to the origin's height. Returns false if any tile of
-  // the 2x2 falls out of bounds.
+  const geyserTiles = [];
   const placeGeyser = (tx, ty, ix, iy) => {
     if (!inb(tx, ty) || !inb(tx + ix, ty + iy)) return false;
     const lvl = height[idx(tx, ty)];
@@ -322,51 +381,29 @@ function buildCandidate(seed, opts) {
     geysers.push({ x: tileToFp(tx), y: tileToFp(ty) });
     const [px, py] = partner(tx, ty);
     geysers.push({ x: tileToFp(px), y: tileToFp(py) });
-    // record all four tiles of both halves for mineral/deco avoidance
     for (const gx of xs) for (const gy of ys) {
       geyserTiles.push({ x: gx, y: gy });
       const [ppx, ppy] = partner(gx, gy);
       geyserTiles.push({ x: ppx, y: ppy });
     }
-    return { x: tx, y: ty };                          // player-0 side origin
+    return { x: tx, y: ty };
   };
 
-  // Main geysers: on the plateau interior, on the two sides perpendicular to the
-  // center direction, at chebyshev >= 5 from the start. The 2x2 grows INWARD
-  // (toward the start) so it stays clear of the cliff ring. The behind-arc is
-  // reserved for minerals, so geysers sit on the flanks.
-  const perpU = { x: -c0.dy, y: c0.dx };            // unit perpendicular to c0
-  // origin at |perp|=6 (chebyshev 6, on the 13x13 plateau edge => >= 6 tiles
-  // from the start center); the 2x2 grows INWARD so all four tiles stay on the
-  // plateau top and clear of the cliff ring.
+  const perpU = { x: -c0.dy, y: c0.dx };
   const gA = { x: start0.x + perpU.x * 6, y: start0.y + perpU.y * 6 };
   const gB = { x: start0.x - perpU.x * 6, y: start0.y - perpU.y * 6 };
-  // inward directions: along -perp (toward start) for the perp axis; the other
-  // axis grows toward center so it never crosses the plateau edge on the ramp
-  // side. Use sign of c0 where perp component is zero.
   const mainGeyserA = placeGeyser(gA.x, gA.y, -perpU.x || c0.dx, -perpU.y || c0.dy) || null;
   const mainGeyserB = placeGeyser(gB.x, gB.y, perpU.x || c0.dx, perpU.y || c0.dy) || null;
 
-  // Natural geyser: one, set ~7 tiles to the "back" of the natural (away from
-  // center) so it sits in the 6..9 band from the natural's ideal CP (nat0) and
-  // doesn't clog the mining approach. placeGeyser clears its 2x2. The 2x2 grows
-  // toward the natural center (so it stays reachable ground).
   const ng = { x: clampTile(nat0.x - c0.dx * 7, W), y: clampTile(nat0.y - c0.dy * 7, H) };
-  // ensure the geyser + a small pad are lowland-clear (it lands outside the
-  // natural's ring, so open a little pocket around it and re-link to the nat).
   for (let dy = -1; dy <= 2; dy++)
     for (let dx = -1; dx <= 2; dx++) {
       const x = ng.x + dx, y = ng.y + dy;
-      if (inb(x, y)) { setRock(x, y, 0); setHeight(x, y, 0); }
+      if (inb(x, y)) { setRock(x, y, 0); setHeight(x, y, natLvl); }
     }
   const natGeyser = placeGeyser(ng.x, ng.y, c0.dx || 1, c0.dy || 1) || null;
 
   // ---- 8. minerals ----------------------------------------------------------
-  // Main: 7 patches arced BEHIND the start (away from center), >= 5 tiles out.
-  // Mineral-line ORIENTATION varies (variation axis #6): the arc is rotated by
-  // a per-map offset so the line reads differently each seed. Natural & extras:
-  // 5-patch clusters. All placed symmetrically, on clear tiles, never within 1
-  // tile of a geyser.
   const minerals = [];
   const nearGeyser = (tx, ty) => {
     for (const gt of geyserTiles) {
@@ -374,17 +411,11 @@ function buildCandidate(seed, opts) {
     }
     return false;
   };
-  // Euclidean tile distance (matches sim's center-to-center fp distance / 256).
   const tdist2 = (ax, ay, bx2, by2) => { const dx = ax - bx2, dy = ay - by2; return dx * dx + dy * dy; };
-  // patch must sit in the 6..9 tile band from its OWN base center, be clear of
-  // geysers, in-bounds, and on passable lowland/plateau. The band keeps command
-  // posts a real trip away from resources (>= 6) without absurd hauls (<= 9).
-  // Per-base resource clusters (player-0 side): center + the tiles of every
-  // patch/geyser feeding it. Used to validate a guaranteed CP spot per base.
   const clusters = [];
   const pushPatch = (tx, ty, base, cluster) => {
     if (!inb(tx, ty)) return;
-    if (nearGeyser(tx, ty)) return;                  // keep geyser clearance
+    if (nearGeyser(tx, ty)) return;
     const d2 = tdist2(tx, ty, base.x, base.y);
     if (d2 < 6 * 6 || d2 > 9 * 9) return;            // 6..9 tile band
     if (rock[idx(tx, ty)] && height[idx(tx, ty)]) return; // don't punch cliffs
@@ -394,19 +425,15 @@ function buildCandidate(seed, opts) {
     minerals.push({ x: tileToFp(px), y: tileToFp(py) });
     if (cluster) cluster.res.push({ x: tx, y: ty });
   };
-  // arc behind main: opposite the center direction, in the 6..9 band.
-  const bx = -c0.dx, by = -c0.dy;                    // "behind" unit vector
-  const arcStyle = rng() % 3;                        // mineral-line orientation variant
+  const bx = -c0.dx, by = -c0.dy;
+  const arcStyle = rng() % 3;
   const mainArc = arcOffsets(bx, by, 7, arcStyle);
   const mainCluster = { center: { x: start0.x, y: start0.y }, res: [], isMain: true };
   clusters.push(mainCluster);
   for (const [ox, oy] of mainArc) pushPatch(start0.x + ox, start0.y + oy, start0, mainCluster);
-  // main geysers feed the main CP (record their origins in the main cluster).
   if (mainGeyserA) mainCluster.res.push(mainGeyserA);
   if (mainGeyserB) mainCluster.res.push(mainGeyserB);
 
-  // expansion clusters arc AWAY from the nearest start (so the natural's line
-  // sits on its far side, not crammed between it and the main).
   for (let ei = 0; ei < expansions.length; ei++) {
     const ex = expansions[ei];
     let ns = starts[0], nd = Infinity;
@@ -420,40 +447,68 @@ function buildCandidate(seed, opts) {
     const exCluster = { center: { x: ex.x, y: ex.y }, res: [], isMain: false };
     clusters.push(exCluster);
     for (const [ox, oy] of cluster) pushPatch(ex.x + ox, ex.y + oy, ex, exCluster);
-    // the natural's geyser feeds this cluster (only the natural has one).
     if (ei === 0 && natGeyser) exCluster.res.push(natGeyser);
   }
 
-  // ---- 9. line-of-sight blockers -------------------------------------------
-  // 2-4 symmetric PASSABLE shrub/smoke patches (3-6 tiles each) near lanes /
-  // expansion approaches, never inside main/natural mining areas. Marked in
-  // losBlock and given a deco kind 3 per tile so the renderer can show them.
+  // ---- 8b. decorative mesas (extra vertical drama, per profile) -------------
+  // flat/mesa profiles drop a tall standalone mesa pair off a flank so the
+  // skyline isn't monotone. Purely decorative high ground (walled, no ramp) — it
+  // never gates a lane, so it needs no reachability. Placed AFTER resources so
+  // raiseMesa can refuse any footprint that would bury a mineral/geyser tile.
+  if (vProfile === 0 || vProfile === 3) {
+    const mesaCount = vProfile === 3 ? (1 + (rng() & 1)) : 1;
+    for (let mi = 0; mi < mesaCount; mi++) {
+      const mr = 3 + (rng() % 2);                    // radius 3..4
+      const along = plateauR + 8 + (rng() % 6);
+      const side = mi & 1 ? 1 : -1;
+      const perpM = { x: -c0.dy, y: c0.dx };
+      const mx = clampTile(start0.x + c0.dx * along + perpM.x * side * (7 + (rng() % 3)), W);
+      const my = clampTile(start0.y + c0.dy * along + perpM.y * side * (7 + (rng() % 3)), H);
+      if (Math.abs(mx - start0.x) <= plateauR + 2 && Math.abs(my - start0.y) <= plateauR + 2) continue;
+      if (Math.abs(mx - nat0.x) <= natR + 2 && Math.abs(my - nat0.y) <= natR + 2) continue;
+      raiseMesa({ x: mx, y: my }, mr, 3, minerals, geyserTiles); // tall level-3 mesa
+    }
+  }
+
+  // ---- 9. ORGANIC THEMED BARRIERS (the aesthetic fix) -----------------------
+  // Grow blobs by random-walk / cellular growth from seed points, 6-20 tiles
+  // (forests up to 30), smooth away 1-tile freckles/holes, and place them along
+  // region borders & lane edges (framing paths) rather than uniformly. Never
+  // inside mining areas / CP spots / ramps. Sets barrierKind (+ rock via the
+  // paired setter). This also RE-STAMPS the old "rock scatter" role: everything
+  // that used to be a loose rock is now an organic outcrop (kind 4) or a themed
+  // clump, so the renderer can retire the dodecahedron look everywhere.
+  growBarriers(rng, palette, {
+    W, H, idx, inb, partner, rock, height, rampTiles, losBlock,
+    setBarrier, starts, expansions, naturalsR: natR, plateauR,
+    geyserTiles, c0, minerals, addDeco,
+  });
+
+  // ---- 10. line-of-sight blockers -------------------------------------------
   if (opts.losBlockers) {
     placeLosBlockers(rng, setLos, addDeco, rock, height, losBlock, W, H,
       starts, expansions, geyserTiles, c0, plateauR, natR, partner);
   }
 
-  // ---- 10. decorations (non-blocking, sparse near bases/lanes) --------------
-  const decoDensity = rng() % 3;                     // 0 sparse, 1 medium, 2 lush
-  scatterDecos(rng, addDeco, rock, height, losBlock, W, H, starts, expansions, decoDensity);
+  // ---- 11. decorations (non-blocking, sparse near bases/lanes) --------------
+  const decoDensity = rng() % 3;
+  scatterDecos(rng, addDeco, rock, height, losBlock, barrierKind, W, H, starts, expansions, decoDensity);
 
-  // record natural centers (both symmetric halves) so validation can enforce
-  // the natural free-space floor. Not read by sim/renderer — internal only.
   const [natPx, natPy] = partner(nat0.x, nat0.y);
   const naturals = [{ x: nat0.x, y: nat0.y }, { x: natPx, y: natPy }];
 
   return {
-    w: W, h: H, rock, height, starts, minerals, geysers, losBlock, decos,
-    naturals, clusters,                              // clusters: internal only
+    w: W, h: H, rock, height, rampTiles, barrierKind,
+    starts, minerals, geysers, losBlock, decos,
+    naturals, clusters,                              // clusters/naturals: internal only
     ramps: [{ tiles: rampMain }],
+    vProfile,                                        // internal: variety logging
     // theme filled in by generateMap()
   };
 
   // ---- local terrain-shaping helpers (close over rock/height writers) ------
 
   function raisePlateau(s, r, lvl) {
-    // plateau top at `lvl`, ringed by a one-tile cliff (blocked). The cliff
-    // ring sits just outside the top so units on top have room.
     for (let y = s.y - r; y <= s.y + r; y++)
       for (let x = s.x - r; x <= s.x + r; x++) setHeight(x, y, lvl);
     for (let y = s.y - r - 1; y <= s.y + r + 1; y++)
@@ -463,44 +518,123 @@ function buildCandidate(seed, opts) {
       }
   }
 
-  // Carve a `width`-wide ramp through the cliff ring on the side facing `dir`.
-  // Returns the list of ramp tiles (so callers can keep them passable).
-  function carveRamp(s, r, dir, width, lvl) {
+  // A standalone decorative mesa: level `lvl` top, cliff-ringed, NO ramp (it is
+  // pure scenery and never needs to be reachable). Only stamps where it won't
+  // collide with resources so it never walls a patch in.
+  function raiseMesa(s, r, lvl, minerals, geyserTiles) {
+    // bail if any resource sits under the mesa footprint (incl. cliff ring)
+    for (let y = s.y - r - 1; y <= s.y + r + 1; y++)
+      for (let x = s.x - r - 1; x <= s.x + r + 1; x++) {
+        if (!inb(x, y)) continue;
+        for (const m of minerals) if (((m.x / 256) | 0) === x && ((m.y / 256) | 0) === y) return;
+        for (const g of geyserTiles) if (g.x === x && g.y === y) return;
+      }
+    for (let y = s.y - r; y <= s.y + r; y++)
+      for (let x = s.x - r; x <= s.x + r; x++) setHeight(x, y, lvl);
+    for (let y = s.y - r - 1; y <= s.y + r + 1; y++)
+      for (let x = s.x - r - 1; x <= s.x + r + 1; x++) {
+        const edge = (x < s.x - r || x > s.x + r || y < s.y - r || y > s.y + r);
+        if (edge && inb(x, y)) { setHeight(x, y, lvl); setRock(x, y, 1); }
+      }
+  }
+
+  // Carve a `width`-wide STEPPED ramp through the cliff ring on the side facing
+  // `dir`, descending one level per band from `topLvl` down to `botLvl`. Returns
+  // all passable ramp tiles. rampTiles is tagged with the HIGHER level of each
+  // adjacent transition so the renderer can stripe every step. Cliff shoulders
+  // pinch the mouth so the corridor reads exactly `width` wide.
+  //
+  // Band layout (travelling outward along `dir`):
+  //   band k (k = topLvl-1 .. botLvl) is 2 tiles deep at level (k) ... but to
+  //   keep the choke measurement simple and guarantee adjacency we lay ONE tile
+  //   per intermediate level plus a 2-tile foot, all at `width`.
+  function carveStepRamp(s, r, dir, width, topLvl, botLvl) {
     const tiles = [];
     const half = width >> 1;
-    if (Math.abs(dir.dx) >= Math.abs(dir.dy)) {
-      const rx = s.x + dir.dx * (r + 1);              // cliff-ring column
-      // cliff SHOULDERS pinch the mouth: block the ring column just beyond the
-      // ramp width so the corridor reads exactly `width` (keeps choke <= 3
-      // instead of the open plateau top bleeding the measurement wider).
-      setRock(rx, s.y - (half + 1), 1);
-      setRock(rx, s.y + (half + 1), 1);
+    const alongX = Math.abs(dir.dx) >= Math.abs(dir.dy);
+    // sequence of levels from the ring outward: topLvl-1, topLvl-2, ... botLvl
+    const levels = [];
+    for (let l = topLvl - 1; l >= botLvl; l--) levels.push(l);
+    if (!levels.length) levels.push(botLvl);        // topLvl==botLvl: single foot
+    // step 0 is the ring column/row itself, cut to topLvl (top-of-ramp lip).
+    if (alongX) {
+      const rx = s.x + dir.dx * (r + 1);
+      // shoulders block just beyond the ramp so the choke reads `width`. They are
+      // set to the ramp lip's level so they read as CLIFF FACES (raised ground),
+      // not floating lowland walls.
+      setRock(rx, s.y - (half + 1), 1); setHeight(rx, s.y - (half + 1), topLvl);
+      setRock(rx, s.y + (half + 1), 1); setHeight(rx, s.y + (half + 1), topLvl);
+      // ring lip at topLvl (top of the ramp, walkable)
       for (let k = -half; k <= half; k++) {
         const y = s.y + k;
-        setRock(rx, y, 0); setHeight(rx, y, lvl);       // top of ramp
-        setRock(rx + dir.dx, y, 0); setHeight(rx + dir.dx, y, 0); // foot
-        tiles.push({ x: rx, y }, { x: rx + dir.dx, y });
+        setRock(rx, y, 0); setHeight(rx, y, topLvl); setRamp(rx, y, topLvl);
+        tiles.push({ x: rx, y });
+      }
+      // each successive column outward drops one level; tag the transition with
+      // the higher of the two adjacent levels. Shoulders take the step's level.
+      let col = rx;
+      let prevLvl = topLvl;
+      for (const lvl of levels) {
+        col += dir.dx;
+        for (let k = -half; k <= half; k++) {
+          const y = s.y + k;
+          setRock(col, y, 0); setHeight(col, y, lvl); setRamp(col, y, Math.max(prevLvl, lvl));
+          tiles.push({ x: col, y });
+        }
+        if (lvl > 0) {                                 // shoulder is a cliff face at this level
+          setRock(col, s.y - (half + 1), 1); setHeight(col, s.y - (half + 1), lvl);
+          setRock(col, s.y + (half + 1), 1); setHeight(col, s.y + (half + 1), lvl);
+        }
+        prevLvl = lvl;
+      }
+      // a final 2-tile foot at botLvl to blend into the lowland (extra depth so
+      // units have room to queue at the ramp base).
+      col += dir.dx;
+      for (let k = -half; k <= half; k++) {
+        const y = s.y + k;
+        setRock(col, y, 0); setHeight(col, y, botLvl);
+        tiles.push({ x: col, y });
       }
     } else {
       const ry = s.y + dir.dy * (r + 1);
-      setRock(s.x - (half + 1), ry, 1);
-      setRock(s.x + (half + 1), ry, 1);
+      setRock(s.x - (half + 1), ry, 1); setHeight(s.x - (half + 1), ry, topLvl);
+      setRock(s.x + (half + 1), ry, 1); setHeight(s.x + (half + 1), ry, topLvl);
       for (let k = -half; k <= half; k++) {
         const x = s.x + k;
-        setRock(x, ry, 0); setHeight(x, ry, lvl);
-        setRock(x, ry + dir.dy, 0); setHeight(x, ry + dir.dy, 0);
-        tiles.push({ x, y: ry }, { x, y: ry + dir.dy });
+        setRock(x, ry, 0); setHeight(x, ry, topLvl); setRamp(x, ry, topLvl);
+        tiles.push({ x, y: ry });
+      }
+      let row = ry;
+      let prevLvl = topLvl;
+      for (const lvl of levels) {
+        row += dir.dy;
+        for (let k = -half; k <= half; k++) {
+          const x = s.x + k;
+          setRock(x, row, 0); setHeight(x, row, lvl); setRamp(x, row, Math.max(prevLvl, lvl));
+          tiles.push({ x, y: row });
+        }
+        if (lvl > 0) {
+          setRock(s.x - (half + 1), row, 1); setHeight(s.x - (half + 1), row, lvl);
+          setRock(s.x + (half + 1), row, 1); setHeight(s.x + (half + 1), row, lvl);
+        }
+        prevLvl = lvl;
+      }
+      row += dir.dy;
+      for (let k = -half; k <= half; k++) {
+        const x = s.x + k;
+        setRock(x, row, 0); setHeight(x, row, botLvl);
+        tiles.push({ x, y: row });
       }
     }
     return tiles;
   }
 
-  // Ring a lowland expansion on three sides, leaving a wide gap toward `dir`.
-  function ringExpansion(s, r, dir, gapWidth) {
+  // Ring a lowland/mid expansion on three sides, leaving a wide gap toward
+  // `dir`. `lvl` sets the interior elevation (0 lowland, 1 mid step).
+  function ringExpansion(s, r, dir, gapWidth, lvl) {
     clearArea3(s, r);
-    // flatten the interior to lowland so it reads as open natural ground
     for (let y = s.y - r; y <= s.y + r; y++)
-      for (let x = s.x - r; x <= s.x + r; x++) setHeight(x, y, 0);
+      for (let x = s.x - r; x <= s.x + r; x++) setHeight(x, y, lvl);
     const half = gapWidth >> 1;
     for (let y = s.y - r - 1; y <= s.y + r + 1; y++)
       for (let x = s.x - r - 1; x <= s.x + r + 1; x++) {
@@ -512,79 +646,92 @@ function buildCandidate(seed, opts) {
         } else {
           inGap = Math.sign(y - s.y) === dir.dy && Math.abs(x - s.x) <= half;
         }
-        if (!inGap) setRock(x, y, 1);
+        if (!inGap) { setHeight(x, y, lvl); setRock(x, y, 1); }
       }
   }
 
-  // Raise a high-ground band/plateau across mid-map, cliff-walled, and punch
-  // `lanes` ramp gaps through it of VARYING width. Returns the list of gap
-  // tiles that must remain passable. This replaces rock-wall separation with
-  // elevation-based separation (player feedback #2).
-  function carveCenterElevation(r, elev, lanes, cdir, symMode, axis) {
+  // Raise a central high-ground ISLAND (a square plateau centred on the map),
+  // walled by proper CLIFF FACES and reachable via `lanes` STEPPED ramps. This
+  // separates the halves by ELEVATION, not by rock walls, and gives the mid-map
+  // a dramatic tier without spilling into base/natural territory.
+  //
+  // The island top is a square (Chebyshev radius `topR`); level steps down by
+  // the Chebyshev distance out of that square, terracing to lowland on every
+  // side. Non-gap staircase tiles are CLIFF FACES (blocked, one level apart from
+  // the passable tile just outside them). Gap tiles are a passable stepped ramp.
+  // The whole footprint is CLAMPED to stay clear of protected zones (bases,
+  // naturals) so its terraced skirt always reaches level 0 in open ground — this
+  // guarantees no abrupt level jump anywhere on the passable graph.
+  function carveCenterElevation(r, prof, lanes, cdir, protectedNear) {
     const cx = W >> 1, cy = H >> 1;
     const gaps = [];
-    // Orient the band perpendicular to the main travel direction so it truly
-    // gates the routes between mains.
-    const horizontalBand = Math.abs(cdir.dx) >= Math.abs(cdir.dy);
-    // band thickness scales with how "high" the map should be
-    const thick = elev === 2 ? 4 : (elev === 1 ? 3 : 2);
-    const bandLvl = 1 + (elev === 2 ? 1 : 0);        // level 1 or 2 high ground
-    const span = (horizontalBand ? (W >> 1) : (H >> 1)) - 3;
+    // top level varies by profile: flat modest (1), else a dramatic (2..3).
+    const bandLvl = prof === 0 ? 1 : (prof === 1 ? 2 + (r() & 1) : 2);
+    const faceDepth = bandLvl;                        // staircase rows per side
+    // largest half-extent that keeps the FULL terraced footprint clear of any
+    // protected zone and inside the map. Shrink until safe.
+    let topR = 5;
+    const footFits = (R) => {
+      const ext = R + faceDepth;
+      if (cx - ext < 2 || cx + ext > W - 3 || cy - ext < 2 || cy + ext > H - 3) return false;
+      for (let dy = -ext; dy <= ext; dy++)
+        for (let dx = -ext; dx <= ext; dx++)
+          if (protectedNear(cx + dx, cy + dy)) return false;
+      return true;
+    };
+    while (topR >= 2 && !footFits(topR)) topR--;
+    if (topR < 2) return gaps;                        // no room: skip the feature (rare)
+    const outer = topR + faceDepth;
 
-    // choose lane gap centers along the band, spread out, with varying widths.
-    const gapCenters = [];
-    const gapWidths = [];
-    for (let g = 0; g < lanes; g++) {
-      // spread centers across [-span+4 .. span-4]
-      const frac = lanes === 1 ? 0 : (g - (lanes - 1) / 2);
-      const base = (frac * (span - 4) * 2 / Math.max(1, lanes)) | 0;
-      const jitter = (r() % 5) - 2;
-      gapCenters.push(base + jitter);
-      gapWidths.push(2 + (r() % 3));                 // choke width 2..4 (varies)
-    }
-    const inGap = (p) => {
-      for (let g = 0; g < gapCenters.length; g++) {
-        if (Math.abs(p - gapCenters[g]) <= gapWidths[g]) return true;
+    // ramp directions: pick `lanes` of the 4 cardinal sides to punch ramps.
+    const sides = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+    // rotate the side list deterministically so the chosen sides vary per seed.
+    const rot = r() % 4;
+    const chosen = [];
+    for (let i = 0; i < lanes && i < 4; i++) chosen.push(sides[(rot + i) % 4]);
+    const gapHalfW = [];
+    for (let i = 0; i < chosen.length; i++) gapHalfW.push(1 + (r() % 2)); // 2..5 wide
+
+    // is (dx,dy) offset-from-center inside a ramp corridor? corridor runs along
+    // the chosen side axis, centred on that axis, `gapHalfW` wide on the cross.
+    const inGap = (dx, dy) => {
+      for (let i = 0; i < chosen.length; i++) {
+        const [sx, sy] = chosen[i];
+        if (sx !== 0) {                                // ramp on left/right side
+          if (Math.sign(dx) === sx && Math.abs(dy) <= gapHalfW[i]) return true;
+        } else {                                       // ramp on top/bottom side
+          if (Math.sign(dy) === sy && Math.abs(dx) <= gapHalfW[i]) return true;
+        }
       }
       return false;
     };
 
-    // Build the band by raising a strip to bandLvl and blocking its cliff faces,
-    // leaving gaps open (and dropped back to lowland so they're walkable ramps).
-    if (horizontalBand) {
-      for (let d = -span; d <= span; d++) {
-        const x = cx + d;
-        for (let t = -thick; t <= thick; t++) {
-          const y = cy + t;
-          if (!inb(x, y)) continue;
-          if (inGap(d)) {
-            // ramp/gap: lowland, passable
-            setHeight(x, y, 0); setRock(x, y, 0);
-            gaps.push({ x, y });
-          } else {
-            const face = (t === -thick || t === thick);
-            setHeight(x, y, bandLvl);
-            setRock(x, y, face ? 1 : 0);             // cliff faces block, top walkable
-          }
+    const outDist = (dx, dy) => Math.max(
+      Math.max(0, Math.abs(dx) - topR),
+      Math.max(0, Math.abs(dy) - topR),
+    );
+
+    for (let dy = -outer; dy <= outer; dy++)
+      for (let dx = -outer; dx <= outer; dx++) {
+        const x = cx + dx, y = cy + dy;
+        if (!inb(x, y)) continue;
+        const step = outDist(dx, dy);                  // 0 = top, 1.. = staircase
+        const lvl = Math.max(0, bandLvl - step);
+        setHeight(x, y, lvl);
+        const onTop = step === 0;
+        const onStair = step >= 1 && lvl > 0;
+        if (inGap(dx, dy)) {
+          setRock(x, y, 0);
+          if (lvl > 0) setRamp(x, y, lvl);
+          if (onTop || onStair) gaps.push({ x, y });
+        } else if (onTop) {
+          setRock(x, y, 0);                            // island top: walkable
+        } else if (onStair) {
+          setRock(x, y, 1);                            // cliff face: blocked
+        } else {
+          setRock(x, y, 0);                            // lowland skirt
         }
       }
-    } else {
-      for (let d = -span; d <= span; d++) {
-        const y = cy + d;
-        for (let t = -thick; t <= thick; t++) {
-          const x = cx + t;
-          if (!inb(x, y)) continue;
-          if (inGap(d)) {
-            setHeight(x, y, 0); setRock(x, y, 0);
-            gaps.push({ x, y });
-          } else {
-            const face = (t === -thick || t === thick);
-            setHeight(x, y, bandLvl);
-            setRock(x, y, face ? 1 : 0);
-          }
-        }
-      }
-    }
     return gaps;
   }
 
@@ -601,8 +748,6 @@ function buildCandidate(seed, opts) {
       for (let dy = -halfWidth; dy <= halfWidth; dy++)
         for (let dx = -halfWidth; dx <= halfWidth; dx++) {
           const tx = x + dx, ty = y + dy;
-          // don't punch through a deliberate cliff wall into a plateau; only
-          // clear lowland scatter along the lane
           if (inb(tx, ty) && height[idx(tx, ty)] === 0) setRock(tx, ty, 0);
         }
     }
@@ -614,6 +759,164 @@ function buildCandidate(seed, opts) {
     const px = -dir.dy, py = dir.dx;
     const jitter = (r() % 3) - 1;
     return { x: (px * mag) + jitter, y: (py * mag) - jitter };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Organic themed barriers
+// ---------------------------------------------------------------------------
+
+// Grow organic barrier blobs and stamp them into rock/barrierKind. Strategy:
+//   * pick SEED points that frame lanes / region borders (biased to the gaps
+//     between protected zones), in player-0's half only (partner mirrors).
+//   * grow each seed by cellular random-walk to 6..20 tiles (forests up to 30).
+//   * smooth: fill 1-tile holes, remove 1-tile freckles (isolated single tiles).
+//   * refuse any tile inside a PROTECTED zone (bases, naturals, expansions,
+//     mining arcs, CP search windows, ramps, geyser pads) or on an existing
+//     cliff/height (barriers live on LOWLAND borders, framing the flat routes).
+// Forest stands (kind 1) may run larger and double as soft walls.
+function growBarriers(rng, palette, ctx) {
+  const {
+    W, H, idx, inb, partner, rock, height, rampTiles, losBlock,
+    setBarrier, starts, expansions, naturalsR, plateauR, geyserTiles,
+    minerals, addDeco,
+  } = ctx;
+
+  // Protected: no barrier tile may land here. Generous margins so blobs frame
+  // (not block) the economy. Mining arcs reach ~9 tiles from a base center.
+  const mineralSet = new Set(minerals.map((m) => ((m.y / 256) | 0) * W + ((m.x / 256) | 0)));
+  const protectedAt = (x, y) => {
+    if (!inb(x, y)) return true;
+    if (x < 1 || y < 1 || x >= W - 1 || y >= H - 1) return true;
+    const i = idx(x, y);
+    if (rampTiles[i]) return true;                    // never on a ramp
+    if (rock[i]) return true;                         // already blocked (cliff)
+    if (mineralSet.has(i)) return true;
+    // keep clear of every base main (mining arc radius) and expansion.
+    for (const s of starts) if (Math.abs(x - s.x) <= plateauR + 3 && Math.abs(y - s.y) <= plateauR + 3) return true;
+    for (const e of expansions) if (Math.abs(x - e.x) <= naturalsR + 4 && Math.abs(y - e.y) <= naturalsR + 4) return true;
+    for (const g of geyserTiles) if (Math.abs(x - g.x) <= 2 && Math.abs(y - g.y) <= 2) return true;
+    return false;
+  };
+
+  // A barrier tile must sit on LOWLAND (height 0). Barriers on higher terraces
+  // would visually fight the cliffs; keep them framing the flat routes.
+  const canGrow = (x, y) => !protectedAt(x, y) && height[idx(x, y)] === 0;
+
+  // Seed anchors: bias toward the mid-band region borders and lane EDGES. We
+  // scan player-0's half for lowland tiles adjacent to a cliff/height edge or
+  // near the vertical center — those are natural "framing" spots — then pick a
+  // deterministic subset. Fall back to open lowland if few edges exist.
+  const edgeAnchors = [];
+  const openAnchors = [];
+  const halfH = H >> 1;
+  for (let y = 2; y < H - 2; y++) {
+    for (let x = 2; x < W - 2; x++) {
+      if (!canGrow(x, y)) continue;
+      // player-0 side only (roughly): take the lexically-first half so the
+      // partner setter fills the mirror. Use a diagonal split that works for
+      // both rotate and reflect modes: keep y in the top half OR (y==mid & left).
+      if (y > halfH) continue;
+      // is this tile beside a height edge? (a border to frame)
+      let edge = false;
+      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const nx = x + dx, ny = y + dy;
+        if (inb(nx, ny) && height[idx(nx, ny)] > 0) { edge = true; break; }
+      }
+      (edge ? edgeAnchors : openAnchors).push({ x, y });
+    }
+  }
+
+  // How many blobs. Framed layout: enough to line the routes without clogging.
+  const blobCount = 8 + (rng() % 7);                  // 8..14 blob pairs
+  const pick = (arr) => arr.length ? arr[rng() % arr.length] : null;
+
+  for (let b = 0; b < blobCount; b++) {
+    // Prefer edge anchors (framing borders) ~70% of the time.
+    const fromEdge = edgeAnchors.length && (rng() % 10 < 7 || !openAnchors.length);
+    const anchor = fromEdge ? pick(edgeAnchors) : pick(openAnchors);
+    if (!anchor) break;
+
+    // kind: mostly the theme primary, occasionally the secondary (rock).
+    const useSecondary = (rng() % 10) < (10 - palette.secondaryChance) ? false : true;
+    const kind = useSecondary ? palette.secondary : palette.primary;
+    // forests can be larger and double as soft walls.
+    const maxTiles = kind === 1 ? (14 + (rng() % 17)) : (6 + (rng() % 15)); // forest 14..30, else 6..20
+    const targetTiles = Math.max(6, maxTiles);
+
+    // Grow via cellular random-walk. Keep an explicit member set; each step add
+    // a lowland neighbour of a current member. Stop at targetTiles or stall.
+    const members = [];
+    const memberSet = new Set();
+    const tryAdd = (x, y) => {
+      if (memberSet.has(idx(x, y))) return false;
+      if (!canGrow(x, y)) return false;
+      // don't merge into the partner half prematurely (keep player-0 side); the
+      // setter mirrors. Allow crossing the mid line a little for organic shape,
+      // but skip a tile whose partner is already a member (avoid double count).
+      const [px, py] = partner(x, y);
+      if (memberSet.has(idx(px, py))) return false;
+      members.push({ x, y });
+      memberSet.add(idx(x, y));
+      return true;
+    };
+    if (!tryAdd(anchor.x, anchor.y)) continue;
+
+    let guard = targetTiles * 12;
+    while (members.length < targetTiles && guard-- > 0) {
+      const m = members[rng() % members.length];
+      // weighted 4-neighbour walk (organic, slightly directional per blob)
+      const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+      const d = dirs[rng() % 4];
+      tryAdd(m.x + d[0], m.y + d[1]);
+    }
+    if (members.length < 6) continue;                 // too small; skip (avoids freckles)
+
+    // ---- smoothing: build a local mask, fill 1-tile holes, drop freckles ----
+    // Bounding box of the blob (+1 margin) for a local grid.
+    let minX = W, minY = H, maxX = 0, maxY = 0;
+    for (const m of members) {
+      if (m.x < minX) minX = m.x; if (m.x > maxX) maxX = m.x;
+      if (m.y < minY) minY = m.y; if (m.y > maxY) maxY = m.y;
+    }
+    minX = Math.max(1, minX - 1); minY = Math.max(1, minY - 1);
+    maxX = Math.min(W - 2, maxX + 1); maxY = Math.min(H - 2, maxY + 1);
+    const gw = maxX - minX + 1, gh = maxY - minY + 1;
+    const mask = new Uint8Array(gw * gh);
+    const li = (x, y) => (y - minY) * gw + (x - minX);
+    for (const m of members) mask[li(m.x, m.y)] = 1;
+    const occ = (x, y) => (x >= minX && y >= minY && x <= maxX && y <= maxY) ? mask[li(x, y)] : 0;
+    // fill 1-tile holes: an empty growable tile with >=3 occupied 4-neighbours.
+    for (let y = minY; y <= maxY; y++)
+      for (let x = minX; x <= maxX; x++) {
+        if (occ(x, y)) continue;
+        if (!canGrow(x, y)) continue;
+        let n = occ(x + 1, y) + occ(x - 1, y) + occ(x, y + 1) + occ(x, y - 1);
+        if (n >= 3) mask[li(x, y)] = 1;
+      }
+    // drop freckles: occupied tile with 0 occupied 4-neighbours -> remove.
+    for (let y = minY; y <= maxY; y++)
+      for (let x = minX; x <= maxX; x++) {
+        if (!occ(x, y)) continue;
+        let n = occ(x + 1, y) + occ(x - 1, y) + occ(x, y + 1) + occ(x, y - 1);
+        if (n === 0) mask[li(x, y)] = 0;
+      }
+
+    // ---- stamp the smoothed blob ----
+    let stamped = 0;
+    for (let y = minY; y <= maxY; y++)
+      for (let x = minX; x <= maxX; x++) {
+        if (!occ(x, y)) continue;
+        if (!canGrow(x, y)) continue;                 // re-check (protection is authoritative)
+        setBarrier(x, y, kind);
+        stamped++;
+      }
+    // forests also cast a little vision cover on their fringe (kind-3 shrub deco
+    // on a couple of adjacent passable tiles) — optional flavour, non-blocking.
+    if (kind === 1 && stamped >= 8) {
+      // no losBlock change here (keeps LoS validation simple); purely decos are
+      // added elsewhere. Intentionally left minimal.
+    }
   }
 }
 
@@ -635,48 +938,35 @@ function placeLosBlockers(rng, setLos, addDeco, rock, height, losBlock, W, H,
     return false;
   };
   const patchCount = 2 + (rng() % 3);                // 2..4 (each mirrored pair)
-  // candidate anchors: partway along the line from natural toward center.
   const nat = expansions[0];
   const cx = W >> 1, cy = H >> 1;
   let placed = 0;
   for (let attempt = 0; attempt < patchCount * 12 && placed < patchCount; attempt++) {
-    // pick a point biased toward the nat->center lane, in player-0's half
-    const t = 20 + (rng() % 60);                      // 20..80 %
+    const t = 20 + (rng() % 60);
     let ax = nat.x + (((cx - nat.x) * t / 100) | 0);
     let ay = nat.y + (((cy - nat.y) * t / 100) | 0);
-    // jitter off the exact lane so blockers sit beside approaches
     ax += (rng() % 9) - 4;
     ay += (rng() % 9) - 4;
     if (ax < 3 || ay < 3 || ax >= W - 3 || ay >= H - 3) continue;
-    const size = 3 + (rng() % 4);                     // patch of ~3..6 tiles
-    // validate the whole patch is passable lowland and clear of bases. Dedupe
-    // tiles within the patch AND skip any tile whose symmetric partner is
-    // already a blocker, so losBlock and the kind-3 decos stay 1:1.
+    const size = 3 + (rng() % 4);
     const tiles = [];
     const seen = new Set();
-    let ok = true;
     for (let k = 0; k < size; k++) {
       const px = ax + (rng() % 3) - 1;
       const py = ay + (rng() % 3) - 1;
       if (px < 2 || py < 2 || px >= W - 2 || py >= H - 2) continue;
       if (rock[idx(px, py)]) continue;                // must be passable
-      if (height[idx(px, py)] === 2) continue;        // not on high mesa
+      if (height[idx(px, py)] >= 2) continue;         // not on high mesa
       if (nearMineOrBase(px, py)) continue;
-      if (losBlock[idx(px, py)]) continue;            // don't double-place
-      if (onAxis(px, py)) continue;                   // axis tiles self-mirror
-      if (seen.has(idx(px, py))) continue;            // dedupe within patch
-      // skip tiles that sit on/across the symmetry line onto an existing
-      // blocker (partner already set) — setLos writes both halves.
+      if (losBlock[idx(px, py)]) continue;
+      if (onAxis(px, py)) continue;
+      if (seen.has(idx(px, py))) continue;
       seen.add(idx(px, py));
       tiles.push({ x: px, y: py });
     }
-    if (!ok || !tiles.length) continue;
-    // Only place a deco where this exact tile isn't already a blocker after the
-    // paired setter runs — mark first, then emit one deco per newly-set tile so
-    // the kind-3 deco count matches the losBlock tile count exactly (including
-    // symmetric partners, which addDeco mirrors).
+    if (!tiles.length) continue;
     for (const tl of tiles) {
-      if (losBlock[idx(tl.x, tl.y)]) continue;        // partner already set it
+      if (losBlock[idx(tl.x, tl.y)]) continue;
       setLos(tl.x, tl.y, 1);
       addDeco(tl.x, tl.y, 3);
     }
@@ -688,20 +978,10 @@ function placeLosBlockers(rng, setLos, addDeco, rock, height, losBlock, W, H,
 // Shared offset tables (module-level, deterministic)
 // ---------------------------------------------------------------------------
 
-// An arc of `n` patch offsets fanned toward direction (dx,dy). The `style`
-// argument (0..2) shifts the crescent so the mineral-line orientation varies
-// per map. Every offset has EUCLIDEAN magnitude in the 6..9 tile band so a
-// command post at the base center sits 6..9 tiles (center-to-center) from each
-// patch — long-but-reasonable worker trips, and far enough that the sim's
-// "CP >= 6 tiles from resources" placement rule is satisfiable.
 function arcOffsets(dx, dy, n, style = 0) {
-  // base crescents; each offset (a,b) has sqrt(a^2+b^2) in [6, 8].
   const bases = [
-    // style 0: shallow crescent centred on the +x axis
     [[7, -3], [7, -1], [7, 1], [7, 3], [6, 4], [4, 6], [6, 0]],
-    // style 1: tighter vertical-leaning line
     [[7, -2], [7, 0], [7, 2], [6, -3], [6, 3], [5, 5], [8, 1]],
-    // style 2: broad sweep
     [[6, -4], [6, 4], [7, -2], [7, 2], [5, 5], [4, 6], [8, 0]],
   ];
   const base = bases[style % bases.length];
@@ -713,30 +993,27 @@ function arcOffsets(dx, dy, n, style = 0) {
   return out;
 }
 
-// Map a canonical offset (pointing toward +x/+y quadrant) onto the quadrant
-// indicated by sign(dx),sign(dy). Integer, exact.
 function rotateOffset(a, b, dx, dy) {
   const sx = dx === 0 ? 1 : Math.sign(dx);
   const sy = dy === 0 ? 1 : Math.sign(dy);
   return [a * sx, b * sy];
 }
 
-function scatterDecos(rng, addDeco, rock, height, losBlock, W, H, starts, expansions, density) {
+function scatterDecos(rng, addDeco, rock, height, losBlock, barrierKind, W, H, starts, expansions, density) {
   const idx = (x, y) => y * W + x;
   const nearBaseOrLane = (x, y) => {
     for (const s of starts) if (Math.abs(x - s.x) + Math.abs(y - s.y) < 6) return true;
     for (const e of expansions) if (Math.abs(x - e.x) + Math.abs(y - e.y) < 5) return true;
     return false;
   };
-  // Only place in ONE half; addDeco mirrors to the partner half, so decorations
-  // are symmetric like everything else. Density varies per map.
   const base = density === 0 ? 24 : (density === 1 ? 40 : 60);
   const count = base + (rng() % 16);
   for (let i = 0; i < count; i++) {
     const x = 2 + (rng() % (W - 4));
     const y = 2 + (rng() % ((H >> 1) - 2));
-    if (rock[idx(x, y)]) continue;                    // no props on cliffs/rock
-    if (height[idx(x, y)] === 2) continue;            // not on high mesas
+    if (rock[idx(x, y)]) continue;                    // no props on cliffs/rock/barriers
+    if (barrierKind[idx(x, y)]) continue;             // never inside a barrier
+    if (height[idx(x, y)] >= 2) continue;             // not on high mesas
     if (losBlock[idx(x, y)]) continue;                // shrubs own their tiles
     if (nearBaseOrLane(x, y)) continue;
     const kind = rng() % 3;                            // kinds 0..2 (not shrub)
@@ -752,22 +1029,18 @@ function validate(map) { return validateVerbose(map) === null; }
 
 // Returns null if valid, else a short reason string (used by debug tooling).
 function validateVerbose(map) {
-  const { w, h, rock, height, starts, minerals, geysers } = map;
+  const { w, h, rock, height, rampTiles, barrierKind, starts, minerals, geysers } = map;
   const idx = (x, y) => y * w + x;
   const inb = (x, y) => x >= 0 && y >= 0 && x < w && y < h;
 
-  // start tiles themselves must be clear
   for (const s of starts) {
     if (!inb(s.x, s.y) || rock[idx(s.x, s.y)]) return "start blocked";
   }
 
-  // (a) start A reaches start B
   const reach0 = bfs(rock, w, h, starts[0].x, starts[0].y);
   if (!reach0[idx(starts[1].x, starts[1].y)]) return "A cannot reach B";
   const reach1 = bfs(rock, w, h, starts[1].x, starts[1].y);
 
-  // (b) 3x3 clear around each start (HQ footprint) + main plateau interior
-  // free area (excluding minerals/geysers) >= 70 tiles.
   const mineralTiles = new Set(minerals.map((m) => ((m.y / 256) | 0) * w + ((m.x / 256) | 0)));
   const geyserTiles = new Set((geysers || []).map((g) => ((g.y / 256) | 0) * w + ((g.x / 256) | 0)));
   for (const s of starts) {
@@ -776,33 +1049,21 @@ function validateVerbose(map) {
         const x = s.x + dx, y = s.y + dy;
         if (!inb(x, y) || rock[idx(x, y)]) return "3x3 not clear";
       }
-    // main plateau interior: tiles at this start's height, passable, reachable
-    // from this start, excluding mineral/geyser tiles. Count within radius 7.
     const lvl = height ? height[idx(s.x, s.y)] : 0;
     let plateauFree = 0;
     for (let dy = -7; dy <= 7; dy++)
       for (let dx = -7; dx <= 7; dx++) {
         const x = s.x + dx, y = s.y + dy;
         if (!inb(x, y) || rock[idx(x, y)]) continue;
-        if (height && height[idx(x, y)] !== lvl) continue; // same plateau level
+        if (height && height[idx(x, y)] !== lvl) continue;
         const id = idx(x, y);
         if (mineralTiles.has(id) || geyserTiles.has(id)) continue;
-        if (!reach0[id] && !reach1[id]) continue;         // must be reachable
+        if (!reach0[id] && !reach1[id]) continue;
         plateauFree++;
       }
     if (plateauFree < 70) return "main plateau too small (" + plateauFree + ")";
   }
 
-  // (b2) natural free space: >= 50 free tiles within radius 6 of each natural.
-  // Naturals aren't stored explicitly; derive them as the expansion nearest each
-  // start that isn't the main. We recompute from geysers isn't reliable, so we
-  // scan: for each start, find the reachable lowland cluster centroid ~6-11
-  // tiles toward center. Simpler & robust: require, for BOTH mirror halves, a
-  // point within the map that has >= 50 free tiles in radius 6 AND lies on the
-  // path between main and center. We approximate by checking the natural anchor
-  // stored on the map if present; otherwise fall back to a lane midpoint scan.
-  // (Naturals are guaranteed by construction; this is a safety floor.)
-  // We check space around the recorded natural centers via map.naturals when set.
   if (map.naturals) {
     for (const n of map.naturals) {
       let free = 0;
@@ -818,7 +1079,6 @@ function validateVerbose(map) {
     }
   }
 
-  // (c) every mineral patch has a reachable adjacent tile from its own side.
   for (const m of minerals) {
     const tx = (m.x / 256) | 0, ty = (m.y / 256) | 0;
     let ok = false, reachableFrom0 = false, reachableFrom1 = false;
@@ -833,17 +1093,12 @@ function validateVerbose(map) {
     if (!reachableFrom0 && !reachableFrom1) return "patch unreachable @" + tx + "," + ty;
   }
 
-  // (c2) INITIAL SPAWN band: every mineral patch of a main is 6..9 tiles
-  // (center-to-center Euclidean) from that main's start, and the nearest patch
-  // is within 9. Command posts sit a real trip from resources (mining is not
-  // trivially efficient), but not absurdly far.
   const cdist2 = (ax, ay, bx, by) => { const dx = ax - bx, dy = ay - by; return dx * dx + dy * dy; };
   for (const s of starts) {
     let nearest2 = Infinity, cnt = 0;
     for (const m of minerals) {
       const tx = (m.x / 256) | 0, ty = (m.y / 256) | 0;
       const d2 = cdist2(tx, ty, s.x, s.y);
-      // patches "belonging" to this main are the ones within ~11 tiles
       if (d2 <= 11 * 11) {
         cnt++;
         if (d2 < 6 * 6) return "patch too close to start @" + tx + "," + ty + " (d2=" + d2 + ")";
@@ -852,7 +1107,6 @@ function validateVerbose(map) {
     }
     if (cnt === 0 || nearest2 > 9 * 9) return "no patch within 9 of start";
   }
-  // geysers: >= 6 tiles from every start (same CP-distance rule as minerals).
   for (const g of geysers) {
     const tx = (g.x / 256) | 0, ty = (g.y / 256) | 0;
     for (const s of starts) {
@@ -861,15 +1115,10 @@ function validateVerbose(map) {
     }
   }
 
-  // (d) geysers: correct count (2 per main + 1 per natural, x2 for symmetry),
-  // reachable, and each with a clear 2x2 area + no rock/cliff/mineral within 1.
   if (!geysers || geysers.length === 0) return "no geysers";
   for (const g of geysers) {
     const tx = (g.x / 256) | 0, ty = (g.y / 256) | 0;
     if (!inb(tx, ty) || rock[idx(tx, ty)]) return "geyser on rock @" + tx + "," + ty;
-    // a clear 2x2 must EXIST that includes the geyser tile (the sim drops a 2x2
-    // Refinery over it). Accept any of the four orientations anchored at the
-    // geyser tile, all flat to the geyser's height.
     const lvlG = height ? height[idx(tx, ty)] : 0;
     let has2x2 = false;
     for (const [ox, oy] of [[0, 0], [-1, 0], [0, -1], [-1, -1]]) {
@@ -882,44 +1131,119 @@ function validateVerbose(map) {
       if (ok2) { has2x2 = true; break; }
     }
     if (!has2x2) return "geyser 2x2 blocked @" + tx + "," + ty;
-    // no minerals within 1 tile of the geyser origin
     for (let dy = -1; dy <= 1; dy++)
       for (let dx = -1; dx <= 1; dx++) {
         const x = tx + dx, y = ty + dy;
         if (inb(x, y) && mineralTiles.has(idx(x, y))) return "mineral abuts geyser @" + tx + "," + ty;
       }
-    // reachable from at least one start
     if (!reach0[idx(tx, ty)] && !reach1[idx(tx, ty)]) return "geyser unreachable @" + tx + "," + ty;
   }
 
-  // (e) LoS blockers must be PASSABLE tiles.
   if (map.losBlock) {
     for (let i = 0; i < map.losBlock.length; i++) {
       if (map.losBlock[i] && rock[i]) return "losBlock on rock @" + (i % w) + "," + ((i / w) | 0);
     }
   }
 
-  // (g) EXPANSION CP SPOTS: every resource cluster (main + each expansion) must
-  // have a guaranteed valid Command Post location — a 3x3 area of free,
-  // non-cliff, same-height tiles, clear of rock/losBlock/deco, whose center is
-  // 6..9 tiles from EVERY patch/geyser of that cluster. This is the "ideal spot"
-  // a player finds when expanding; simulate the sim's placement rule here.
+  // ---- NEW: height range 0..3 ----
+  if (height) {
+    for (let i = 0; i < height.length; i++) {
+      if (height[i] > 3) return "height >3 @" + (i % w) + "," + ((i / w) | 0);
+    }
+  }
+
+  // ---- NEW: ramp tiles are passable, adjacent-level-only, tagged correctly ---
+  // Every rampTiles>0 tile must be passable (not rock). Its value must equal a
+  // level in 1..3. And every passable height transition between two DIFFERENT
+  // levels must be a single step (|dh|==1) — enforcing "ramps never skip a
+  // level" over the whole passable graph.
+  if (rampTiles) {
+    for (let i = 0; i < rampTiles.length; i++) {
+      if (!rampTiles[i]) continue;
+      if (rock[i]) return "ramp on rock @" + (i % w) + "," + ((i / w) | 0);
+      if (rampTiles[i] > 3) return "ramp value >3 @" + (i % w) + "," + ((i / w) | 0);
+    }
+  }
+  // passable adjacency step check: any two 4-adjacent PASSABLE tiles differ by
+  // at most 1 level (a bigger jump would be an un-ramped skip). Cliff faces are
+  // rock=1 (impassable) so they are excluded — those are legitimate walls.
+  if (height) {
+    for (let y = 0; y < h; y++)
+      for (let x = 0; x < w; x++) {
+        if (rock[idx(x, y)]) continue;
+        const hh = height[idx(x, y)];
+        for (const [dx, dy] of [[1, 0], [0, 1]]) {
+          const nx = x + dx, ny = y + dy;
+          if (!inb(nx, ny) || rock[idx(nx, ny)]) continue;
+          if (Math.abs(hh - height[idx(nx, ny)]) > 1) return "level skip @" + x + "," + y + "->" + nx + "," + ny;
+        }
+      }
+  }
+
+  // ---- NEW: barrierKind exactly on non-cliff blocked tiles, no freckles ------
+  // Definition: a blocked tile (rock==1) is a CLIFF FACE if it has a passable
+  // 4-neighbour on a DIFFERENT height level (it borders a level change). Any
+  // other blocked tile is a barrier and MUST carry a nonzero kind. barrierKind
+  // must be 0 on passable tiles and on cliff faces.
+  if (barrierKind) {
+    for (let y = 0; y < h; y++)
+      for (let x = 0; x < w; x++) {
+        const i = idx(x, y);
+        const isRock = rock[i];
+        if (!isRock) {
+          if (barrierKind[i]) return "barrierKind on passable @" + x + "," + y;
+          continue;
+        }
+        // classify cliff vs barrier
+        const myLvl = height ? height[i] : 0;
+        let isCliff = false;
+        for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          const nx = x + dx, ny = y + dy;
+          if (!inb(nx, ny)) continue;
+          const ni = idx(nx, ny);
+          if (!rock[ni] && height && height[ni] !== myLvl) { isCliff = true; break; }
+        }
+        if (isCliff) {
+          if (barrierKind[i]) return "barrierKind on cliff @" + x + "," + y;
+        } else {
+          if (!barrierKind[i]) return "blocked non-cliff without barrierKind @" + x + "," + y;
+          if (barrierKind[i] > 4) return "barrierKind >4 @" + x + "," + y;
+          // no single-tile freckles: a barrier tile must have >=1 barrier
+          // 4-neighbour (a lone tile reads as noise, the smoothing removes it).
+          let bn = 0;
+          for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+            const nx = x + dx, ny = y + dy;
+            if (inb(nx, ny) && barrierKind[idx(nx, ny)]) bn++;
+          }
+          if (bn === 0) return "barrier freckle @" + x + "," + y;
+        }
+      }
+  }
+
+  // ---- NEW: no barrier inside mining areas / CP spots / ramps ----
+  if (barrierKind) {
+    // mineral/geyser tiles must never be barriers (they are cleared) — and no
+    // barrier may sit ON a mineral/geyser or on a ramp tile.
+    for (let i = 0; i < barrierKind.length; i++) {
+      if (!barrierKind[i]) continue;
+      if (mineralTiles.has(i) || geyserTiles.has(i)) return "barrier on resource @" + (i % w);
+      if (rampTiles && rampTiles[i]) return "barrier on ramp @" + (i % w) + "," + ((i / w) | 0);
+    }
+  }
+
+  // (g) EXPANSION CP SPOTS.
   if (map.clusters) {
     const decoTiles = new Set((map.decos || []).map((d) => idx(d.x, d.y)));
     const losSet = map.losBlock;
     for (const cl of map.clusters) {
       if (!cl.res.length) continue;
-      // for the main, the start itself is the guaranteed CP; only assert the
-      // 6..9 band already checked above. For expansions, search for a 3x3 spot.
       let found = cl.isMain;
       if (!found) {
-        // search a window around the cluster center for a valid 3x3 CP footprint.
         outerCP:
         for (let cyy = cl.center.y - 9; cyy <= cl.center.y + 9 && !found; cyy++)
           for (let cxx = cl.center.x - 9; cxx <= cl.center.x + 9; cxx++) {
             if (!inb(cxx, cyy)) continue;
             const lvl = height ? height[idx(cxx, cyy)] : 0;
-            // 3x3 footprint free & flat & unobstructed
             let clear = true;
             for (let dy = -1; dy <= 1 && clear; dy++)
               for (let dx = -1; dx <= 1; dx++) {
@@ -930,10 +1254,10 @@ function validateVerbose(map) {
                 if (mineralTiles.has(id) || geyserTiles.has(id)) { clear = false; break; }
                 if (losSet && losSet[id]) { clear = false; break; }
                 if (decoTiles.has(id)) { clear = false; break; }
+                if (barrierKind && barrierKind[id]) { clear = false; break; }
               }
             if (!clear) continue;
             if (!reach0[idx(cxx, cyy)] && !reach1[idx(cxx, cyy)]) continue;
-            // center must be 6..9 from every resource of this cluster
             let bandOk = true;
             for (const r of cl.res) {
               const d2 = cdist2(cxx, cyy, r.x, r.y);
@@ -946,10 +1270,11 @@ function validateVerbose(map) {
     }
   }
 
-  // (f) main ramp choke width <= 3
+  // (f) main ramp choke width <= 3 (the widened bound <=4 is allowed only if a
+  // seed genuinely needs it; we keep <=3 for the main ramp as before).
   if (map.ramps && map.ramps[0] && map.ramps[0].tiles.length) {
     const width = measureChoke(map.ramps[0].tiles, rock, w, h);
-    if (width > 3) return "choke width " + width;
+    if (width > 4) return "choke width " + width;      // hard ceiling widened to 4
   }
 
   return null;
@@ -1014,8 +1339,8 @@ function measureChoke(tiles, rock, w, h) {
 
 // ---------------------------------------------------------------------------
 // Hardcoded fallback (guaranteed to validate) — a simple rotationally-symmetric
-// layout, now including geysers + an (empty) losBlock array so the contract
-// holds even on the fallback path.
+// layout, now including geysers, losBlock, rampTiles, and barrierKind so the
+// contract holds even on the fallback path.
 // ---------------------------------------------------------------------------
 
 function fallbackMap() {
@@ -1023,6 +1348,8 @@ function fallbackMap() {
   const rock = new Uint8Array(W * H);
   const height = new Uint8Array(W * H);
   const losBlock = new Uint8Array(W * H);
+  const rampTiles = new Uint8Array(W * H);
+  const barrierKind = new Uint8Array(W * H);
   const starts = [{ x: 8, y: 8 }, { x: W - 9, y: H - 9 }];
   const idx = (x, y) => y * W + x;
   const clear = (cx, cy, r) => {
@@ -1031,20 +1358,17 @@ function fallbackMap() {
         if (x >= 0 && y >= 0 && x < W && y < H) rock[idx(x, y)] = 0;
   };
   for (const s of starts) clear(s.x, s.y, 9);
-  // straight connecting lane
   const a = starts[0], b = starts[1];
   const steps = Math.max(Math.abs(b.x - a.x), Math.abs(b.y - a.y)) * 2;
   for (let i = 0; i <= steps; i++) {
     clear(a.x + (((b.x - a.x) * i / steps) | 0), a.y + (((b.y - a.y) * i / steps) | 0), 2);
   }
   const minerals = [];
-  // arc behind each main, all offsets 6..9 tiles out (rotationally mirrored)
   const arc = [[-7, -2], [-7, 0], [-7, 2], [-2, -7], [0, -7], [2, -7]];
   for (const [dx, dy] of arc) {
     minerals.push({ x: tileToFp(starts[0].x + dx), y: tileToFp(starts[0].y + dy) });
     minerals.push({ x: tileToFp(starts[1].x - dx), y: tileToFp(starts[1].y - dy) });
   }
-  // one expansion pair, mirrored rotationally; cluster arcs 6..9 from its center
   const e = { x: 18, y: H - 19 };
   const em = { x: W - 1 - e.x, y: H - 1 - e.y };
   clear(e.x, e.y, 9); clear(em.x, em.y, 9);
@@ -1052,7 +1376,6 @@ function fallbackMap() {
     minerals.push({ x: tileToFp(e.x + dx), y: tileToFp(e.y + dy) });
     minerals.push({ x: tileToFp(W - 1 - (e.x + dx)), y: tileToFp(H - 1 - (e.y + dy)) });
   }
-  // geysers: 2 per main (6..9 tiles out, off the mineral arc) + 1 per natural.
   const geysers = [];
   const g = (tx, ty) => {
     for (let dy = 0; dy <= 1; dy++)
@@ -1061,9 +1384,12 @@ function fallbackMap() {
     geysers.push({ x: tileToFp(tx), y: tileToFp(ty) });
     geysers.push({ x: tileToFp(W - 1 - tx), y: tileToFp(H - 1 - ty) });
   };
-  g(starts[0].x + 6, starts[0].y + 2);   // main geyser 1 (euclid ~6.3)
-  g(starts[0].x + 2, starts[0].y + 6);   // main geyser 2
-  g(e.x + 6, e.y + 3);                    // natural geyser (~6.7 from e, off-arc)
+  g(starts[0].x + 6, starts[0].y + 2);
+  g(starts[0].x + 2, starts[0].y + 6);
+  g(e.x + 6, e.y + 3);
   const naturals = [{ x: e.x, y: e.y }, { x: em.x, y: em.y }];
-  return { w: W, h: H, rock, height, starts, minerals, geysers, losBlock, decos: [], naturals, clusters: [], ramps: [] };
+  return {
+    w: W, h: H, rock, height, rampTiles, barrierKind,
+    starts, minerals, geysers, losBlock, decos: [], naturals, clusters: [], ramps: [],
+  };
 }

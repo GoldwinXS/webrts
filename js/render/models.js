@@ -3,6 +3,38 @@
 // Purely presentational — nothing here may touch sim state.
 import * as THREE from "three";
 
+// ---------------------------------------------------------------------------
+// Toon gradient map: a tiny 1D DataTexture with NearestFilter gives
+// MeshToonMaterial a hard-stepped 3-4 band shading ramp (Saturday-morning
+// cartoon look). Shared by terrain + environment props. Cached once.
+// ---------------------------------------------------------------------------
+let _toonGrad = null;
+export function toonGradient() {
+  if (_toonGrad) return _toonGrad;
+  // 4 steps, biased bright so shadows stay light (soft toon shadowing).
+  const data = new Uint8Array([90, 150, 205, 255]);
+  const tex = new THREE.DataTexture(data, data.length, 1, THREE.RedFormat);
+  tex.minFilter = tex.magFilter = THREE.NearestFilter;
+  tex.generateMipmaps = false;
+  tex.needsUpdate = true;
+  _toonGrad = tex;
+  return tex;
+}
+
+// A stepped-toon standard-ish material for environment props. MeshToonMaterial
+// keeps emissive (so bloom still works) and honors the shared gradient ramp.
+export function propToon(opts = {}) {
+  return new THREE.MeshToonMaterial({
+    color: opts.color ?? 0xffffff,
+    gradientMap: toonGradient(),
+    emissive: opts.emissive ?? 0x000000,
+    emissiveIntensity: opts.emissiveIntensity ?? 0,
+    transparent: opts.transparent ?? false,
+    opacity: opts.opacity ?? 1,
+    side: opts.side,
+  });
+}
+
 // shared geometries (created once)
 const G = {
   // worker drone
@@ -50,10 +82,10 @@ const G = {
   wraithFin: new THREE.BoxGeometry(0.05, 0.28, 0.24),
   wraithEngine: new THREE.CylinderGeometry(0.09, 0.06, 0.18, 10).rotateX(Math.PI / 2),
   // banshee
-  bansheeBody: new THREE.CapsuleGeometry(0.22, 0.5, 4, 10).rotateX(Math.PI / 2),
+  bansheeBody: new THREE.CapsuleGeometry(0.19, 0.62, 4, 12).rotateX(Math.PI / 2),
   bansheeCanopy: new THREE.SphereGeometry(0.15, 10, 8),
   bansheeArm: new THREE.BoxGeometry(0.07, 0.07, 0.42),
-  bansheeRotor: new THREE.CylinderGeometry(0.42, 0.42, 0.02, 4),
+  bansheeRotor: new THREE.CylinderGeometry(0.56, 0.56, 0.008, 20),
   bansheeHub: new THREE.CylinderGeometry(0.05, 0.05, 0.14, 8),
   bansheeGun: new THREE.CylinderGeometry(0.05, 0.05, 0.4, 8).rotateX(Math.PI / 2).translate(0, 0, 0.2),
   // blob shadow for flyers
@@ -64,6 +96,23 @@ const G = {
   plume: new THREE.ConeGeometry(0.32, 1.4, 10).translate(0, 0.7, 0),
   // shrub
   shrubBlade: new THREE.ConeGeometry(0.08, 1.0, 4).translate(0, 0.5, 0),
+  // ---- environment barrier props (instanced by the renderer) ----
+  // rounded boulder (kind 4 rock, geyser chunks, rock-pile deco): a low-poly
+  // sphere, squashed by per-instance scale so it never reads as a polyhedron.
+  boulder: new THREE.SphereGeometry(0.5, 10, 8),
+  // stylized tree: cylinder trunk + squashed-sphere canopy (2 stacked blobs).
+  treeTrunk: new THREE.CylinderGeometry(0.09, 0.13, 0.55, 7).translate(0, 0.27, 0),
+  treeCanopyLo: new THREE.SphereGeometry(0.42, 10, 8),
+  treeCanopyHi: new THREE.SphereGeometry(0.30, 10, 8),
+  // basalt prism: 6-sided column (kind 2 lava).
+  basalt: new THREE.CylinderGeometry(0.26, 0.30, 1.0, 6),
+  // ice spire: 4-sided pyramid / cone (kind 3 ice).
+  iceSpire: new THREE.ConeGeometry(0.28, 1.1, 4).translate(0, 0.55, 0),
+  // rounded crystal shard (deco kind 0): elongated octahedron reads faceted
+  // but not spiky.
+  crystalShard: new THREE.OctahedronGeometry(0.22),
+  // flora tuft (deco kind 2): rounded blob on a short stem.
+  floraBlob: new THREE.SphereGeometry(0.16, 8, 7),
 };
 export const SHARED = G;
 
@@ -108,7 +157,7 @@ export function makeMineralVisual(e) {
 // pulsing translucent plume. `rockColor` is the theme rock color.
 export function makeGeyserVisual(e, rockColor) {
   const group = new THREE.Group();
-  const rockMat = new THREE.MeshStandardMaterial({ color: rockColor, roughness: 0.9, metalness: 0.1 });
+  const rockMat = propToon({ color: rockColor });
   const cone = new THREE.Mesh(G.geyserCone, rockMat);
   cone.position.y = 0.35;
   cone.castShadow = true;
@@ -116,12 +165,13 @@ export function makeGeyserVisual(e, rockColor) {
   const throatMat = glowMat(0x7cd94f, 1.6);
   const throat = new THREE.Mesh(G.geyserThroat, throatMat);
   throat.position.y = 0.72;
-  // a couple of leaning rock chunks around the base for silhouette
+  // rounded boulders around the base for silhouette (no polyhedra)
   for (let i = 0; i < 3; i++) {
     const a = (i / 3) * Math.PI * 2 + e.id;
-    const chunk = new THREE.Mesh(G.mineralSmall, rockMat);
-    chunk.position.set(Math.cos(a) * 0.7, 0.12, Math.sin(a) * 0.7);
-    chunk.scale.setScalar(0.7);
+    const chunk = new THREE.Mesh(G.boulder, rockMat);
+    chunk.castShadow = true;
+    chunk.position.set(Math.cos(a) * 0.72, 0.1, Math.sin(a) * 0.72);
+    chunk.scale.set(0.62, 0.44, 0.62);
     group.add(chunk);
   }
   // translucent rising plume (stretched cone), subtle
@@ -136,14 +186,73 @@ export function makeGeyserVisual(e, rockColor) {
   return group;
 }
 
+// ---------------------------------------------------------------------------
+// Barrier prop materials (shared, theme-tinted). The renderer builds the
+// InstancedMeshes; these keep the toon look + emissive contract in one place.
+// A theme is { rock, ground, groundHi, deco:[c0,c1,c2], ... }.
+// ---------------------------------------------------------------------------
+export function barrierMaterials(theme) {
+  const rockHex = theme.rock;
+  const [d0, d1, d2] = theme.deco;                    // flora/ember/ice accents
+  // forest trunk (dark warm), canopy (deco[2] darker flora tone)
+  return {
+    boulder: propToon({ color: rockHex }),
+    treeTrunk: propToon({ color: 0x5a4632 }),
+    treeCanopy: propToon({ color: d2, emissive: d2, emissiveIntensity: 0.06 }),
+    // basalt: near-black volcanic rock; crack decal glows orange
+    basalt: propToon({ color: 0x2a2420 }),
+    crack: new THREE.MeshBasicMaterial({
+      map: makeCrackTexture(), transparent: true, depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    }),
+    // ice: pale translucent crystal with a bright rim glow
+    ice: new THREE.MeshToonMaterial({
+      color: 0xbfe6ff, gradientMap: toonGradient(),
+      emissive: 0x8fd0ff, emissiveIntensity: 0.55,
+      transparent: true, opacity: 0.78,
+    }),
+  };
+}
+
+// Small canvas of additive glowing fissure lines for the lava crack decal.
+let _crackTex = null;
+function makeCrackTexture() {
+  if (_crackTex) return _crackTex;
+  const c = document.createElement("canvas");
+  c.width = c.height = 64;
+  const ctx = c.getContext("2d");
+  ctx.clearRect(0, 0, 64, 64);
+  // a couple of branching bright fissures on transparent ground
+  ctx.strokeStyle = "rgba(255,150,40,0.95)";
+  ctx.lineWidth = 3;
+  ctx.lineCap = "round";
+  const seams = [[[10, 8], [24, 30], [20, 54]], [[52, 10], [40, 34], [48, 58]], [[30, 4], [34, 32], [30, 60]]];
+  for (const s of seams) {
+    ctx.beginPath();
+    ctx.moveTo(s[0][0], s[0][1]);
+    for (let i = 1; i < s.length; i++) ctx.lineTo(s[i][0], s[i][1]);
+    ctx.stroke();
+  }
+  // brighter hot core
+  ctx.strokeStyle = "rgba(255,235,170,0.9)";
+  ctx.lineWidth = 1.2;
+  for (const s of seams) {
+    ctx.beginPath();
+    ctx.moveTo(s[0][0], s[0][1]);
+    for (let i = 1; i < s.length; i++) ctx.lineTo(s[i][0], s[i][1]);
+    ctx.stroke();
+  }
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  _crackTex = tex;
+  return tex;
+}
+
 // Tall shrub (deco kind 3): clumped tall grass tufts, theme-tinted, subtle sway.
 // Marks LoS-blocker tiles — reads as concealment, taller than a unit.
 export function makeShrubVisual(tint, id) {
   const group = new THREE.Group();
-  const mat = new THREE.MeshStandardMaterial({
-    color: tint, roughness: 0.85, metalness: 0.0,
-    emissive: tint, emissiveIntensity: 0.08,
-  });
+  const mat = propToon({ color: tint, emissive: tint, emissiveIntensity: 0.1 });
   const blades = [];
   const n = 7;
   for (let i = 0; i < n; i++) {
@@ -299,30 +408,41 @@ export function makeUnitVisual(e, color) {
     }
     body.add(bodyMesh, canopy, gun, gunTip);
     anim = { kind: "banshee", rotors, roll: 0 };
-  } else { // brute
+  } else { // brute — heavy melee: big shoulder mass, low bull head, deliberate
+    // faceting on a squashed low-poly core (reads chunky, not a lone dodeca).
     const core = new THREE.Mesh(G.bruteBody, team);
-    core.position.y = 0.52;
-    core.scale.set(1, 1.15, 0.95);
+    core.position.y = 0.5;
+    core.scale.set(1.02, 1.02, 0.9);
     core.castShadow = true;
-    for (let i = 0; i < 4; i++) {
+    // broad shoulder yoke: two squashed spheres sitting high & wide
+    const shoulderMat = DARK;
+    const shL = new THREE.Mesh(G.bruteFist, shoulderMat);
+    shL.scale.set(2.0, 1.5, 1.7);
+    shL.position.set(0.46, 0.86, -0.02);
+    const shR = shL.clone();
+    shR.position.x = -0.46;
+    // back spikes reduced to two, tucked into the shoulder mass for menace
+    for (let i = 0; i < 2; i++) {
       const sp = new THREE.Mesh(G.spike, GUNMETAL);
-      const a = (i / 4) * Math.PI - Math.PI / 2 + 0.4;
-      sp.position.set(Math.cos(a) * 0.28, 0.82, Math.sin(a) * 0.18 - 0.1);
-      sp.rotation.z = -Math.cos(a) * 0.5;
+      const a = i === 0 ? 0.5 : Math.PI - 0.5;
+      sp.position.set(Math.cos(a) * 0.34, 0.98, -0.24);
+      sp.rotation.z = -Math.cos(a) * 0.4;
+      sp.scale.setScalar(0.9);
       body.add(sp);
     }
     const armL = new THREE.Group();
     const upperL = new THREE.Mesh(G.bruteArm, DARK);
     const fistL = new THREE.Mesh(G.bruteFist, team);
+    fistL.scale.setScalar(1.3);
     fistL.position.y = -0.42;
     armL.add(upperL, fistL);
-    armL.position.set(0.42, 0.66, 0);
+    armL.position.set(0.5, 0.62, 0);
     const armR = armL.clone();
-    armR.position.x = -0.42;
+    armR.position.x = -0.5;
     const eye = new THREE.Mesh(G.droneEye, glowMat(0xff8844, 1.8));
-    eye.scale.set(0.8, 1, 1);
-    eye.position.set(0, 0.6, 0.34);
-    body.add(core, armL, armR, eye);
+    eye.scale.set(0.85, 1, 1);
+    eye.position.set(0, 0.52, 0.36);
+    body.add(core, shL, shR, armL, armR, eye);
     anim = { kind: "brute", armL, armR };
   }
 
@@ -405,38 +525,52 @@ export function makeBuildingVisual(e, color, size) {
     lampAt(0.9, 0.1, 0.9); lampAt(-0.9, 0.1, -0.9);
     anim.intake = intake; anim.intakeMat = intakeMat;
   } else if (e.type === "factory") {
-    // wide heavy plant: big box, huge rolling door, short smokestack
-    const b1 = new THREE.Mesh(new THREE.BoxGeometry(2.7, 1.1, 2.3), base);
-    b1.position.y = 0.55;
-    const roof = new THREE.Mesh(new THREE.BoxGeometry(2.5, 0.35, 2.1), GUNMETAL);
-    roof.position.y = 1.25;
+    // wide heavy plant: stepped-roofline block, side ventilation stacks, huge
+    // rolling door, short smokestack. Less shoebox — the roof steps back.
+    const b1 = new THREE.Mesh(new THREE.BoxGeometry(2.7, 0.95, 2.3), base);
+    b1.position.y = 0.48;
+    // stepped upper storey (narrower, set back) breaks the box silhouette
+    const step = new THREE.Mesh(new THREE.BoxGeometry(2.0, 0.5, 1.7), base);
+    step.position.set(0, 1.12, -0.18);
+    const roof = new THREE.Mesh(new THREE.BoxGeometry(1.85, 0.22, 1.55), GUNMETAL);
+    roof.position.set(0, 1.45, -0.18);
     const trim = new THREE.Mesh(new THREE.BoxGeometry(2.74, 0.12, 2.34), team);
-    trim.position.y = 0.95;
+    trim.position.y = 0.9;
+    // side ventilation stacks (ribbed cylinders) on the flanks
+    const ventGeo = new THREE.CylinderGeometry(0.16, 0.18, 0.7, 8);
+    const ventL = new THREE.Mesh(ventGeo, GUNMETAL);
+    ventL.position.set(1.15, 1.15, 0.55);
+    const ventL2 = new THREE.Mesh(ventGeo, GUNMETAL);
+    ventL2.position.set(1.15, 1.15, 0.05);
+    // louvered side panel (team) for detail
+    const louver = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.5, 1.4), team);
+    louver.position.set(1.37, 0.55, -0.2);
     // huge front rolling door: dark panel with team trim
-    const door = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.9, 0.1), DARK);
-    door.position.set(0, 0.5, 1.16);
-    const doorTrim = new THREE.Mesh(new THREE.BoxGeometry(1.7, 1.0, 0.06), team);
-    doorTrim.position.set(0, 0.52, 1.13);
+    const door = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.8, 0.1), DARK);
+    door.position.set(0, 0.46, 1.16);
+    const doorTrim = new THREE.Mesh(new THREE.BoxGeometry(1.7, 0.9, 0.06), team);
+    doorTrim.position.set(0, 0.48, 1.13);
     const stack = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.26, 0.9, 10), GUNMETAL);
-    stack.position.set(-0.85, 1.6, -0.7);
+    stack.position.set(-0.85, 1.55, -0.7);
     // ember glow at the stack tip (lit while queue non-empty)
     const emberMat = glowMat(0xff7a2a, 0.2);
     const ember = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.2, 0.1, 10), emberMat);
-    ember.position.set(-0.85, 2.08, -0.7);
-    b1.castShadow = roof.castShadow = true;
-    built.add(b1, roof, trim, door, doorTrim, stack, ember);
-    lampAt(1.25, 1.05, 1.1); lampAt(-1.25, 1.05, 1.1);
+    ember.position.set(-0.85, 2.03, -0.7);
+    b1.castShadow = step.castShadow = roof.castShadow = true;
+    built.add(b1, step, roof, trim, ventL, ventL2, louver, door, doorTrim, stack, ember);
+    lampAt(1.25, 0.98, 1.1); lampAt(-1.25, 0.98, 1.1);
     anim.stackTip = ember; anim.emberMat = emberMat;
   } else if (e.type === "starport") {
-    // flat landing pad on pylons + corner lights + rotating radar beacon
-    const pad = new THREE.Mesh(new THREE.CylinderGeometry(1.45, 1.45, 0.24, 20), base);
-    pad.position.y = 0.75;
+    // flat landing pad on pylons + corner lights + rotating radar beacon.
+    // thinner + larger pad reads more like a helipad than a drum.
+    const pad = new THREE.Mesh(new THREE.CylinderGeometry(1.62, 1.62, 0.14, 24), base);
+    pad.position.y = 0.78;
     pad.castShadow = true;
     // glowing pad edge (pulses while training)
     const edgeMat = glowMat(color, 0.5);
-    const edge = new THREE.Mesh(new THREE.TorusGeometry(1.4, 0.08, 8, 30), edgeMat);
+    const edge = new THREE.Mesh(new THREE.TorusGeometry(1.56, 0.07, 8, 36), edgeMat);
     edge.rotation.x = Math.PI / 2;
-    edge.position.y = 0.88;
+    edge.position.y = 0.86;
     const pylonGeo = new THREE.CylinderGeometry(0.14, 0.18, 0.75, 8);
     for (const [px, pz] of [[1.0, 1.0], [-1.0, 1.0], [1.0, -1.0], [-1.0, -1.0]]) {
       const py = new THREE.Mesh(pylonGeo, GUNMETAL);
