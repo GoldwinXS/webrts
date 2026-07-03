@@ -205,6 +205,17 @@ export class Input {
       return;
     }
 
+    // own finished refinery: workers harvest gas from it
+    if (target && target.type === "refinery" && target.owner === this.pid && target.done) {
+      const wids = this.mySelectedWorkers().map((w) => w.id);
+      if (wids.length) {
+        this.game.issue({ t: "gather", ids: wids, targetId: target.id, q });
+        this.renderer.orderPing(target.x / FP, target.y / FP, "#7cd94f");
+        this.audio.gatherAck();
+        return;
+      }
+    }
+
     // own unfinished building: send workers to (resume) constructing it
     if (target && target.building && target.owner === this.pid && !target.done) {
       const wids = this.mySelectedWorkers().map((w) => w.id);
