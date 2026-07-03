@@ -196,6 +196,24 @@ export class Sim {
         }
         break;
       }
+      case "patrol": {
+        const units = c.ids.map(own).filter((e) => e && e.unit);
+        for (const u of units) {
+          this.setOrder(u, {
+            kind: "patrol",
+            x: this.clampX(c.x), y: this.clampY(c.y),
+            ox: u.x, oy: u.y,       // patrol swings between here and the click
+          }, c.q);
+        }
+        break;
+      }
+      case "hold": {
+        for (const id of c.ids) {
+          const e = own(id);
+          if (e && e.unit) this.setOrder(e, { kind: "hold" }, c.q);
+        }
+        break;
+      }
       case "gather": {
         const patch = this.byId.get(c.targetId);
         if (!patch || patch.type !== "mineral") break;
@@ -311,7 +329,8 @@ export class Sim {
         if (d.acquire > 0) {
           const enemy = this.acquireTarget(u, d.acquire);
           if (enemy) {
-            u.order = { kind: "attack", targetId: enemy.id, resume: { x: o.x, y: o.y } };
+            // resume holds the full pre-fight order, restored on target death
+            u.order = { kind: "attack", targetId: enemy.id, resume: { ...o } };
             u.path = null;
             break;
           }
@@ -320,11 +339,44 @@ export class Sim {
         break;
       }
 
+      case "patrol": {
+        if (d.acquire > 0) {
+          const enemy = this.acquireTarget(u, d.acquire);
+          if (enemy) {
+            u.order = { kind: "attack", targetId: enemy.id, resume: { ...o } };
+            u.path = null;
+            break;
+          }
+        }
+        if (this.travelTo(u, o.x, o.y, d.speed)) {
+          // arrived: swing back the other way
+          u.order = { kind: "patrol", x: o.ox, y: o.oy, ox: o.x, oy: o.y };
+        }
+        break;
+      }
+
+      case "hold": {
+        // stand ground: fire at anything in weapon range, never chase
+        if (d.dmg > 0 && u.cooldown === 0) {
+          const target = this.acquireTarget(u, d.range + HALF);
+          if (target && this.gapTo(u, target) <= d.range) {
+            u.cooldown = d.cooldown;
+            target.hp -= d.dmg;
+            this.events.push({
+              t: "shot", fx: u.x, fy: u.y, tx: target.x, ty: target.y,
+              owner: u.owner, ranged: d.range > FP,
+              attackerId: u.id, targetId: target.id, tOwner: target.owner,
+            });
+          }
+        }
+        break;
+      }
+
       case "attack": {
         const target = this.byId.get(o.targetId);
         if (!target || target.hp <= 0) {
           if (o.resume) {
-            u.order = { kind: "attackmove", x: o.resume.x, y: o.resume.y };
+            u.order = o.resume;
             u.path = null;
           } else this.popNext(u);
           break;

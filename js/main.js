@@ -5,6 +5,7 @@ import { Input } from "./ui/input.js";
 import { Hud } from "./ui/hud.js";
 import { Net, makeCode } from "./net/net.js";
 import { GameAudio } from "./audio.js";
+import { rebind } from "./ui/keys.js";
 import { TICK_MS } from "./core/data.js";
 
 const audio = new GameAudio();
@@ -79,9 +80,9 @@ function startGame(mode, seed, netConn) {
     if (document.visibilityState === "hidden") game.update(performance.now());
   }, TICK_MS);
 
-  // debug / verification handle
+  // debug / verification handle (+ console keybinding: RTS.rebind("idleWorker", ["f1","u"]))
   window.RTS = {
-    game, sim: game.sim, renderer, input, hud,
+    game, sim: game.sim, renderer, input, hud, rebind,
     step(n = 1) { for (let i = 0; i < n; i++) game.tryStep(); },
   };
 }

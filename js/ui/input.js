@@ -3,6 +3,7 @@
 import * as THREE from "three";
 import { FP, fpToTile } from "../core/fixed.js";
 import { UNITS, BUILDINGS } from "../core/data.js";
+import { KEYS } from "./keys.js";
 
 export class Input {
   constructor(game, renderer, hud, audio) {
@@ -24,6 +25,9 @@ export class Input {
     this.lastRecall = { key: null, time: 0 };
     this.lastClick = { id: 0, time: 0 };   // double-click detection
     this.idleCycle = 0;                    // idle-worker rotation index
+    this.baseCycle = 0;                    // Backspace base rotation
+    this.camSlots = [null, null, null, null]; // F5-F8 camera locations
+    this.patrolMode = false;
 
     this.ray = new THREE.Raycaster();
     this.groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
@@ -100,10 +104,22 @@ export class Input {
         this.setAttackMode(false);
         return;
       }
+      if (this.patrolMode) {
+        const g = this.groundAt(e.clientX, e.clientY);
+        const ids = this.mySelectedUnitIds();
+        if (g && ids.length) {
+          this.game.issue({ t: "patrol", ids, x: g.x, y: g.y, q: e.shiftKey ? 1 : 0 });
+          this.renderer.orderPing(g.wx, g.wz, "#6bb8ff");
+          this.audio.ack();
+        }
+        this.setPatrolMode(false);
+        return;
+      }
       this.drag = { sx: e.clientX, sy: e.clientY, cx: e.clientX, cy: e.clientY };
     } else if (e.button === 2) {
       if (this.placing) { this.cancelPlace(); return; }
       if (this.attackMode) { this.setAttackMode(false); return; }
+      if (this.patrolMode) { this.setPatrolMode(false); return; }
       this.rightClick(e.clientX, e.clientY, e.shiftKey);
     }
   }
@@ -224,6 +240,7 @@ export class Input {
     if (k === "escape") {
       if (this.placing) this.cancelPlace();
       else if (this.attackMode) this.setAttackMode(false);
+      else if (this.patrolMode) this.setPatrolMode(false);
       else { this.selection.clear(); this.hud.refreshSelection(); }
       return;
     }
@@ -232,7 +249,37 @@ export class Input {
       this.hud.cycleSubgroup(e.shiftKey ? -1 : 1);
       return;
     }
-    if (k === "i" && !e.repeat) { this.selectIdleWorker(); return; }
+    if (KEYS.idleWorker.includes(k) && !e.repeat) {
+      e.preventDefault();
+      this.selectIdleWorker();
+      return;
+    }
+    if (KEYS.selectArmy.includes(k) && !e.repeat) {
+      e.preventDefault();
+      this.selectArmy();
+      return;
+    }
+    // camera locations: Ctrl+F5-F8 saves, F5-F8 recalls
+    const camSlot = KEYS.cameraSlots.indexOf(k);
+    if (camSlot >= 0) {
+      e.preventDefault();   // F5 would reload the page
+      const cam = this.renderer.camera;
+      if (e.ctrlKey) {
+        this.camSlots[camSlot] = { tx: cam.tx, tz: cam.tz, yaw: cam.yaw, dist: cam.dist };
+        this.hud.toastInfo(`Camera ${camSlot + 5} saved`);
+      } else if (this.camSlots[camSlot]) {
+        const s = this.camSlots[camSlot];
+        cam.tx = s.tx; cam.tz = s.tz; cam.yaw = s.yaw;
+        cam.dist = s.dist; cam.targetDist = s.dist;
+        cam.clamp(); cam.updateTransform();
+      }
+      return;
+    }
+    if (KEYS.cycleBase.includes(k)) {
+      e.preventDefault();
+      this.cycleBase();
+      return;
+    }
 
     // control groups (e.code, so Shift+digit works on every layout):
     // Ctrl/Alt+digit assigns, Shift+digit adds, digit recalls,
@@ -289,8 +336,37 @@ export class Input {
 
   setAttackMode(on) {
     this.attackMode = on;
-    document.body.classList.toggle("attack-cursor", on);
+    if (on) this.patrolMode = false;
+    document.body.classList.toggle("attack-cursor", on || this.patrolMode);
     this.hud.setHint(on ? "Attack-move: click a target or location (right-click / Esc to cancel)" : "");
+  }
+
+  setPatrolMode(on) {
+    this.patrolMode = on;
+    if (on) this.attackMode = false;
+    document.body.classList.toggle("attack-cursor", on || this.attackMode);
+    this.hud.setHint(on ? "Patrol: click the far point of the route (right-click / Esc to cancel)" : "");
+  }
+
+  // F2: every combat unit (workers stay on the line)
+  selectArmy() {
+    const army = this.sim.entities.filter((e) =>
+      e.owner === this.pid && e.unit && e.type !== "worker");
+    if (!army.length) { this.hud.toastInfo("No army units"); return; }
+    this.selection.clear();
+    army.forEach((u) => this.selection.add(u.id));
+    this.hud.refreshSelection();
+    this.audio.select();
+  }
+
+  // Backspace: hop the camera between our bases
+  cycleBase() {
+    const bases = this.sim.entities.filter((e) =>
+      e.owner === this.pid && e.type === "hq");
+    if (!bases.length) return;
+    const b = bases[this.baseCycle % bases.length];
+    this.baseCycle++;
+    this.renderer.camera.jumpTo(b.x / FP, b.y / FP);
   }
 
   // ---------- building placement ----------
@@ -390,9 +466,9 @@ export class Input {
     if (this.keys.has("arrowright")) dx += s;
     if (this.keys.has("arrowup")) dz -= s;
     if (this.keys.has("arrowdown")) dz += s;
-    // camera rotation on ,/. (Q/E belong to the grid hotkeys now)
-    if (this.keys.has(",")) cam.rotate(-1.6 * dt);
-    if (this.keys.has(".")) cam.rotate(1.6 * dt);
+    // camera rotation (default ,/. — Q/E belong to the grid hotkeys)
+    if (KEYS.rotateLeft.some((x) => this.keys.has(x))) cam.rotate(-1.6 * dt);
+    if (KEYS.rotateRight.some((x) => this.keys.has(x))) cam.rotate(1.6 * dt);
     const edge = 16;
     if (this.mouse.inside && !this.drag) {
       if (this.mouse.x < edge) dx -= s;

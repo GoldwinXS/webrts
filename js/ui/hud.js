@@ -27,8 +27,12 @@ export class Hud {
 
     this.minimap = document.getElementById("minimap");
     this.mmCtx = this.minimap.getContext("2d");
-    this.minimap.addEventListener("pointerdown", (e) => this.minimapClick(e));
+    this.minimap.addEventListener("pointerdown", (e) => { if (e.button === 0) this.minimapClick(e); });
     this.minimap.addEventListener("pointermove", (e) => { if (e.buttons & 1) this.minimapClick(e); });
+    this.minimap.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      this.minimapOrder(e);
+    });
 
     // idle worker button
     this.$idle = document.getElementById("btn-idle");
@@ -149,6 +153,8 @@ export class Hud {
     if (anyUnits) {
       slots.push({ key: "a", cmd: "attack", label: "Attack-move", sub: "all units" });
       slots.push({ key: "s", cmd: "stop", label: "Stop", sub: "all units" });
+      slots.push({ key: "d", cmd: "hold", label: "Hold Position", sub: "all units" });
+      slots.push({ key: "f", cmd: "patrol", label: "Patrol", sub: "all units" });
     }
 
     this.hotkeys = {};
@@ -193,6 +199,8 @@ export class Hud {
       case "gather":
         return o.phase === "return" ? "Returning minerals"
           : o.phase === "mining" ? "Mining" : "Heading to minerals";
+      case "patrol": return "Patrolling";
+      case "hold": return "Holding position";
       default: return "";
     }
   }
@@ -224,6 +232,11 @@ export class Hud {
       this.audio.trained();
     } else if (cmd === "attack") {
       if (this.input?.mySelectedUnitIds().length) this.input.setAttackMode(true);
+    } else if (cmd === "patrol") {
+      if (this.input?.mySelectedUnitIds().length) this.input.setPatrolMode(true);
+    } else if (cmd === "hold") {
+      const ids = this.input?.mySelectedUnitIds() || [];
+      if (ids.length) { this.game.issue({ t: "hold", ids }); this.audio.ack(); }
     } else if (cmd === "stop") {
       const ids = this.input?.mySelectedUnitIds() || [];
       if (ids.length) { this.game.issue({ t: "stop", ids }); this.audio.ack(); }
@@ -301,6 +314,25 @@ export class Hud {
     const x = (e.clientX - r.left) / r.width * this.sim.map.w;
     const y = (e.clientY - r.top) / r.height * this.sim.map.h;
     this.renderer.camera.jumpTo(x, y);
+  }
+
+  // right-click on the minimap: order selected units there
+  minimapOrder(e) {
+    const ids = this.input?.mySelectedUnitIds() || [];
+    if (!ids.length) return;
+    const r = this.minimap.getBoundingClientRect();
+    const wx = (e.clientX - r.left) / r.width * this.sim.map.w;
+    const wy = (e.clientY - r.top) / r.height * this.sim.map.h;
+    const fx = Math.round(wx * FP), fy = Math.round(wy * FP);
+    if (this.input.attackMode) {
+      this.game.issue({ t: "attackmove", ids, x: fx, y: fy, q: e.shiftKey ? 1 : 0 });
+      this.input.setAttackMode(false);
+      this.audio.attackAck();
+    } else {
+      this.game.issue({ t: "move", ids, x: fx, y: fy, q: e.shiftKey ? 1 : 0 });
+      this.audio.ack();
+    }
+    this.renderer.orderPing(wx, wy, "#7cff6b");
   }
 
   // ---------- feedback ----------
