@@ -290,12 +290,14 @@ kbd {
 #hud { position: fixed; inset: 0; pointer-events: none; z-index: 10; }
 
 #topbar {
+  /* compact pill, top-left — not a full-width strip; keep the game visible */
   position: absolute;
-  top: 10px; left: 10px; right: 10px;
+  top: 10px; left: 10px; right: auto;
+  width: fit-content;
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 8px 12px;
+  padding: 6px 12px;
   background: var(--glass);
   border: 1px solid var(--edge);
   border-radius: 14px;
@@ -344,12 +346,11 @@ kbd {
 }
 
 .topbar-actions {
-  margin-left: auto;
+  margin-left: 8px;
   display: inline-flex;
   align-items: center;
   gap: 4px;
 }
-#net-status:not(.hidden) ~ .topbar-actions { margin-left: 12px; }
 
 .icon-btn {
   pointer-events: auto;
@@ -436,6 +437,8 @@ kbd {
 /* ---------- 6. HUD — bottom bar ---------- */
 
 #bottombar {
+  /* minimap hugs the left edge; selection + command card hug the right —
+     the middle of the screen stays clear for the battlefield */
   position: absolute;
   bottom: 10px; left: 10px; right: 10px;
   display: flex;
@@ -443,6 +446,7 @@ kbd {
   gap: 12px;
   pointer-events: none;
 }
+#sel-panel { margin-left: auto; }
 
 #minimap-col {
   display: flex;
@@ -451,10 +455,10 @@ kbd {
   align-items: flex-start;
 }
 
-/* minimap in a glass frame */
+/* minimap in a glass frame — canvas stays 192x192, displayed smaller */
 #minimap {
-  width: 192px;
-  height: 192px;
+  width: 150px;
+  height: 150px;
   padding: 0;
   border: 1px solid var(--edge);
   border-radius: 12px;
@@ -467,10 +471,10 @@ kbd {
 .idle-btn {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
+  gap: 6px;
   pointer-events: auto;
-  padding: 6px 12px;
-  font-size: var(--fs-sm);
+  padding: 4px 10px;
+  font-size: var(--fs-xs);
   color: var(--warm);
   background: rgba(60, 44, 14, 0.5);
   border: 1px solid rgba(255, 213, 138, 0.4);
@@ -483,7 +487,7 @@ kbd {
   animation: idle-pulse 2s ease-in-out infinite;
 }
 .idle-btn:hover { background: rgba(90, 66, 20, 0.65); }
-.idle-btn b { font-size: var(--fs-sm); font-weight: 700; color: #ffe6b8; }
+.idle-btn b { font-size: var(--fs-xs); font-weight: 700; color: #ffe6b8; }
 @keyframes idle-pulse {
   0%, 100% { border-color: rgba(255, 213, 138, 0.35); box-shadow: var(--inner-hi); }
   50% { border-color: rgba(255, 213, 138, 0.85); box-shadow: var(--inner-hi), 0 0 16px rgba(255, 213, 138, 0.25); }
@@ -491,9 +495,11 @@ kbd {
 
 /* selection panel */
 #sel-panel {
-  min-width: 180px;
-  padding: 12px 16px;
-  font-size: var(--fs-sm);
+  min-width: 140px;
+  max-height: 150px;
+  overflow-y: auto;
+  padding: 7px 10px;
+  font-size: 12px;
   color: var(--ink-dim);
   background: var(--glass);
   border: 1px solid var(--edge);
@@ -507,12 +513,12 @@ kbd {
 .sel-row {
   display: flex;
   justify-content: space-between;
-  gap: 14px;
-  line-height: 1.7;
+  gap: 12px;
+  line-height: 1.45;
   color: var(--ink);
 }
 .sel-row b { color: var(--accent); font-variant-numeric: tabular-nums; }
-.sel-sub { color: var(--muted); font-size: var(--fs-xs); margin-top: 4px; letter-spacing: 0.2px; }
+.sel-sub { color: var(--muted); font-size: var(--fs-xs); margin-top: 3px; letter-spacing: 0.2px; }
 .sel-sub.status { color: var(--accent); }
 
 /* build-queue chips */
@@ -520,8 +526,8 @@ kbd {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
-  margin-top: 6px;
+  gap: 8px;
+  margin-top: 5px;
 }
 .q-name {
   color: var(--muted);
@@ -540,11 +546,11 @@ kbd {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 18px;
-  padding: 1px 5px;
-  font-size: var(--fs-xs);
+  min-width: 16px;
+  padding: 1px 4px;
+  font-size: 10px;
   font-weight: 600;
-  line-height: 1.5;
+  line-height: 1.4;
   color: var(--ink-dim);
   background: rgba(255, 255, 255, 0.05);
   border: 1px solid var(--edge);
@@ -552,7 +558,7 @@ kbd {
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
 }
 .q-item.q-head {
-  min-width: 30px;
+  min-width: 28px;
   color: var(--accent);
   background: var(--glass-hi);
   border-color: rgba(76, 194, 255, 0.3);
@@ -573,14 +579,14 @@ kbd {
 /* command card — glass tiles */
 #cmd-card {
   display: grid;
-  grid-template-columns: repeat(3, 96px);
-  gap: 8px;
+  grid-template-columns: repeat(3, 76px);
+  gap: 6px;
   pointer-events: auto;
 }
 #cmd-card:empty { display: none; }
 #cmd-card button {
   position: relative;
-  padding: 16px 6px 9px;
+  padding: 14px 5px 7px;
   font-family: inherit;
   font-size: var(--fs-xs);
   color: var(--ink);
@@ -593,7 +599,7 @@ kbd {
   cursor: pointer;
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 2px;
   align-items: center;
   transition: background 0.15s, border-color 0.15s, transform 0.15s, box-shadow 0.15s;
 }
@@ -604,17 +610,17 @@ kbd {
   box-shadow: var(--inner-hi), 0 8px 22px rgba(76, 194, 255, 0.22);
 }
 #cmd-card button:active { transform: translateY(0); }
-#cmd-card button span { font-size: var(--fs-sm); font-weight: 500; }
-#cmd-card button small { color: var(--muted); font-size: 10px; }
+#cmd-card button span { font-size: 11px; font-weight: 500; }
+#cmd-card button small { color: var(--muted); font-size: 9px; }
 /* hotkey chip */
 #cmd-card kbd {
   position: absolute;
-  top: 5px;
-  left: 6px;
-  min-width: 16px;
-  padding: 0 4px;
-  font-size: 10px;
-  line-height: 15px;
+  top: 4px;
+  left: 5px;
+  min-width: 15px;
+  padding: 0 3px;
+  font-size: 9px;
+  line-height: 14px;
 }
 
 /* ---------- 7. end screen ---------- */
@@ -798,4 +804,60 @@ input[type="range"]::-moz-range-thumb {
   letter-spacing: 1.5px;
   text-transform: uppercase;
   color: var(--muted);
+}
+
+/* keybind section header with the reset button */
+.settings-keyhead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.settings-keyhead .settings-label { margin-bottom: 0; }
+.reset-btn {
+  min-width: 0;
+  padding: 4px 12px;
+  color: var(--ink-dim);
+  background: rgba(255, 255, 255, 0.05);
+  border-color: var(--edge);
+  font-size: var(--fs-xs);
+}
+.reset-btn:hover {
+  background: rgba(255, 255, 255, 0.10);
+  color: var(--ink);
+}
+
+/* rebindable rows are clickable chips */
+.keybind-row.rebindable {
+  cursor: pointer;
+  transition: background 0.12s, box-shadow 0.12s;
+}
+.keybind-row.rebindable .kb-keys {
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 2px 4px;
+  transition: border-color 0.12s, background 0.12s;
+}
+.keybind-row.rebindable:hover .kb-keys {
+  border-color: var(--edge-bright);
+  background: rgba(255, 255, 255, 0.04);
+}
+.keybind-row.listening {
+  background: rgba(76, 194, 255, 0.08);
+}
+.keybind-row.listening .kb-keys {
+  border-color: var(--accent);
+  background: rgba(76, 194, 255, 0.12);
+  color: var(--accent);
+}
+.keybind-row .kb-listen {
+  color: var(--accent);
+  font-size: var(--fs-xs);
+  letter-spacing: 0.5px;
+}
+.keybind-warn {
+  margin: 2px 10px 6px;
+  font-size: var(--fs-xs);
+  color: var(--bad);
 }

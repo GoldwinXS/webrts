@@ -11,10 +11,12 @@ import { makeRng } from "../core/fixed.js";
 import { BUILDINGS, PLAYER_COLORS } from "../core/data.js";
 import { RtsCamera } from "./camera.js";
 import { makeUnitVisual, makeBuildingVisual, makeMineralVisual, animateVisual, SHARED } from "./models.js";
+import { THEMES } from "../core/map.js";
 import { Effects } from "./fx.js";
 
 const W2 = (v) => v / FP;   // fp -> world units (1 tile = 1.0)
 const PX = 12;              // ground texture pixels per tile
+const HSCALE = 0.55;        // world units of elevation per height level
 
 export class Renderer {
   constructor(canvas, sim, localPlayer) {
@@ -28,9 +30,10 @@ export class Renderer {
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.35;
 
+    this.theme = THEMES[sim.map.theme || 0] || THEMES[0];
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0x070a10);
-    this.scene.fog = new THREE.Fog(0x070a10, 55, 150);
+    this.scene.background = new THREE.Color(this.theme.sky);
+    this.scene.fog = new THREE.Fog(this.theme.fog, 55, 150);
 
     const start = sim.map.starts[localPlayer];
     this.camera = new RtsCamera(sim.map.w, sim.map.h, start.x, start.y);
@@ -42,11 +45,14 @@ export class Renderer {
     this.moveAmt = new Map();         // entity id -> smoothed motion 0..1
     this.clockStart = performance.now();
 
+    this.buildHeightGrid();
     this.buildLights();
     this.buildGround();
     this.buildRocks();
+    this.buildDecos();
     this.buildStars();
     this.fx = new Effects(this.scene);
+    this.fx.heightAt = (x, z) => this.heightAt(x, z);
 
     this.ringMat = new THREE.MeshBasicMaterial({ color: 0x7cff6b, side: THREE.DoubleSide, transparent: true, opacity: 0.9, depthWrite: false });
     this.barBgMat = new THREE.MeshBasicMaterial({ color: 0x10141a });
@@ -90,6 +96,61 @@ export class Renderer {
 
   // ---------- terrain ----------
 
+  // Build a per-tile-corner height grid ((w+1)*(h+1)) in world units from the
+  // sim's integer tile height field. Each corner samples the max of its four
+  // adjacent tiles, then a light box blur softens ramps into slopes while
+  // cliff faces (large corner-to-corner deltas) stay reasonably crisp.
+  buildHeightGrid() {
+    const { w, h, height } = this.sim.map;
+    const gw = w + 1, gh = h + 1;
+    this.gw = gw; this.gh = gh;
+    const raw = new Float32Array(gw * gh);
+    const lvl = (x, y) => (x < 0 || y < 0 || x >= w || y >= h) ? 0 : (height ? height[y * w + x] : 0);
+    for (let cy = 0; cy < gh; cy++) {
+      for (let cx = 0; cx < gw; cx++) {
+        // corner (cx,cy) touches tiles (cx-1,cy-1)..(cx,cy)
+        const m = Math.max(lvl(cx - 1, cy - 1), lvl(cx, cy - 1), lvl(cx - 1, cy), lvl(cx, cy));
+        raw[cy * gw + cx] = m * HSCALE;
+      }
+    }
+    // one-pass smoothing so ramp corners aren't a vertical wall
+    const grid = new Float32Array(gw * gh);
+    for (let cy = 0; cy < gh; cy++) {
+      for (let cx = 0; cx < gw; cx++) {
+        let sum = 0, n = 0;
+        for (let dy = -1; dy <= 1; dy++)
+          for (let dx = -1; dx <= 1; dx++) {
+            const x = cx + dx, y = cy + dy;
+            if (x < 0 || y < 0 || x >= gw || y >= gh) continue;
+            // weight the center more so plateaus keep their level
+            const wt = (dx === 0 && dy === 0) ? 4 : 1;
+            sum += raw[y * gw + x] * wt; n += wt;
+          }
+        grid[cy * gw + cx] = sum / n;
+      }
+    }
+    this.heightGrid = grid;
+  }
+
+  // Bilinear sample of the corner height grid at world coords (wx,wz). Corner
+  // (cx,cy) sits at world (cx,cy); tile centers therefore land mid-cell.
+  heightAt(wx, wz) {
+    const gw = this.gw, gh = this.gh;
+    if (!this.heightGrid) return 0;
+    let x = wx, z = wz;
+    if (x < 0) x = 0; else if (x > gw - 1) x = gw - 1;
+    if (z < 0) z = 0; else if (z > gh - 1) z = gh - 1;
+    const x0 = x | 0, z0 = z | 0;
+    const x1 = Math.min(gw - 1, x0 + 1), z1 = Math.min(gh - 1, z0 + 1);
+    const fx = x - x0, fz = z - z0;
+    const g = this.heightGrid;
+    const a = g[z0 * gw + x0], b = g[z0 * gw + x1];
+    const c = g[z1 * gw + x0], d = g[z1 * gw + x1];
+    const top = a + (b - a) * fx;
+    const bot = c + (d - c) * fx;
+    return top + (bot - top) * fz;
+  }
+
   buildGround() {
     const { w, h } = this.sim.map;
     // static terrain painted once; fog composited over it on updates
@@ -106,8 +167,25 @@ export class Renderer {
     this.groundTex.anisotropy = this.renderer.capabilities.getMaxAnisotropy();
     this.paintFog();
 
+    // displaced grid: one quad per tile (w*h), vertices at tile corners so the
+    // Y matches the height grid exactly. The ground texture still maps 1:1 over
+    // the whole plane (uv preserved from PlaneGeometry).
+    const geo = new THREE.PlaneGeometry(w, h, w, h);
+    const pos = geo.attributes.position;
+    const gw = this.gw;
+    for (let i = 0; i < pos.count; i++) {
+      // PlaneGeometry lays out verts row-major, x in [-w/2,w/2], y in [h/2,-h/2]
+      const vx = pos.getX(i) + w / 2;               // 0..w corner x
+      const vy = pos.getY(i);                        // plane-space y (pre-rotate)
+      const cz = h / 2 - vy;                         // 0..h corner z
+      const cx = Math.round(vx), cz2 = Math.round(cz);
+      pos.setZ(i, this.heightGrid[cz2 * gw + cx]);   // displace along +Z (up after rotate)
+    }
+    pos.needsUpdate = true;
+    geo.computeVertexNormals();
+
     const mat = new THREE.MeshStandardMaterial({ map: this.groundTex, roughness: 0.95, metalness: 0 });
-    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(w, h), mat);
+    const mesh = new THREE.Mesh(geo, mat);
     mesh.rotation.x = -Math.PI / 2;
     mesh.position.set(w / 2, 0, h / 2);
     mesh.receiveShadow = true;
@@ -116,28 +194,35 @@ export class Renderer {
   }
 
   paintTerrain() {
-    const { w, h, rock } = this.sim.map;
+    const { w, h, rock, height } = this.sim.map;
     const ctx = this.baseCanvas.getContext("2d");
     const rng = makeRng(this.sim.seed ^ 0x5eed);
     const rnd = () => rng() / 0xffffffff;
+    const th = this.theme;
+    const [gr, gg, gb] = th.ground;        // lowland base
+    const [hr, hg, hb] = th.groundHi;      // highland (plateau top) tint
+    const [pr, pg, pb] = th.patch;          // patch accent delta
+    const [tr, tg, tb] = th.cliffTop;       // cliff-top rocky tint
 
-    // grass base with two-octave value noise
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
         const i = y * w + x;
         const isRock = rock[i];
+        const lvl = height ? height[i] : 0;
         for (let sy = 0; sy < PX; sy += 3) {
           for (let sx = 0; sx < PX; sx += 3) {
             const n = rnd();
             let r, g, b;
             if (isRock) {
-              const v = 56 + n * 20;
-              r = v; g = v + 4; b = v + 12;
+              // cliff / rock texel: rocky theme tint, slightly noisy
+              r = tr - 6 + n * 16; g = tg - 6 + n * 16; b = tb - 6 + n * 16;
             } else {
               const patch = rnd() > 0.94;
-              r = 40 + n * 16 + (patch ? 18 : 0);
-              g = 68 + n * 22 + (patch ? 13 : 0);
-              b = 42 + n * 13;
+              // blend lowland->highland by elevation so plateaus read distinct
+              const t = Math.min(1, lvl * 0.5);
+              r = (gr + (hr - gr) * t) + n * 16 + (patch ? pr : 0);
+              g = (gg + (hg - gg) * t) + n * 22 + (patch ? pg : 0);
+              b = (gb + (hb - gb) * t) + n * 13 + (patch ? pb : 0);
             }
             ctx.fillStyle = `rgb(${r | 0},${g | 0},${b | 0})`;
             ctx.fillRect(x * PX + sx, y * PX + sy, 3, 3);
@@ -177,7 +262,7 @@ export class Renderer {
       for (let x = 0; x < w; x++)
         if (rock[y * w + x]) positions.push([x + 0.5, y + 0.5]);
     const geo = new THREE.DodecahedronGeometry(0.55);
-    const mat = new THREE.MeshStandardMaterial({ color: 0x555e6b, roughness: 0.85 });
+    const mat = new THREE.MeshStandardMaterial({ color: this.theme.rock, roughness: 0.85 });
     const inst = new THREE.InstancedMesh(geo, mat, positions.length);
     inst.castShadow = true;
     inst.receiveShadow = true;
@@ -186,9 +271,55 @@ export class Renderer {
     positions.forEach(([x, z], i) => {
       const s = 0.75 + ((x * 7 + z * 13) % 6) / 9;
       q.setFromEuler(new THREE.Euler(((x * 3) % 7) / 7, ((z * 5) % 9) / 9 * Math.PI, 0));
-      m.compose(new THREE.Vector3(x, 0.22 + (s - 0.75) * 0.2, z), q, new THREE.Vector3(s, s * 0.75, s));
+      // sit the rock chunk on the terrain surface (cliff tops sit higher)
+      const gy = this.heightAt(x, z);
+      m.compose(new THREE.Vector3(x, gy + 0.22 + (s - 0.75) * 0.2, z), q, new THREE.Vector3(s, s * 0.75, s));
       inst.setMatrixAt(i, m);
     });
+    this.scene.add(inst);
+  }
+
+  // Instanced, theme-colored decorations (crystal shards, rock piles, glowing
+  // flora tufts). Non-blocking props scattered deterministically by the map.
+  buildDecos() {
+    const decos = this.sim.map.decos || [];
+    if (!decos.length) return;
+    const buckets = [[], [], []];               // by kind
+    for (const d of decos) if (buckets[d.kind]) buckets[d.kind].push(d);
+    const [c0, c1, c2] = this.theme.deco;
+
+    // kind 0: crystal shard cluster (emissive octahedron)
+    this.addDecoInstances(buckets[0], new THREE.OctahedronGeometry(0.22),
+      new THREE.MeshStandardMaterial({ color: c0, emissive: c0, emissiveIntensity: 0.8, roughness: 0.3, metalness: 0.4 }),
+      (d) => ({ y: 0.24, s: 0.7 + ((d.x * 5 + d.y * 3) % 5) / 8, spin: (d.x + d.y) % 6 }));
+
+    // kind 1: small rock pile (dark, matte)
+    this.addDecoInstances(buckets[1], new THREE.DodecahedronGeometry(0.28),
+      new THREE.MeshStandardMaterial({ color: this.theme.rock, roughness: 0.95, metalness: 0.05 }),
+      (d) => ({ y: 0.14, s: 0.5 + ((d.x * 7 + d.y) % 5) / 10, spin: (d.x * 2 + d.y) % 6 }));
+
+    // kind 2: glowing flora tuft (emissive cone)
+    this.addDecoInstances(buckets[2], new THREE.ConeGeometry(0.13, 0.42, 6),
+      new THREE.MeshStandardMaterial({ color: c1, emissive: c2, emissiveIntensity: 0.9, roughness: 0.4 }),
+      (d) => ({ y: 0.21, s: 0.7 + ((d.x + d.y * 4) % 5) / 8, spin: (d.x + d.y * 3) % 6 }));
+  }
+
+  addDecoInstances(list, geo, mat, poseFn) {
+    if (!list.length) return;
+    const inst = new THREE.InstancedMesh(geo, mat, list.length);
+    inst.castShadow = true;
+    inst.receiveShadow = true;
+    const m = new THREE.Matrix4();
+    const q = new THREE.Quaternion();
+    list.forEach((d, i) => {
+      const wx = d.x + 0.5, wz = d.y + 0.5;
+      const p = poseFn(d);
+      const gy = this.heightAt(wx, wz);
+      q.setFromEuler(new THREE.Euler(0, (p.spin / 6) * Math.PI * 2, 0));
+      m.compose(new THREE.Vector3(wx, gy + p.y * p.s, wz), q, new THREE.Vector3(p.s, p.s, p.s));
+      inst.setMatrixAt(i, m);
+    });
+    inst.frustumCulled = false;
     this.scene.add(inst);
   }
 
@@ -251,9 +382,14 @@ export class Renderer {
     this.queuePathPos = new THREE.BufferAttribute(buf, 3);
     this.queuePathPos.setUsage(THREE.DynamicDrawUsage);
     geo.setAttribute("position", this.queuePathPos);
+    // per-vertex colors: order type decides the segment color
+    const colBuf = new Float32Array(this.queueMaxSegments * 2 * 3);
+    this.queuePathCol = new THREE.BufferAttribute(colBuf, 3);
+    this.queuePathCol.setUsage(THREE.DynamicDrawUsage);
+    geo.setAttribute("color", this.queuePathCol);
     geo.setDrawRange(0, 0);
     const mat = new THREE.LineBasicMaterial({
-      color: 0x7cff6b, transparent: true, opacity: 0.4, depthWrite: false,
+      vertexColors: true, transparent: true, opacity: 0.5, depthWrite: false,
     });
     this.queuePaths = new THREE.LineSegments(geo, mat);
     this.queuePaths.frustumCulled = false;
@@ -280,18 +416,32 @@ export class Renderer {
   }
 
   // Rebuild the shift-queue path buffer from the current selection.
+  // Segment colors: green move, red attack(-move), blue patrol, cyan gather,
+  // amber build.
   updateQueuePaths() {
     const sim = this.sim;
     const arr = this.queuePathPos.array;
+    const col = this.queuePathCol.array;
     const cap = this.queueMaxSegments;
     const Y = 0.14;
     let seg = 0;
 
-    const push = (ax, az, bx, bz) => {
+    const KIND_COLORS = {
+      move: [0.49, 1.0, 0.42],
+      attackmove: [1.0, 0.37, 0.30],
+      attack: [1.0, 0.37, 0.30],
+      patrol: [0.42, 0.72, 1.0],
+      gather: [0.39, 0.91, 0.86],
+      build: [1.0, 0.70, 0.28],
+    };
+
+    const push = (ax, az, bx, bz, c) => {
       if (seg >= cap) return false;
       const i = seg * 6;
       arr[i] = ax; arr[i + 1] = Y; arr[i + 2] = az;
       arr[i + 3] = bx; arr[i + 4] = Y; arr[i + 5] = bz;
+      col[i] = c[0]; col[i + 1] = c[1]; col[i + 2] = c[2];
+      col[i + 3] = c[0]; col[i + 4] = c[1]; col[i + 5] = c[2];
       seg++;
       return true;
     };
@@ -306,19 +456,21 @@ export class Renderer {
       let px = W2(e.x), pz = W2(e.y);              // start at the unit
       const orders = [e.order, ...next];
       for (const o of orders) {
+        const c = KIND_COLORS[o.kind] || KIND_COLORS.move;
         // patrol also shows its route leg (ox,oy)<->(x,y)
         if (o.kind === "patrol") {
-          if (!push(W2(o.ox), W2(o.oy), W2(o.x), W2(o.y))) break outer;
+          if (!push(W2(o.ox), W2(o.oy), W2(o.x), W2(o.y), c)) break outer;
         }
         const pt = this.orderPoint(o);
         if (!pt) break;                            // hold/idle stop the chain
-        if (!push(px, pz, pt[0], pt[1])) break outer;
+        if (!push(px, pz, pt[0], pt[1], c)) break outer;
         px = pt[0]; pz = pt[1];
       }
     }
 
     this.queuePaths.geometry.setDrawRange(0, seg * 2);
     this.queuePathPos.needsUpdate = true;
+    this.queuePathCol.needsUpdate = true;
   }
 
   // Rally lines + flags for every selected own finished building with a rally.
@@ -529,7 +681,7 @@ export class Renderer {
 
       const x = W2(e.px + (e.x - e.px) * alpha);
       const z = W2(e.py + (e.y - e.py) * alpha);
-      g.position.set(x, 0, z);
+      g.position.set(x, this.heightAt(x, z), z);
 
       // smoothed motion amount drives walk cycles
       const moving = (e.x !== e.px || e.y !== e.py) ? 1 : 0;

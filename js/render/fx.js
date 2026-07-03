@@ -140,7 +140,13 @@ export class Effects {
     this.flashGeo = new THREE.SphereGeometry(0.11, 8, 6);
     this.ringGeo = new THREE.RingGeometry(0.28, 0.42, 26);
     this.decalGeo = new THREE.CircleGeometry(1, 20);
+    // optional terrain height sampler (set by the renderer). When present,
+    // effects are lifted onto the terrain surface. Call signatures unchanged.
+    this.heightAt = null;
   }
+
+  // terrain lift for a world (x,z); 0 when no sampler is wired
+  gy(x, z) { return this.heightAt ? this.heightAt(x, z) : 0; }
 
   add(obj, data) {
     this.scene.add(obj);
@@ -156,40 +162,43 @@ export class Effects {
 
   // traveling projectile from a to b; sparks on arrival
   bolt(ax, az, bx, bz, color) {
+    const ay = this.gy(ax, az), by = this.gy(bx, bz);
     const m = new THREE.Mesh(this.boltGeo, this.basic(color));
-    m.position.set(ax, 0.62, az);
-    m.lookAt(bx, 0.55, bz);
+    m.position.set(ax, 0.62 + ay, az);
+    m.lookAt(bx, 0.55 + by, bz);
     const d = Math.hypot(bx - ax, bz - az);
     const dur = Math.max(0.06, d / 34);
-    this.add(m, { kind: "bolt", t: 0, dur, ax, az, bx, bz, color });
+    this.add(m, { kind: "bolt", t: 0, dur, ax, ay, az, bx, by, bz, color });
     // muzzle flash
     const f = new THREE.Mesh(this.flashGeo, this.basic(color, 0.95));
-    f.position.set(ax + (bx - ax) / d * 0.35, 0.62, az + (bz - az) / d * 0.35);
+    f.position.set(ax + (bx - ax) / d * 0.35, 0.62 + ay, az + (bz - az) / d * 0.35);
     this.add(f, { kind: "flash", t: 0, dur: 0.07 });
   }
 
   meleeHit(x, z, color) {
-    this.sparks.burst(x, 0.5, z, 6, color, 2.5, 0.35, 1.5);
+    this.sparks.burst(x, 0.5 + this.gy(x, z), z, 6, color, 2.5, 0.35, 1.5);
   }
 
   unitDeath(x, z, color) {
-    this.sparks.burst(x, 0.4, z, 26, color, 4, 0.7);
-    this.sparks.burst(x, 0.3, z, 10, 0xffb347, 2.5, 0.5);
-    this.smoke.puff(x, 0.5, z, 0.9);
+    const y = this.gy(x, z);
+    this.sparks.burst(x, 0.4 + y, z, 26, color, 4, 0.7);
+    this.sparks.burst(x, 0.3 + y, z, 10, 0xffb347, 2.5, 0.5);
+    this.smoke.puff(x, 0.5 + y, z, 0.9);
     this.shockRing(x, z, 0xffb347, 1.6, 0.4);
   }
 
   buildingDeath(x, z, size) {
-    this.sparks.burst(x, 0.6, z, 70, 0xff9540, 6, 1.0, 4);
-    this.sparks.burst(x, 0.4, z, 30, 0xffe08a, 4, 0.8);
-    for (let i = 0; i < 5; i++) this.smoke.puff(x, 0.4, z, 1.6, 2.2);
+    const y = this.gy(x, z);
+    this.sparks.burst(x, 0.6 + y, z, 70, 0xff9540, 6, 1.0, 4);
+    this.sparks.burst(x, 0.4 + y, z, 30, 0xffe08a, 4, 0.8);
+    for (let i = 0; i < 5; i++) this.smoke.puff(x, 0.4 + y, z, 1.6, 2.2);
     this.shockRing(x, z, 0xff7733, size * 1.6, 0.7);
     // scorch decal
     const d = new THREE.Mesh(this.decalGeo, new THREE.MeshBasicMaterial({
       color: 0x0a0a0c, transparent: true, opacity: 0.75, depthWrite: false,
     }));
     d.rotation.x = -Math.PI / 2;
-    d.position.set(x, 0.015, z);
+    d.position.set(x, 0.015 + y, z);
     d.scale.setScalar(size * 0.7);
     this.add(d, { kind: "decal", t: 0, dur: 14 });
   }
@@ -197,7 +206,7 @@ export class Effects {
   shockRing(x, z, color, maxScale = 2, dur = 0.5) {
     const r = new THREE.Mesh(this.ringGeo, this.basic(color, 0.9));
     r.rotation.x = -Math.PI / 2;
-    r.position.set(x, 0.06, z);
+    r.position.set(x, 0.06 + this.gy(x, z), z);
     this.add(r, { kind: "ring", t: 0, dur, maxScale });
   }
 
@@ -205,13 +214,13 @@ export class Effects {
   ping(x, z, color) {
     const r = new THREE.Mesh(this.ringGeo, this.basic(color, 0.95));
     r.rotation.x = -Math.PI / 2;
-    r.position.set(x, 0.05, z);
+    r.position.set(x, 0.05 + this.gy(x, z), z);
     r.scale.setScalar(2.2);
     this.add(r, { kind: "ping", t: 0, dur: 0.5 });
   }
 
   spawnPoof(x, z, color) {
-    this.sparks.burst(x, 0.2, z, 10, color, 1.6, 0.4, 2);
+    this.sparks.burst(x, 0.2 + this.gy(x, z), z, 10, color, 1.6, 0.4, 2);
   }
 
   update(dt) {
@@ -222,7 +231,7 @@ export class Effects {
       fx.t += dt;
       const p = fx.t / fx.dur;
       if (p >= 1) {
-        if (fx.kind === "bolt") this.sparks.burst(fx.bx, 0.55, fx.bz, 5, fx.color, 2, 0.3, 1);
+        if (fx.kind === "bolt") this.sparks.burst(fx.bx, 0.55 + (fx.by || 0), fx.bz, 5, fx.color, 2, 0.3, 1);
         this.scene.remove(fx.obj);
         fx.obj.material.dispose();
         this.live.splice(i, 1);
@@ -230,7 +239,7 @@ export class Effects {
       }
       switch (fx.kind) {
         case "bolt":
-          fx.obj.position.set(fx.ax + (fx.bx - fx.ax) * p, 0.62, fx.az + (fx.bz - fx.az) * p);
+          fx.obj.position.set(fx.ax + (fx.bx - fx.ax) * p, 0.62 + (fx.ay || 0) + ((fx.by || 0) - (fx.ay || 0)) * p, fx.az + (fx.bz - fx.az) * p);
           break;
         case "flash":
           fx.obj.scale.setScalar(1 + p * 2.2);

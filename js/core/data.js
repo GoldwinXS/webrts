@@ -3,8 +3,8 @@
 import { FP } from "./fixed.js";
 
 export const TICK_MS = 100;          // 10 sim ticks per second
-export const MAP_W = 48;             // tiles
-export const MAP_H = 48;
+export const MAP_W = 56;             // tiles (procedural maps; <=64, fp-safe)
+export const MAP_H = 56;
 
 export const START_MINERALS = 50;
 export const CARRY_AMOUNT = 8;       // minerals per worker trip

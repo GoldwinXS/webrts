@@ -43,6 +43,11 @@ export class Input {
       e.preventDefault();
       renderer.camera.zoom(e.deltaY > 0 ? 1.1 : 1 / 1.1);
     }, { passive: false });
+    // swallow wheel everywhere else in-game (except scrollable panels) so
+    // browser gestures never steal focus, especially in fullscreen
+    window.addEventListener("wheel", (e) => {
+      if (!e.target.closest?.("#settings, #sel-panel, #menu")) e.preventDefault();
+    }, { passive: false });
     window.addEventListener("keydown", (e) => this.onKey(e, true));
     window.addEventListener("keyup", (e) => this.keys.delete(e.key.toLowerCase()));
     document.addEventListener("mouseleave", () => (this.mouse.inside = false));
@@ -143,9 +148,9 @@ export class Input {
         this.selection.add(hit.id);
         if (hit.owner === this.pid) this.audio.select();
 
-        // double-click a unit: select all of its type on screen
+        // double-click a unit or building: select all of its type on screen
         const now = performance.now();
-        if (hit.unit && hit.owner === this.pid &&
+        if ((hit.unit || hit.building) && hit.owner === this.pid &&
             this.lastClick.id === hit.id && now - this.lastClick.time < 400) {
           this.selectTypeOnScreen(hit.type);
         }

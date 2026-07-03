@@ -107,7 +107,10 @@ export class Sim {
       if (e.unit) used += UNITS[e.type].supply;
       if (e.building) {
         if (e.done) cap += BUILDINGS[e.type].supply || 0;
-        for (const q of e.queue) used += UNITS[q.type].supply;
+        // only the unit actually in production consumes supply; the rest of
+        // the queue waits (production stalls when supply-blocked)
+        const head = e.queue[0];
+        if (head?.started) used += UNITS[head.type].supply;
       }
     }
     return { used, cap: Math.min(cap, 200) };
@@ -262,10 +265,9 @@ export class Sim {
         if (!(BUILDINGS[b.type].trains || []).includes(c.unit)) break;
         if (b.queue.length >= MAX_QUEUE) break;
         if (!this.canAfford(pid, d.cost)) break;
-        const s = this.supplyOf(pid);
-        if (s.used + d.supply > s.cap) break;
+        // no supply check here — supply is claimed when production starts
         this.minerals[pid] -= d.cost;
-        b.queue.push({ type: c.unit, remaining: d.buildTime });
+        b.queue.push({ type: c.unit, remaining: d.buildTime, started: false });
         break;
       }
     }
@@ -328,8 +330,11 @@ export class Sim {
         break;
 
       case "attackmove": {
-        if (d.acquire > 0) {
-          const enemy = this.acquireTarget(u, d.acquire);
+        // workers have no idle auto-acquire (acquire: 0) but an explicit
+        // attack-move should still engage — fall back to a short radius
+        const acqAM = d.acquire > 0 ? d.acquire : (FP * 3) | 0;
+        {
+          const enemy = this.acquireTarget(u, acqAM);
           if (enemy) {
             // resume holds the full pre-fight order, restored on target death
             u.order = { kind: "attack", targetId: enemy.id, resume: { ...o } };
@@ -342,8 +347,9 @@ export class Sim {
       }
 
       case "patrol": {
-        if (d.acquire > 0) {
-          const enemy = this.acquireTarget(u, d.acquire);
+        const acqP = d.acquire > 0 ? d.acquire : (FP * 3) | 0;
+        {
+          const enemy = this.acquireTarget(u, acqP);
           if (enemy) {
             u.order = { kind: "attack", targetId: enemy.id, resume: { ...o } };
             u.path = null;
@@ -432,6 +438,13 @@ export class Sim {
   updateBuilding(b) {
     if (!b.done || !b.queue.length) return;
     const item = b.queue[0];
+    if (!item.started) {
+      // production begins only when supply is available; otherwise stall
+      const d = UNITS[item.type];
+      const s = this.supplyOf(b.owner);
+      if (s.used + d.supply > s.cap) return;
+      item.started = true;
+    }
     if (--item.remaining <= 0) {
       b.queue.shift();
       const spot = nearestFree(this.blocked, this.map.w, this.map.h,
@@ -648,6 +661,9 @@ export class Sim {
       for (let i = 0; i < f.length; i++) if (f[i] === 2) f[i] = 1;
       for (const e of this.entities) {
         if (e.owner !== pid) continue;
+        // construction sites grant no vision — otherwise half-built depots
+        // could be scattered around the map as cheap wards
+        if (e.building && !e.done) continue;
         const sight = e.unit ? UNITS[e.type].sight : BUILDINGS[e.type].sight;
         const cx = fpToTile(e.x), cy = fpToTile(e.y);
         const r2 = sight * sight;

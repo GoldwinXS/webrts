@@ -1,7 +1,7 @@
 // DOM HUD: resource bar, selection panel, command card, minimap, toasts.
 import { FP, fpToTile } from "../core/fixed.js";
 import { UNITS, BUILDINGS, PLAYER_COLORS, MAX_QUEUE } from "../core/data.js";
-import { KEYS } from "./keys.js";
+import { KEYS, DEFAULTS, rebind, resetBinds } from "./keys.js";
 
 export class Hud {
   constructor(game, renderer, audio) {
@@ -39,6 +39,14 @@ export class Hud {
     this.$idle = document.getElementById("btn-idle");
     this.$idle.addEventListener("pointerdown", (e) => e.stopPropagation());
     this.$idle.addEventListener("click", () => this.input?.selectIdleWorker());
+
+    // fullscreen toggle — edge scrolling only works reliably in fullscreen.
+    // navigationUI:"hide" asks the browser not to reveal its chrome on
+    // top-edge hover (a hint; support varies).
+    document.getElementById("btn-fullscreen").addEventListener("click", () => {
+      if (document.fullscreenElement) document.exitFullscreen();
+      else document.documentElement.requestFullscreen({ navigationUI: "hide" });
+    });
 
     // mute toggle
     this.$mute = document.getElementById("btn-mute");
@@ -85,8 +93,49 @@ export class Hud {
       this.syncSettings();
     });
 
+    // reset all keybinds to their defaults
+    document.getElementById("btn-reset-binds").addEventListener("click", () => {
+      resetBinds();
+      this.listening = null;
+      this.buildKeybindTable();
+      this.toastInfo("Keybindings reset to defaults");
+    });
+
+    // row currently capturing a key: { action, slotIndex? } or null
+    this.listening = null;
+
+    // While the settings modal is open, swallow game hotkeys. input.js
+    // registers its keydown handler on window WITHOUT capture (bubble phase),
+    // so this capture-phase listener runs first; stopImmediatePropagation()
+    // then prevents the event from ever reaching input.js. When a row is
+    // listening we let captureRebind() consume the key instead. Escape still
+    // closes the modal (handled here) when we are not mid-listen.
+    window.addEventListener("keydown", (e) => this.onSettingsKey(e), true);
+
     this.buildKeybindTable();
     this.syncSettings();
+  }
+
+  // capture-phase keydown while the settings modal is visible
+  onSettingsKey(e) {
+    if (this.$settings.classList.contains("hidden")) return; // modal closed: ignore
+    // Block the event from reaching input.js's window listener. input.js
+    // registers in the bubble phase; this handler runs in the capture phase,
+    // which always precedes bubble on the same target. stopImmediatePropagation
+    // is required (not just stopPropagation): both listeners sit on `window`,
+    // and plain stopPropagation does NOT suppress sibling listeners on the very
+    // same target — only listeners on other nodes in the tree.
+    e.stopImmediatePropagation();
+    if (this.listening) {
+      // a row is waiting for its new key
+      e.preventDefault();
+      this.captureRebind(e);
+      return;
+    }
+    if (e.key === "Escape") {
+      e.preventDefault();
+      this.closeSettings();
+    }
   }
 
   // reflect current audio state into the modal controls
@@ -99,42 +148,185 @@ export class Hud {
   }
 
   openSettings() { this.syncSettings(); this.$settings.classList.remove("hidden"); }
-  closeSettings() { this.$settings.classList.add("hidden"); }
+  closeSettings() {
+    this.listening = null;
+    this.$settings.classList.add("hidden");
+  }
 
-  // read-only keybind reference: rebindable actions from KEYS + fixed keys
+  // Rebindable actions and their display labels. cameraSlots is expanded into
+  // four sub-rows (one per slot) by buildKeybindTable.
+  static REBINDABLE = [
+    ["idleWorker", "Idle worker"],
+    ["selectArmy", "Select army"],
+    ["cameraSlots", "Camera slots"],   // rendered as 4 sub-rows
+    ["cycleBase", "Cycle bases"],
+    ["rotateLeft", "Rotate left"],
+    ["rotateRight", "Rotate right"],
+  ];
+
+  // Keys that game systems own and that must never be rebound onto. Digits and
+  // arrow keys are handled separately (ranges), see isReserved().
+  static FIXED_KEYS = new Set([
+    "q", "w", "e", "r", "a", "s", "d", "f",
+    "tab", "shift", "space", " ", "escape", "backspace",
+  ]);
+
+  // is `key` reserved by a fixed game binding (not counting `exceptAction`'s
+  // own current binding)?
+  isReserved(key) {
+    if (Hud.FIXED_KEYS.has(key)) return "a fixed game control";
+    if (/^[1-9]$/.test(key)) return "control groups";
+    if (/^arrow/.test(key)) return "camera pan";
+    return null;
+  }
+
+  // is `key` already used by another rebindable action? Returns that action's
+  // label, or null. `self` is {action, slotIndex} to skip the row's own key.
+  conflictWith(key, self) {
+    for (const [action, label] of Hud.REBINDABLE) {
+      const keys = KEYS[action] || [];
+      for (let i = 0; i < keys.length; i++) {
+        if (keys[i] !== key) continue;
+        // Skip the row's own binding: for a single-binding action the whole
+        // binding is replaced, so any of its keys is "self"; for cameraSlots
+        // only the exact slot being edited is self (other slots still clash).
+        if (self && action === self.action &&
+            (self.slotIndex == null || self.slotIndex === i)) continue;
+        return label;
+      }
+    }
+    return null;
+  }
+
+  // interactive keybind editor: rebindable rows capture a key on click,
+  // fixed rows remain a read-only reference.
   buildKeybindTable() {
     const table = document.getElementById("keybind-table");
     if (!table) return;
-    const chip = (k) => `<kbd>${k}</kbd>`;
-    const row = (action, keys) =>
-      `<div class="keybind-row"><span class="kb-action">${action}</span><span class="kb-keys">${keys}</span></div>`;
-    const seq = (arr, sep = " / ") => arr.map((k) => chip(k.toUpperCase())).join(sep);
+    const chip = (k) => `<kbd>${k.toUpperCase()}</kbd>`;
+    const chips = (arr) => arr.map(chip).join("");
 
-    const rebindable = [
-      ["Idle worker", seq(KEYS.idleWorker)],
-      ["Select army", seq(KEYS.selectArmy)],
-      ["Save / recall camera", `${chip("Ctrl")}+${seq(KEYS.cameraSlots, "/")} · ${seq(KEYS.cameraSlots, "/")}`],
-      ["Cycle bases", seq(KEYS.cycleBase)],
-      ["Rotate left / right", `${seq(KEYS.rotateLeft)} / ${seq(KEYS.rotateRight)}`],
-    ];
+    // one interactive row. `label`, action key, optional slotIndex (for
+    // cameraSlots), and the array of keys to display as chips.
+    const rowEl = (label, action, slotIndex, keys) => {
+      const row = document.createElement("div");
+      row.className = "keybind-row rebindable";
+      row.dataset.action = action;
+      if (slotIndex != null) row.dataset.slot = String(slotIndex);
+      const act = document.createElement("span");
+      act.className = "kb-action";
+      act.textContent = label;
+      const keysEl = document.createElement("span");
+      keysEl.className = "kb-keys";
+      keysEl.innerHTML = keys.length ? chips(keys) : `<span class="kb-listen">unbound</span>`;
+      row.append(act, keysEl);
+      row.addEventListener("click", () => this.startListening(action, slotIndex, row));
+      return row;
+    };
 
+    const staticRow = (label, keysHtml) => {
+      const row = document.createElement("div");
+      row.className = "keybind-row";
+      row.innerHTML = `<span class="kb-action">${label}</span><span class="kb-keys">${keysHtml}</span>`;
+      return row;
+    };
+    const sep = (text) => {
+      const el = document.createElement("div");
+      el.className = "keybind-sep";
+      el.textContent = text;
+      return el;
+    };
+
+    table.innerHTML = "";
+    table.append(sep("Rebindable"));
+    table.append(rowEl("Idle worker", "idleWorker", null, KEYS.idleWorker));
+    table.append(rowEl("Select army", "selectArmy", null, KEYS.selectArmy));
+    for (let i = 0; i < 4; i++) {
+      table.append(rowEl(`Camera ${i + 1}`, "cameraSlots", i, [KEYS.cameraSlots[i]]));
+    }
+    table.append(rowEl("Cycle bases", "cycleBase", null, KEYS.cycleBase));
+    table.append(rowEl("Rotate left", "rotateLeft", null, KEYS.rotateLeft));
+    table.append(rowEl("Rotate right", "rotateRight", null, KEYS.rotateRight));
+
+    const kc = (k) => `<kbd>${k}</kbd>`;
     const fixed = [
-      ["Command-card grid", `${chip("Q")}${chip("W")}${chip("E")}${chip("A")}${chip("S")}${chip("D")}${chip("F")}`],
-      ["Cycle subgroup", chip("Tab")],
-      ["Queue orders", chip("Shift")],
-      ["Set control group", `${chip("Ctrl")}+${chip("1-9")}`],
-      ["Add to group", `${chip("Shift")}+${chip("1-9")}`],
-      ["Recall group", `${chip("1-9")} (dbl-tap centers)`],
-      ["Center on selection", chip("Space")],
-      ["Pan camera", `${chip("Arrows")} / edge`],
-      ["Zoom", chip("Wheel")],
+      ["Command-card grid", `${kc("Q")}${kc("W")}${kc("E")}${kc("A")}${kc("S")}${kc("D")}${kc("F")}`],
+      ["Cycle subgroup", kc("Tab")],
+      ["Queue orders", kc("Shift")],
+      ["Set control group", `${kc("Ctrl")}+${kc("1-9")}`],
+      ["Add to group", `${kc("Shift")}+${kc("1-9")}`],
+      ["Recall group", `${kc("1-9")} (dbl-tap centers)`],
+      ["Center on selection", kc("Space")],
+      ["Pan camera", `${kc("Arrows")} / edge`],
+      ["Zoom", kc("Wheel")],
+      ["Save camera slot", `${kc("Ctrl")}+ slot key`],
     ];
+    table.append(sep("Fixed"));
+    for (const [a, k] of fixed) table.append(staticRow(a, k));
+  }
 
-    let html = `<div class="keybind-sep">Rebindable</div>`;
-    for (const [a, k] of rebindable) html += row(a, k);
-    html += `<div class="keybind-sep">Fixed</div>`;
-    for (const [a, k] of fixed) html += row(a, k);
-    table.innerHTML = html;
+  // put a row into "listening" mode: the next keydown becomes its binding
+  startListening(action, slotIndex, row) {
+    // cancel any other listening row first
+    this.clearListening();
+    this.listening = { action, slotIndex, row };
+    row.classList.add("listening");
+    row.querySelector(".kb-keys").innerHTML = `<span class="kb-listen">press a key…</span>`;
+  }
+
+  // restore the currently-listening row to its normal rendered state
+  clearListening() {
+    if (!this.listening) return;
+    const { action, slotIndex, row } = this.listening;
+    this.listening = null;
+    const keys = slotIndex != null ? [KEYS.cameraSlots[slotIndex]] : KEYS[action];
+    row.classList.remove("listening");
+    const keysEl = row.querySelector(".kb-keys");
+    const chip = (k) => `<kbd>${k.toUpperCase()}</kbd>`;
+    keysEl.innerHTML = keys.length ? keys.map(chip).join("") : `<span class="kb-listen">unbound</span>`;
+    this.clearWarn(row);
+  }
+
+  clearWarn(row) {
+    const w = row.nextElementSibling;
+    if (w && w.classList.contains("keybind-warn")) w.remove();
+  }
+
+  showWarn(row, msg) {
+    this.clearWarn(row);
+    const w = document.createElement("div");
+    w.className = "keybind-warn";
+    w.textContent = msg;
+    row.after(w);
+  }
+
+  // consume a keydown for the listening row (called from onSettingsKey)
+  captureRebind(e) {
+    const listen = this.listening;
+    if (!listen) return;
+    if (e.key === "Escape") { this.clearListening(); return; } // cancel, no change
+    const key = e.key.toLowerCase();
+    // ignore bare modifier presses — wait for a real key
+    if (["shift", "control", "alt", "meta"].includes(key)) return;
+
+    const self = { action: listen.action, slotIndex: listen.slotIndex };
+    const reserved = this.isReserved(key);
+    if (reserved) { this.showWarn(listen.row, `"${key}" is reserved for ${reserved}`); return; }
+    const conflict = this.conflictWith(key, self);
+    if (conflict) { this.showWarn(listen.row, `"${key}" is already used by ${conflict}`); return; }
+
+    // apply the rebind
+    if (listen.action === "cameraSlots") {
+      const arr = [...KEYS.cameraSlots];
+      arr[listen.slotIndex] = key;
+      rebind("cameraSlots", arr);
+    } else {
+      // multi-key actions collapse to the single captured key
+      rebind(listen.action, [key]);
+    }
+    // rebuild wipes listening + warnings and re-renders from KEYS
+    this.listening = null;
+    this.buildKeybindTable();
   }
 
   // ---------- per-frame ----------
@@ -326,7 +518,9 @@ export class Hud {
       if (!candidates.length) { this.audio.error(); return this.toast("Production queues are full"); }
       const s = this.sim.supplyOf(this.pid);
       if (!this.sim.canAfford(this.pid, d.cost)) { this.audio.error(); return this.toast("Not enough minerals"); }
-      if (s.used + d.supply > s.cap) { this.audio.error(); return this.toast("Need more supply - build a Supply Depot"); }
+      // supply is claimed when production starts, so queuing is allowed —
+      // just warn that the queue will stall until a depot finishes
+      if (s.used + d.supply > s.cap) this.toastInfo("Queued - waiting on supply");
       this.game.issue({ t: "train", buildingId: candidates[0].id, unit: t });
       this.recentTrains.push({ bid: candidates[0].id, until: now + 600 });
       this.audio.trained();

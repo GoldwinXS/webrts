@@ -72,6 +72,12 @@
         <span id="res-supply">0 / 0</span></span>
       <span id="net-status" class="status hidden"></span>
       <div class="topbar-actions">
+        <button id="btn-fullscreen" class="icon-btn" title="Fullscreen (edge scrolling needs it)">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M16 3h3a2 2 0 0 1 2 2v3"/>
+            <path d="M8 21H5a2 2 0 0 1-2-2v-3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/>
+          </svg>
+        </button>
         <button id="btn-mute" class="icon-btn" title="Mute">
           <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" fill="currentColor" stroke="none"/>
@@ -144,7 +150,10 @@
           </div>
         </section>
         <section class="settings-section">
-          <div class="settings-label">Keybindings</div>
+          <div class="settings-keyhead">
+            <div class="settings-label">Keybindings</div>
+            <button id="btn-reset-binds" class="toggle-btn reset-btn" type="button">Reset to defaults</button>
+          </div>
           <div id="keybind-table" class="keybind-table"></div>
         </section>
       </div>

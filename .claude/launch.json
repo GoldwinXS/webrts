@@ -4,7 +4,7 @@
     {
       "name": "webrts",
       "runtimeExecutable": "python",
-      "runtimeArgs": ["-m", "http.server", "1338"],
+      "runtimeArgs": ["serve.py", "1338"],
       "port": 1338
     }
   ]
