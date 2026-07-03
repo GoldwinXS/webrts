@@ -22,8 +22,10 @@ export class Sim {
     const { w, h } = this.map;
     // pathing grid: rocks + building footprints
     this.blocked = new Uint8Array(this.map.rock);
-    // fog per player: 0 unseen, 1 explored, 2 visible
-    this.fog = [new Uint8Array(w * h), new Uint8Array(w * h)];
+    // fog per player: 1 explored (grey), 2 visible. The whole map starts
+    // explored — terrain is revealed, only current activity is hidden.
+    // (0 = unseen black is reserved for future campaign maps.)
+    this.fog = [new Uint8Array(w * h).fill(1), new Uint8Array(w * h).fill(1)];
 
     for (const m of this.map.minerals) {
       this.addEntity({ type: "mineral", owner: -1, x: m.x, y: m.y, hp: 0, maxHp: 0, amount: PATCH_AMOUNT, radius: (FP * 0.4) | 0 });
@@ -493,7 +495,10 @@ export class Sim {
         o.phase = "to";
         u.path = null;
       } else {
-        this.travelTo(u, depot.x, depot.y, d.speed); // static target: always pathfind
+        // aim at the depot edge on THIS worker's side, so returns spread
+        // evenly around the building instead of converging on one corner
+        const t = this.edgePointToward(u, depot);
+        this.travelTo(u, t.x, t.y, d.speed);
       }
     }
   }
@@ -527,6 +532,19 @@ export class Sim {
   autoGather(u) {
     const patch = this.pickPatch(u, FP * 12);
     if (patch) u.order = { kind: "gather", targetId: patch.id, phase: "to" };
+  }
+
+  // Point just outside a building's footprint, on the side facing the unit.
+  edgePointToward(u, b) {
+    const half = (b.size * FP) >> 1;
+    const dx = u.x - b.x, dy = u.y - b.y;
+    const m = Math.max(Math.abs(dx), Math.abs(dy));
+    if (m === 0) return { x: this.clampX(b.x + half + HALF), y: b.y };
+    const scale = half + (HALF >> 1);
+    return {
+      x: this.clampX(b.x + (((dx * scale) / m) | 0)),
+      y: this.clampY(b.y + (((dy * scale) / m) | 0)),
+    };
   }
 
   acquireTarget(u, range) {
@@ -639,6 +657,12 @@ export class Sim {
             if (dx * dx + dy * dy <= r2) f[y * w + x] = 2;
           }
         }
+      }
+      // buildings a player has actually laid eyes on stay drawn under fog
+      // (terrain is revealed from the start, but structures must be scouted)
+      for (const e of this.entities) {
+        if (!e.building || e.owner < 0 || e.owner === pid) continue;
+        if (f[fpToTile(e.y) * w + fpToTile(e.x)] === 2) e.seenBy = (e.seenBy || 0) | (1 << pid);
       }
     }
   }

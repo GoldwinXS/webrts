@@ -125,6 +125,7 @@ export class Hud {
       ["Set control group", `${chip("Ctrl")}+${chip("1-9")}`],
       ["Add to group", `${chip("Shift")}+${chip("1-9")}`],
       ["Recall group", `${chip("1-9")} (dbl-tap centers)`],
+      ["Center on selection", chip("Space")],
       ["Pan camera", `${chip("Arrows")} / edge`],
       ["Zoom", chip("Wheel")],
     ];
@@ -195,12 +196,30 @@ export class Hud {
         const pct = ((e.progress / BUILDINGS[e.type].buildTime) * 100) | 0;
         html += `<div class="sel-sub">Constructing ${pct}%</div>`;
       }
-      if (e.building && e.queue?.length) {
-        const q = e.queue[0];
-        const pct = (100 - (q.remaining / UNITS[q.type].buildTime) * 100) | 0;
-        html += `<div class="sel-sub">Training ${UNITS[q.type].name} ${pct}% (queue ${e.queue.length})</div>`;
-      }
     }
+
+    // build-queue chips: one row per selected own finished building of the
+    // active type (cap 4). Chips update live via the 100ms innerHTML refresh.
+    const queueBuildings = mine
+      .filter((e) => e.type === this.activeType && e.building && e.done)
+      .slice(0, 4);
+    const showRow = queueBuildings.length > 1 || sel.length > 1;
+    for (const b of queueBuildings) {
+      const q = b.queue || [];
+      if (!q.length && !showRow) continue;   // sole selection, empty queue -> nothing
+      const name = BUILDINGS[b.type].name;
+      let chips = "";
+      q.forEach((item, i) => {
+        if (i === 0) {
+          const pct = (100 - (item.remaining / UNITS[item.type].buildTime) * 100) | 0;
+          chips += `<span class="q-item q-head">${pct}%</span>`;
+        } else {
+          chips += `<span class="q-item">${UNITS[item.type].name.charAt(0)}</span>`;
+        }
+      });
+      html += `<div class="queue-row"><span class="q-name">${name}</span><span class="q-items">${chips}</span></div>`;
+    }
+
     this.$selPanel.innerHTML = html;
     for (const row of this.$selPanel.querySelectorAll(".sel-row[data-type]")) {
       row.addEventListener("click", () => {

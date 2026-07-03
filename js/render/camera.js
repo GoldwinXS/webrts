@@ -7,7 +7,7 @@ export class RtsCamera {
     this.cam = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.1, 400);
     this.mapW = mapW; this.mapH = mapH;
     this.tx = startX; this.tz = startZ;   // ground target
-    this.yaw = Math.PI * 0.25;
+    this.yaw = 0;                          // map-aligned: screen up = minimap up
     this.dist = 26;
     this.minDist = 10; this.maxDist = 55;
     this.panSpeed = 24;                    // world units/sec at dist 26
@@ -25,12 +25,14 @@ export class RtsCamera {
     this.updateTransform();
   }
 
-  // dx/dz in screen-relative units (already * dt); rotated by yaw
+  // dx/dz in screen-relative units (already * dt); rotated by yaw so that
+  // screen-right maps to the camera's right vector (cos, -sin) and
+  // screen-down maps away from the view direction (sin, cos).
   pan(dx, dz) {
     const s = this.dist / 26;
     const cos = Math.cos(this.yaw), sin = Math.sin(this.yaw);
-    this.tx += (dx * cos - dz * sin) * s;
-    this.tz += (dx * sin + dz * cos) * s;
+    this.tx += (dx * cos + dz * sin) * s;
+    this.tz += (-dx * sin + dz * cos) * s;
     this.clamp();
     this.updateTransform();
   }

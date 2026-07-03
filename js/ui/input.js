@@ -16,7 +16,9 @@ export class Input {
 
     this.selection = renderer.selection;   // shared Set of entity ids
     this.keys = new Set();
-    this.mouse = { x: 0, y: 0, inside: true };
+    // start at screen center and inactive — a (0,0) default sits in the
+    // edge-pan corner and yanked the camera up-left the moment a game began
+    this.mouse = { x: innerWidth / 2, y: innerHeight / 2, inside: false };
     this.drag = null;
     this.attackMode = false;
     this.placing = null;                   // building type being placed
@@ -79,6 +81,7 @@ export class Input {
   onMove(e) {
     this.mouse.x = e.clientX;
     this.mouse.y = e.clientY;
+    this.mouse.inside = true;
     if (this.drag) {
       this.drag.cx = e.clientX; this.drag.cy = e.clientY;
       this.hud.drawSelectBox(this.drag);
@@ -139,7 +142,6 @@ export class Input {
       if (hit && (hit.owner === this.pid || hit.type === "mineral" || hit.owner >= 0)) {
         this.selection.add(hit.id);
         if (hit.owner === this.pid) this.audio.select();
-        if (hit.building && hit.owner === this.pid) this.renderer.rallySelection = hit.id;
 
         // double-click a unit: select all of its type on screen
         const now = performance.now();
@@ -178,15 +180,22 @@ export class Input {
       if (near && !(target && target.owner >= 0)) target = near;
     }
 
-    // no units selected but a finished building is: set its rally point
+    // no units selected but finished buildings are: set rally on ALL of them
     if (!ids.length) {
-      const b = this.mySelected().find((e) => e.building && e.done);
-      if (b && g) {
-        this.game.issue({ t: "rally", buildingId: b.id, x: g.x, y: g.y, targetId: target?.type === "mineral" ? target.id : 0 });
-        this.renderer.rallySelection = b.id;
-        this.renderer.orderPing(g.wx, g.wz, "#7cff6b");
+      const buildings = this.mySelected().filter((e) => e.building && e.done);
+      if (buildings.length && g) {
+        const onMineral = target?.type === "mineral";
+        // rallying onto minerals snaps the flag to the patch itself
+        const rx = onMineral ? target.x : g.x;
+        const ry = onMineral ? target.y : g.y;
+        for (const b of buildings) {
+          this.game.issue({ t: "rally", buildingId: b.id, x: rx, y: ry, targetId: onMineral ? target.id : 0 });
+        }
+        this.renderer.orderPing(rx / FP, ry / FP, onMineral ? "#63e8db" : "#7cff6b");
         this.audio.rally();
-        this.hud.toastInfo(target?.type === "mineral" ? "Rally set: workers will mine" : "Rally point set");
+        this.hud.toastInfo(onMineral
+          ? "Rally set: workers will mine"
+          : buildings.length > 1 ? `Rally set for ${buildings.length} buildings` : "Rally point set");
       }
       return;
     }
@@ -247,6 +256,11 @@ export class Input {
     if (k === "tab") {
       e.preventDefault();
       this.hud.cycleSubgroup(e.shiftKey ? -1 : 1);
+      return;
+    }
+    if (k === " ") {
+      e.preventDefault();
+      this.centerOnSelection();
       return;
     }
     if (KEYS.idleWorker.includes(k) && !e.repeat) {
@@ -312,8 +326,6 @@ export class Input {
         if (!alive.length) return;
         this.selection.clear();
         alive.forEach((id) => this.selection.add(id));
-        const firstBuilding = alive.map((id) => this.sim.byId.get(id)).find((u) => u.building);
-        if (firstBuilding) this.renderer.rallySelection = firstBuilding.id;
         this.hud.refreshSelection();
         this.audio.select();
         const now = performance.now();
@@ -357,6 +369,15 @@ export class Input {
     army.forEach((u) => this.selection.add(u.id));
     this.hud.refreshSelection();
     this.audio.select();
+  }
+
+  // Space: center the camera on the current selection
+  centerOnSelection() {
+    const sel = this.mySelected();
+    if (!sel.length) return;
+    let cx = 0, cy = 0;
+    for (const e of sel) { cx += e.x; cy += e.y; }
+    this.renderer.camera.jumpTo(cx / sel.length / FP, cy / sel.length / FP);
   }
 
   // Backspace: hop the camera between our bases

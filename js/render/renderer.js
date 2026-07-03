@@ -37,7 +37,6 @@ export class Renderer {
 
     this.meshes = new Map();          // entity id -> visual group
     this.selection = new Set();       // set by input.js
-    this.rallySelection = null;       // building id whose rally to draw
     this.playerColors = PLAYER_COLORS.map((c) => new THREE.Color(c));
     this.flashes = new Map();         // entity id -> remaining flash seconds
     this.moveAmt = new Map();         // entity id -> smoothed motion 0..1
@@ -51,8 +50,8 @@ export class Renderer {
 
     this.ringMat = new THREE.MeshBasicMaterial({ color: 0x7cff6b, side: THREE.DoubleSide, transparent: true, opacity: 0.9, depthWrite: false });
     this.barBgMat = new THREE.MeshBasicMaterial({ color: 0x10141a });
-    this.rallyFlag = this.makeRallyFlag();
-    this.rallyLine = this.makeRallyLine();
+    this.buildRallyPool();
+    this.buildQueuePaths();
     this.buildTargetRings();
     this.taskFxTimers = new Map();   // entity id -> next spark time (render-only)
 
@@ -220,6 +219,7 @@ export class Renderer {
     this.scene.add(stars);
   }
 
+  // one dashed rally line (building center -> rally point)
   makeRallyLine() {
     const geo = new THREE.BufferGeometry().setFromPoints([
       new THREE.Vector3(), new THREE.Vector3(),
@@ -233,6 +233,123 @@ export class Renderer {
     line.frustumCulled = false;
     this.scene.add(line);
     return line;
+  }
+
+  // pool of 8 rally visuals (dashed line + flag), one per selected building
+  buildRallyPool() {
+    this.rallyPool = [];
+    for (let i = 0; i < 8; i++) {
+      this.rallyPool.push({ line: this.makeRallyLine(), flag: this.makeRallyFlag() });
+    }
+  }
+
+  // one pooled LineSegments buffer drawing selected units' queued paths
+  buildQueuePaths() {
+    this.queueMaxSegments = 600;                 // 2 verts/segment, 3 floats/vert
+    const geo = new THREE.BufferGeometry();
+    const buf = new Float32Array(this.queueMaxSegments * 2 * 3);
+    this.queuePathPos = new THREE.BufferAttribute(buf, 3);
+    this.queuePathPos.setUsage(THREE.DynamicDrawUsage);
+    geo.setAttribute("position", this.queuePathPos);
+    geo.setDrawRange(0, 0);
+    const mat = new THREE.LineBasicMaterial({
+      color: 0x7cff6b, transparent: true, opacity: 0.4, depthWrite: false,
+    });
+    this.queuePaths = new THREE.LineSegments(geo, mat);
+    this.queuePaths.frustumCulled = false;
+    this.scene.add(this.queuePaths);
+  }
+
+  // world point (in world units) for a single order, or null to stop the chain
+  orderPoint(o) {
+    const sim = this.sim;
+    switch (o.kind) {
+      case "move":
+      case "attackmove":
+      case "patrol":
+        return [W2(o.x), W2(o.y)];
+      case "attack":
+      case "gather":
+      case "build": {
+        const t = sim.byId.get(o.targetId);
+        return t ? [W2(t.x), W2(t.y)] : null;
+      }
+      default:               // "hold" / "idle" and anything else stop the chain
+        return null;
+    }
+  }
+
+  // Rebuild the shift-queue path buffer from the current selection.
+  updateQueuePaths() {
+    const sim = this.sim;
+    const arr = this.queuePathPos.array;
+    const cap = this.queueMaxSegments;
+    const Y = 0.14;
+    let seg = 0;
+
+    const push = (ax, az, bx, bz) => {
+      if (seg >= cap) return false;
+      const i = seg * 6;
+      arr[i] = ax; arr[i + 1] = Y; arr[i + 2] = az;
+      arr[i + 3] = bx; arr[i + 4] = Y; arr[i + 5] = bz;
+      seg++;
+      return true;
+    };
+
+    outer:
+    for (const id of this.selection) {
+      const e = sim.byId.get(id);
+      if (!e || e.owner !== this.localPlayer || !e.unit) continue;
+      const next = e.next || [];
+      if (e.order.kind === "idle" && next.length === 0) continue;
+
+      let px = W2(e.x), pz = W2(e.y);              // start at the unit
+      const orders = [e.order, ...next];
+      for (const o of orders) {
+        // patrol also shows its route leg (ox,oy)<->(x,y)
+        if (o.kind === "patrol") {
+          if (!push(W2(o.ox), W2(o.oy), W2(o.x), W2(o.y))) break outer;
+        }
+        const pt = this.orderPoint(o);
+        if (!pt) break;                            // hold/idle stop the chain
+        if (!push(px, pz, pt[0], pt[1])) break outer;
+        px = pt[0]; pz = pt[1];
+      }
+    }
+
+    this.queuePaths.geometry.setDrawRange(0, seg * 2);
+    this.queuePathPos.needsUpdate = true;
+  }
+
+  // Rally lines + flags for every selected own finished building with a rally.
+  updateRallyLines(t) {
+    const sim = this.sim;
+    let i = 0;
+    for (const id of this.selection) {
+      if (i >= this.rallyPool.length) break;
+      const b = sim.byId.get(id);
+      if (!b || b.owner !== this.localPlayer || !b.building || !b.done || !b.rally) continue;
+      const slot = this.rallyPool[i++];
+      const { line, flag } = slot;
+
+      const rx = W2(b.rally.x), rz = W2(b.rally.y);
+      line.visible = true;
+      const pts = line.geometry.attributes.position;
+      pts.setXYZ(0, W2(b.x), 0.12, W2(b.y));
+      pts.setXYZ(1, rx, 0.12, rz);
+      pts.needsUpdate = true;
+      line.computeLineDistances();
+      const onMineral = b.rally.targetId && sim.byId.get(b.rally.targetId)?.type === "mineral";
+      line.material.color.setHex(onMineral ? 0x63e8db : 0x7cff6b);
+
+      flag.visible = true;
+      flag.position.set(rx, 0, rz);
+      flag.userData.flag.rotation.y = Math.sin(t * 3) * 0.15;
+    }
+    for (; i < this.rallyPool.length; i++) {
+      this.rallyPool[i].line.visible = false;
+      this.rallyPool[i].flag.visible = false;
+    }
   }
 
   // pool of pulsing rings that mark what selected units are working on
@@ -487,25 +604,9 @@ export class Renderer {
       }
     }
 
-    // rally flag + dashed line for the selected building
-    this.rallyFlag.visible = false;
-    this.rallyLine.visible = false;
-    if (this.rallySelection) {
-      const b = sim.byId.get(this.rallySelection);
-      if (b?.rally && this.selection.has(b.id)) {
-        this.rallyFlag.visible = true;
-        this.rallyFlag.position.set(W2(b.rally.x), 0, W2(b.rally.y));
-        this.rallyFlag.userData.flag.rotation.y = Math.sin(t * 3) * 0.15;
-        this.rallyLine.visible = true;
-        const pts = this.rallyLine.geometry.attributes.position;
-        pts.setXYZ(0, W2(b.x), 0.12, W2(b.y));
-        pts.setXYZ(1, W2(b.rally.x), 0.12, W2(b.rally.y));
-        pts.needsUpdate = true;
-        this.rallyLine.computeLineDistances();
-        this.rallyLine.material.color.setHex(
-          b.rally.targetId && sim.byId.get(b.rally.targetId)?.type === "mineral" ? 0x63e8db : 0x7cff6b);
-      }
-    }
+    // rally lines/flags (per building) + shift-queue path lines (per unit)
+    this.updateRallyLines(t);
+    this.updateQueuePaths();
 
     this.updateOrderMarkers(t);
     this.updateTaskSparks(t);
@@ -516,9 +617,10 @@ export class Renderer {
 
   entityVisible(e) {
     if (e.owner === this.localPlayer) return true;
+    if (e.type === "mineral") return true;                  // map is revealed
     const f = this.sim.fog[this.localPlayer][fpToTile(e.y) * this.sim.map.w + fpToTile(e.x)];
-    if (e.type === "mineral" || e.building) return f >= 1;  // remembered once seen
-    return f === 2;
+    if (e.building) return f === 2 || (e.seenBy & (1 << this.localPlayer)) !== 0;
+    return f === 2;                                         // enemy units: live sight only
   }
 
   // ---------- sim events -> effects ----------

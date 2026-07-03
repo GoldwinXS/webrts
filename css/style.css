@@ -515,6 +515,49 @@ kbd {
 .sel-sub { color: var(--muted); font-size: var(--fs-xs); margin-top: 4px; letter-spacing: 0.2px; }
 .sel-sub.status { color: var(--accent); }
 
+/* build-queue chips */
+.queue-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 6px;
+}
+.q-name {
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  letter-spacing: 0.2px;
+  white-space: nowrap;
+}
+.q-items {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.q-item {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  padding: 1px 5px;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  line-height: 1.5;
+  color: var(--ink-dim);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--edge);
+  border-radius: 5px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+.q-item.q-head {
+  min-width: 30px;
+  color: var(--accent);
+  background: var(--glass-hi);
+  border-color: rgba(76, 194, 255, 0.3);
+}
+
 .sel-row[data-type] {
   cursor: pointer;
   transition: background 0.12s, color 0.12s;
