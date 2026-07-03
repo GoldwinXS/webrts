@@ -564,7 +564,7 @@ export class Hud {
         if (f >= 1) { ctx.fillStyle = "#4adfd2"; ctx.fillRect(tx * S, ty * S, S, S); }
         continue;
       }
-      if (e.owner === this.pid || f === 2 || (e.building && f >= 1)) {
+      if (e.owner === this.pid || f === 2 || (e.building && (e.seenBy & (1 << this.pid)))) {
         ctx.fillStyle = PLAYER_COLORS[e.owner];
         const size = e.building ? S * e.size : Math.max(2, S);
         ctx.fillRect(tx * S - size / 2 + S / 2, ty * S - size / 2 + S / 2, size, size);

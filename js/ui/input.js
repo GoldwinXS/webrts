@@ -417,7 +417,8 @@ export class Input {
     const d = BUILDINGS[this.placing];
     const tx = fpToTile(g.x) - (d.size >> 1), ty = fpToTile(g.y) - (d.size >> 1);
     this.ghostTile = { tx, ty };
-    this.ghost.position.set(tx + d.size / 2, 0.4, ty + d.size / 2);
+    const gy = this.renderer.heightAt ? this.renderer.heightAt(tx + d.size / 2, ty + d.size / 2) : 0;
+    this.ghost.position.set(tx + d.size / 2, gy + 0.4, ty + d.size / 2);
     const ok = this.sim.canPlace(this.placing, tx, ty) && this.sim.canAfford(this.pid, d.cost);
     this.ghostMat.color.set(ok ? 0x7cff6b : 0xff5f4c);
   }

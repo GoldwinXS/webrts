@@ -20,6 +20,9 @@ export class AI {
     const army = mine.filter((e) => e.unit && e.type !== "worker");
     const hqs = mine.filter((e) => e.type === "hq" && e.done);
     const barracks = mine.filter((e) => e.type === "barracks");
+    const barracksDone = barracks.some((b) => b.done);
+    const refineries = mine.filter((e) => e.type === "refinery");
+    const factories = mine.filter((e) => e.type === "factory");
     const sites = mine.filter((e) => e.building && !e.done);
     const s = sim.supplyOf(this.pid);
     if (!hqs.length) return cmds;
@@ -50,15 +53,63 @@ export class AI {
       this.tryBuild(sim, cmds, workers, "barracks", hq);
     }
 
-    // 5. train army: mostly marines, some brutes
+    // 4b. one refinery once a barracks exists, then keep ~3 workers on gas
+    const refineryComing = sites.some((b) => b.type === "refinery");
+    if (barracksDone && refineries.length === 0 && !refineryComing &&
+        sim.canAfford(this.pid, BUILDINGS.refinery.cost)) {
+      this.tryBuildRefinery(sim, cmds, workers);
+    }
+    // keep any half-built refinery progressing: if no worker is currently
+    // constructing it, send one (workers get stolen back to mining otherwise).
+    for (const site of sites) {
+      if (site.type !== "refinery") continue;
+      const hasBuilder = workers.some((w) => w.order.kind === "build" && w.order.targetId === site.id);
+      if (!hasBuilder) {
+        const w = workers.find((x) => x.order.kind === "gather" || x.order.kind === "idle");
+        if (w) cmds.push({ t: "resume", ids: [w.id], targetId: site.id });
+      }
+    }
+    const doneRefineries = refineries.filter((r) => r.done);
+    if (doneRefineries.length) {
+      const ref = doneRefineries[0];
+      const onGas = workers.filter((w) =>
+        w.order.kind === "gather" && w.order.resource === "gas").length;
+      if (onGas < 3) {
+        // pull an idle/mineral worker onto gas
+        const w = workers.find((w) =>
+          w.order.kind === "idle" ||
+          (w.order.kind === "gather" && w.order.resource !== "gas"));
+        if (w) cmds.push({ t: "gather", ids: [w.id], targetId: ref.id });
+      }
+    }
+
+    // 4c. a factory once a barracks is up and gas is flowing
+    const factoryComing = sites.some((b) => b.type === "factory");
+    if (barracksDone && factories.length === 0 && !factoryComing &&
+        sim.canAfford(this.pid, BUILDINGS.factory.cost, BUILDINGS.factory.gasCost)) {
+      this.tryBuild(sim, cmds, workers, "factory", hq);
+    }
+
+    // 5. train army: mostly marines, some brutes. Guard every train on gas so
+    // a gas-poor AI never soft-locks trying to afford a unit it can't pay for.
     for (const r of barracks) {
       if (!r.done || r.queue.length > 1) continue;
       const type = (sim.tick % 40 === 0) ? "brute" : "marine";
       const d = UNITS[type];
-      if (sim.canAfford(this.pid, d.cost) && s.used + d.supply <= s.cap) {
+      if (sim.canAfford(this.pid, d.cost, d.gasCost || 0) && s.used + d.supply <= s.cap) {
         cmds.push({ t: "train", buildingId: r.id, unit: type });
       }
     }
+    // 5b. one tank per factory when we can afford the gas
+    for (const fac of factories) {
+      if (!fac.done || fac.queue.length > 0) continue;
+      const d = UNITS.tank;
+      if (sim.canAfford(this.pid, d.cost, d.gasCost || 0) && s.used + d.supply <= s.cap) {
+        cmds.push({ t: "train", buildingId: fac.id, unit: "tank" });
+      }
+    }
+    // (air units skipped for the AI for now — follow-up: build a starport and
+    // mix wraiths/banshees, and use turrets for base anti-air defense.)
 
     // 6. defense: enemy near base -> everyone in the army responds
     const threat = sim.nearestEntity(hq.x, hq.y, FP * 12,
@@ -86,6 +137,30 @@ export class AI {
     if (enemy) return { x: enemy.x, y: enemy.y };
     const s = sim.map.starts[1 - this.pid];
     return { x: tileToFp(s.x), y: tileToFp(s.y) };
+  }
+
+  // Build a refinery on the nearest own-base geyser that has no refinery yet.
+  tryBuildRefinery(sim, cmds, workers) {
+    const worker = workers.find((w) => w.order.kind === "gather" || w.order.kind === "idle");
+    if (!worker) return;
+    // geysers sorted by distance to our start, then id — deterministic
+    const start = sim.map.starts[this.pid];
+    const sx = tileToFp(start.x), sy = tileToFp(start.y);
+    const geysers = sim.entities
+      .filter((e) => e.type === "geyser" && !sim.refineryOnGeyser(e.id))
+      .sort((a, b) => dist2(sx, sy, a.x, a.y) - dist2(sx, sy, b.x, b.y) || a.id - b.id);
+    for (const g of geysers) {
+      if (dist2(sx, sy, g.x, g.y) > (FP * 20) * (FP * 20)) continue; // near base only
+      const gx = fpToTile(g.x), gy = fpToTile(g.y);
+      // try the four 2x2 origins that can cover the geyser tile
+      for (const [ox, oy] of [[0, 0], [-1, 0], [0, -1], [-1, -1]]) {
+        const tx = gx + ox, ty = gy + oy;
+        if (sim.canPlace("refinery", tx, ty)) {
+          cmds.push({ t: "build", workerId: worker.id, building: "refinery", tx, ty });
+          return;
+        }
+      }
+    }
   }
 
   tryBuild(sim, cmds, workers, type, hq) {

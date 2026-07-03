@@ -3,7 +3,8 @@
 // never writes it; players interact exclusively through commands, which is
 // what makes lockstep multiplayer possible.
 import { FP, HALF, tileToFp, fpToTile, isqrt, dist, dist2, makeHash } from "./fixed.js";
-import { UNITS, BUILDINGS, START_MINERALS, CARRY_AMOUNT, GATHER_TICKS, PATCH_AMOUNT, MAX_QUEUE } from "./data.js";
+import { UNITS, BUILDINGS, START_MINERALS, START_GAS, CARRY_AMOUNT, GATHER_TICKS, PATCH_AMOUNT, MAX_QUEUE,
+  GAS_CARRY, GAS_GATHER_TICKS, GAS_AMOUNT, GAS_DEPLETED, HQ_RESOURCE_CLEARANCE } from "./data.js";
 import { generateMap } from "./map.js";
 import { findPath, nearestFree } from "./path.js";
 
@@ -16,6 +17,7 @@ export class Sim {
     this.entities = [];
     this.byId = new Map();
     this.minerals = [START_MINERALS, START_MINERALS];
+    this.gas = [START_GAS, START_GAS];
     this.winner = -1;
     this.events = [];
 
@@ -29,6 +31,11 @@ export class Sim {
 
     for (const m of this.map.minerals) {
       this.addEntity({ type: "mineral", owner: -1, x: m.x, y: m.y, hp: 0, maxHp: 0, amount: PATCH_AMOUNT, radius: (FP * 0.4) | 0 });
+    }
+    // Vespene geysers: non-blocking resource nodes. Placed at fp tile centers.
+    // (map.js may not emit geysers yet — code defensively.)
+    for (const g of (this.map.geysers || [])) {
+      this.addEntity({ type: "geyser", owner: -1, x: g.x, y: g.y, hp: 0, maxHp: 0, amount: GAS_AMOUNT, radius: (FP * 0.45) | 0, geyser: true });
     }
     for (let pid = 0; pid < 2; pid++) {
       const s = this.map.starts[pid];
@@ -55,8 +62,8 @@ export class Sim {
     const d = UNITS[type];
     return this.addEntity({
       type, owner: pid, x, y, hp: d.hp, maxHp: d.hp, radius: d.radius,
-      unit: true, order: { kind: "idle" }, next: [], path: null, pathI: 0,
-      cooldown: 0, carry: 0, gatherTimer: 0,
+      unit: true, fly: !!d.fly, order: { kind: "idle" }, next: [], path: null, pathI: 0,
+      cooldown: 0, carry: 0, carryKind: 0, gatherTimer: 0,
     });
   }
 
@@ -68,6 +75,7 @@ export class Sim {
       hp: done ? d.hp : Math.max(1, (d.hp / 10) | 0), maxHp: d.hp,
       building: true, done: !!done, progress: done ? d.buildTime : 0,
       queue: [], radius: (d.size * FP >> 1),
+      cooldown: 0, geyserId: 0,
     });
     this.setFootprint(b, 1);
     return b;
@@ -98,7 +106,18 @@ export class Sim {
 
   // ---------- queries ----------
 
-  canAfford(pid, cost) { return this.minerals[pid] >= cost; }
+  canAfford(pid, cost, gasCost = 0) {
+    return this.minerals[pid] >= cost && this.gas[pid] >= gasCost;
+  }
+
+  // Does the player own a FINISHED building of the given type? Used for tech
+  // prerequisites (factory needs barracks, etc.).
+  hasBuilding(pid, type) {
+    for (const e of this.entities) {
+      if (e.building && e.done && e.owner === pid && e.type === type) return true;
+    }
+    return false;
+  }
 
   supplyOf(pid) {
     let used = 0, cap = 0;
@@ -146,7 +165,44 @@ export class Sim {
         if (dist2(cx, cy, e.x, e.y) < clear * clear && e.type === "mineral") return false;
       }
     }
+    // Geyser rules: a refinery MUST cover a free geyser's tile; every other
+    // building may NOT cover a geyser tile.
+    const geo = this.geyserInFootprint(tx, ty, d.size);
+    if (d.onGeyser) {
+      if (!geo) return false;                       // refinery needs a geyser
+      if (this.refineryOnGeyser(geo.id)) return false; // one refinery per geyser
+    } else if (geo) {
+      return false;                                 // don't block a geyser
+    }
+    // Deposit buildings (Command Post) must keep clear of the resource line so
+    // mining isn't trivially efficient: footprint CENTER >= clearance from any
+    // mineral patch or geyser (center-to-center). Refinery is exempt above.
+    if (d.deposit) {
+      const clr = HQ_RESOURCE_CLEARANCE * FP;
+      for (const e of this.entities) {
+        if (e.type === "mineral" || e.type === "geyser") {
+          if (dist2(cx, cy, e.x, e.y) < clr * clr) return false;
+        }
+      }
+    }
     return true;
+  }
+
+  // The geyser whose tile falls inside the [tx,ty]+size footprint, or null.
+  geyserInFootprint(tx, ty, size) {
+    for (const e of this.entities) {
+      if (e.type !== "geyser") continue;
+      const gx = fpToTile(e.x), gy = fpToTile(e.y);
+      if (gx >= tx && gx < tx + size && gy >= ty && gy < ty + size) return e;
+    }
+    return null;
+  }
+
+  refineryOnGeyser(geyserId) {
+    for (const e of this.entities) {
+      if (e.type === "refinery" && e.geyserId === geyserId) return true;
+    }
+    return false;
   }
 
   // ---------- commands ----------
@@ -197,7 +253,11 @@ export class Sim {
         if (!target || target.owner === pid || target.owner === -1) break;
         for (const id of c.ids) {
           const e = own(id);
-          if (e && e.unit) this.setOrder(e, { kind: "attack", targetId: c.targetId, resume: null }, c.q);
+          // reject a target this unit can't hit (e.g. tank ordered onto a
+          // flyer) so it doesn't chase something forever
+          if (e && e.unit && this.canHit(e, target)) {
+            this.setOrder(e, { kind: "attack", targetId: c.targetId, resume: null }, c.q);
+          }
         }
         break;
       }
@@ -221,11 +281,16 @@ export class Sim {
       }
       case "gather": {
         const patch = this.byId.get(c.targetId);
-        if (!patch || patch.type !== "mineral") break;
+        if (!patch) break;
+        // minerals: any patch. gas: an OWN finished refinery.
+        let resource;
+        if (patch.type === "mineral") resource = "minerals";
+        else if (patch.type === "refinery" && patch.owner === pid && patch.done) resource = "gas";
+        else break;
         for (const id of c.ids) {
           const e = own(id);
           if (e && e.type === "worker") {
-            this.setOrder(e, { kind: "gather", targetId: c.targetId, phase: "to" }, c.q);
+            this.setOrder(e, { kind: "gather", targetId: c.targetId, phase: "to", resource }, c.q);
           }
         }
         break;
@@ -234,9 +299,18 @@ export class Sim {
         const worker = own(c.workerId);
         const d = BUILDINGS[c.building];
         if (!worker || worker.type !== "worker" || !d) break;
-        if (!this.canAfford(pid, d.cost) || !this.canPlace(c.building, c.tx, c.ty)) break;
+        if (!this.canAfford(pid, d.cost, d.gasCost || 0)) break;
+        // tech prerequisite: must own a FINISHED building of the required type
+        if (d.requires && !this.hasBuilding(pid, d.requires)) break;
+        if (!this.canPlace(c.building, c.tx, c.ty)) break;
         this.minerals[pid] -= d.cost;
+        this.gas[pid] -= (d.gasCost || 0);
         const site = this.spawnBuilding(pid, c.building, c.tx, c.ty, false);
+        // remember which geyser a refinery sits on (ownership realized on finish)
+        if (d.onGeyser) {
+          const geo = this.geyserInFootprint(c.tx, c.ty, d.size);
+          if (geo) site.geyserId = geo.id;
+        }
         site.builderId = worker.id;
         worker.order = { kind: "build", targetId: site.id };
         worker.path = null;
@@ -264,9 +338,10 @@ export class Sim {
         if (!b || !b.building || !b.done || !d) break;
         if (!(BUILDINGS[b.type].trains || []).includes(c.unit)) break;
         if (b.queue.length >= MAX_QUEUE) break;
-        if (!this.canAfford(pid, d.cost)) break;
+        if (!this.canAfford(pid, d.cost, d.gasCost || 0)) break;
         // no supply check here — supply is claimed when production starts
         this.minerals[pid] -= d.cost;
+        this.gas[pid] -= (d.gasCost || 0);
         b.queue.push({ type: c.unit, remaining: d.buildTime, started: false });
         break;
       }
@@ -365,14 +440,15 @@ export class Sim {
 
       case "hold": {
         // stand ground: fire at anything in weapon range, never chase
-        if (d.dmg > 0 && u.cooldown === 0) {
+        if ((d.dmg > 0 || d.dmgAir > 0) && u.cooldown === 0) {
           const target = this.acquireTarget(u, d.range + HALF);
           if (target && this.gapTo(u, target) <= d.range) {
             u.cooldown = d.cooldown;
-            target.hp -= d.dmg;
+            const dmg = target.fly ? d.dmgAir : d.dmg;
+            target.hp -= dmg;
             this.events.push({
               t: "shot", fx: u.x, fy: u.y, tx: target.x, ty: target.y,
-              owner: u.owner, ranged: d.range > FP,
+              owner: u.owner, ranged: d.range > FP, air: !!target.fly,
               attackerId: u.id, targetId: target.id, tOwner: target.owner,
             });
           }
@@ -389,15 +465,22 @@ export class Sim {
           } else this.popNext(u);
           break;
         }
+        // can't hit this target (e.g. a ground unit chasing a flyer): drop it
+        if (!this.canHit(u, target)) {
+          if (o.resume) { u.order = o.resume; u.path = null; }
+          else this.popNext(u);
+          break;
+        }
         const gap = this.gapTo(u, target);
         if (gap <= d.range) {
           u.path = null;
           if (u.cooldown === 0) {
             u.cooldown = d.cooldown;
-            target.hp -= d.dmg;
+            const dmg = target.fly ? d.dmgAir : d.dmg;
+            target.hp -= dmg;
             this.events.push({
               t: "shot", fx: u.x, fy: u.y, tx: target.x, ty: target.y,
-              owner: u.owner, ranged: d.range > FP,
+              owner: u.owner, ranged: d.range > FP, air: !!target.fly,
               attackerId: u.id, targetId: target.id, tOwner: target.owner,
             });
           }
@@ -436,7 +519,30 @@ export class Sim {
   // ---------- building brain: training queues ----------
 
   updateBuilding(b) {
-    if (!b.done || !b.queue.length) return;
+    if (!b.done) return;
+    const bd = BUILDINGS[b.type];
+    // armed buildings (turret): acquire the nearest VISIBLE enemy in range that
+    // this weapon can hit and fire. Never chase — just gate on cooldown.
+    if (bd.armed) {
+      if (b.cooldown > 0) b.cooldown--;
+      if (b.cooldown === 0) {
+        const target = this.nearestEntity(b.x, b.y, bd.range, (e) =>
+          e.owner >= 0 && e.owner !== b.owner && e.hp > 0 &&
+          (e.fly ? (bd.dmgAir || 0) > 0 : (bd.dmg || 0) > 0) &&
+          this.isVisible(b.owner, e.x, e.y));
+        if (target) {
+          b.cooldown = bd.cooldown;
+          const dmg = target.fly ? bd.dmgAir : bd.dmg;
+          target.hp -= dmg;
+          this.events.push({
+            t: "shot", fx: b.x, fy: b.y, tx: target.x, ty: target.y,
+            owner: b.owner, ranged: true, air: !!target.fly,
+            attackerId: b.id, targetId: target.id, tOwner: target.owner,
+          });
+        }
+      }
+    }
+    if (!b.queue.length) return;
     const item = b.queue[0];
     if (!item.started) {
       // production begins only when supply is available; otherwise stall
@@ -458,7 +564,7 @@ export class Sim {
           if (u.type === "worker" && target?.type === "mineral") {
             // rally onto minerals: balance across the line, not one patch
             const patch = this.pickPatch(target, FP * 6) || (target.amount > 0 ? target : null);
-            if (patch) u.order = { kind: "gather", targetId: patch.id, phase: "to" };
+            if (patch) u.order = { kind: "gather", targetId: patch.id, phase: "to", resource: "minerals" };
           } else {
             u.order = { kind: "move", x: b.rally.x, y: b.rally.y };
           }
@@ -469,31 +575,53 @@ export class Sim {
     }
   }
 
+  // One code path for both resources. `resource` is "gas" for a refinery over
+  // a geyser, else "minerals" (default for legacy orders without the field).
   updateGather(u, d) {
     const o = u.order;
+    const gas = o.resource === "gas";
     if (o.phase === "to") {
-      const patch = this.byId.get(o.targetId);
-      if (!patch || patch.amount <= 0) {
+      const node = this.byId.get(o.targetId);
+      if (gas) {
+        // refinery destroyed: give up (worker can't re-target a geyser itself)
+        if (!node || node.type !== "refinery" || !node.done) { this.popNext(u); return; }
+      } else if (!node || node.amount <= 0) {
         const next = this.pickPatch(u, FP * 14);
         if (next) { o.targetId = next.id; u.path = null; }
         else this.popNext(u);
         return;
       }
-      const gap = dist(u.x, u.y, patch.x, patch.y);
-      if (gap <= (FP * 0.8) | 0) {
+      // gas node is a building (approach its edge); mineral node is a point
+      const gap = gas ? this.gapTo(u, node) : dist(u.x, u.y, node.x, node.y);
+      if (gap <= (gas ? (FP * 0.75) | 0 : (FP * 0.8) | 0)) {
         o.phase = "mining";
-        u.gatherTimer = GATHER_TICKS;
+        u.gatherTimer = gas ? GAS_GATHER_TICKS : GATHER_TICKS;
         u.path = null;
       } else {
-        this.travelTo(u, patch.x, patch.y, d.speed, true);
+        this.travelTo(u, node.x, node.y, d.speed, true);
       }
     } else if (o.phase === "mining") {
-      const patch = this.byId.get(o.targetId);
-      if (!patch) { o.phase = "to"; return; }
+      const node = this.byId.get(o.targetId);
+      if (!node) { o.phase = "to"; return; }
       if (--u.gatherTimer <= 0) {
-        const take = Math.min(CARRY_AMOUNT, patch.amount);
-        patch.amount -= take;
-        u.carry = take;
+        if (gas) {
+          // the refinery draws from its geyser; depleted geysers trickle
+          const geo = node.geyserId ? this.byId.get(node.geyserId) : null;
+          let take;
+          if (geo && geo.amount > 0) {
+            take = Math.min(GAS_CARRY, geo.amount);
+            geo.amount -= take;
+          } else {
+            take = GAS_DEPLETED;   // depleted (or missing) geyser: small trickle
+          }
+          u.carry = take;
+          u.carryKind = 1;         // 1 = gas
+        } else {
+          const take = Math.min(CARRY_AMOUNT, node.amount);
+          node.amount -= take;
+          u.carry = take;
+          u.carryKind = 0;         // 0 = minerals
+        }
         o.phase = "return";
         u.path = null;
       }
@@ -503,7 +631,8 @@ export class Sim {
       if (!depot) { u.order = { kind: "idle" }; return; }
       const gap = this.gapTo(u, depot);
       if (gap <= (FP * 0.75) | 0) {
-        this.minerals[u.owner] += u.carry;
+        if (u.carryKind === 1) this.gas[u.owner] += u.carry;
+        else this.minerals[u.owner] += u.carry;
         u.carry = 0;
         o.phase = "to";
         u.path = null;
@@ -560,11 +689,20 @@ export class Sim {
     };
   }
 
+  // Can `attacker` (a unit) damage `target`? A flying target requires an air
+  // weapon (dmgAir > 0); a ground target requires a ground weapon (dmg > 0).
+  canHit(attacker, target) {
+    const d = UNITS[attacker.type];
+    if (!d) return false;
+    return target.fly ? (d.dmgAir || 0) > 0 : (d.dmg || 0) > 0;
+  }
+
   acquireTarget(u, range) {
-    // nearest visible enemy; deterministic because entities iterate in id order
+    // nearest visible enemy this unit can actually hit; deterministic because
+    // entities iterate in id order
     return this.nearestEntity(u.x, u.y, range, (e) =>
       e.owner >= 0 && e.owner !== u.owner && e.hp > 0 &&
-      this.isVisible(u.owner, e.x, e.y));
+      this.canHit(u, e) && this.isVisible(u.owner, e.x, e.y));
   }
 
   // ---------- movement ----------
@@ -591,6 +729,16 @@ export class Sim {
   travelTo(u, x, y, speed, chasing) {
     const far = dist2(u.x, u.y, x, y);
     if (far <= FP * FP / 16) { u.path = null; return true; }
+
+    // Flyers ignore terrain entirely: straight-line beeline every tick, no
+    // pathfinding and no blocked-tile ejection (they live on the air layer).
+    if (u.fly) {
+      const dd = dist(u.x, u.y, x, y);
+      if (dd <= speed) { u.x = this.clampX(x); u.y = this.clampY(y); return true; }
+      u.x = this.clampX(u.x + (((x - u.x) * speed / dd) | 0));
+      u.y = this.clampY(u.y + (((y - u.y) * speed / dd) | 0));
+      return false;
+    }
 
     if (!u.path || (chasing && this.tick % 8 === 0 && dist2(u.path[u.path.length - 1].x, u.path[u.path.length - 1].y, x, y) > FP * FP)) {
       const destBlocked = this.blocked[fpToTile(y) * this.map.w + fpToTile(x)];
@@ -624,6 +772,9 @@ export class Sim {
       for (let j = i + 1; j < es.length; j++) {
         const b = es[j];
         if (!b.unit) continue;
+        // separation is layered: air pushes air, ground pushes ground, and the
+        // two never shove each other (a flyer can hover over a tank)
+        if (!!a.fly !== !!b.fly) continue;
         const min = a.radius + b.radius;
         const dx = a.x - b.x, dy = a.y - b.y;
         if (Math.abs(dx) >= min || Math.abs(dy) >= min) continue;
@@ -641,10 +792,10 @@ export class Sim {
         b.x = this.clampX(b.x - px); b.y = this.clampY(b.y - py);
       }
     }
-    // keep units off blocked tiles after pushes
+    // keep GROUND units off blocked tiles after pushes (flyers ignore terrain)
     const { w } = this.map;
     for (const u of es) {
-      if (!u.unit) continue;
+      if (!u.unit || u.fly) continue;
       if (this.blocked[fpToTile(u.y) * w + fpToTile(u.x)]) {
         const free = nearestFree(this.blocked, w, this.map.h, fpToTile(u.x), fpToTile(u.y));
         if (free) { u.x = tileToFp(free.x); u.y = tileToFp(free.y); }
@@ -656,6 +807,8 @@ export class Sim {
 
   updateFog() {
     const { w, h } = this.map;
+    const height = this.map.height;             // Uint8Array or undefined
+    const losBlock = this.map.losBlock;         // Uint8Array or undefined
     for (let pid = 0; pid < 2; pid++) {
       const f = this.fog[pid];
       for (let i = 0; i < f.length; i++) if (f[i] === 2) f[i] = 1;
@@ -666,13 +819,18 @@ export class Sim {
         if (e.building && !e.done) continue;
         const sight = e.unit ? UNITS[e.type].sight : BUILDINGS[e.type].sight;
         const cx = fpToTile(e.x), cy = fpToTile(e.y);
-        const r2 = sight * sight;
-        for (let y = Math.max(0, cy - sight); y <= Math.min(h - 1, cy + sight); y++) {
-          for (let x = Math.max(0, cx - sight); x <= Math.min(w - 1, cx + sight); x++) {
-            const dx = x - cx, dy = y - cy;
-            if (dx * dx + dy * dy <= r2) f[y * w + x] = 2;
-          }
+        const tile = cy * w + cx;
+        // reuse the cached reveal set when the viewer hasn't changed tiles
+        // (buildings never move; most units hold a tile for several updates)
+        if (e._losTile === tile && e._losTiles) {
+          const arr = e._losTiles;
+          for (let k = 0; k < arr.length; k++) f[arr[k]] = 2;
+          continue;
         }
+        const revealed = this.raycastVision(cx, cy, sight, !!e.fly, height, losBlock);
+        for (let k = 0; k < revealed.length; k++) f[revealed[k]] = 2;
+        e._losTile = tile;
+        e._losTiles = revealed;
       }
       // buildings a player has actually laid eyes on stay drawn under fog
       // (terrain is revealed from the start, but structures must be scouted)
@@ -681,6 +839,50 @@ export class Sim {
         if (f[fpToTile(e.y) * w + fpToTile(e.x)] === 2) e.seenBy = (e.seenBy || 0) | (1 << pid);
       }
     }
+  }
+
+  // Tiles visible from (cx,cy) within `sight`, honoring height/blocker LoS.
+  // A ray to a target tile is clear iff no INTERMEDIATE tile (excluding the
+  // target itself) is higher than the viewer or flagged as a vision blocker.
+  // Flyers see as if at height 99 (over every cliff/blocker). Integer-only DDA
+  // sampling — deterministic. Returns an array of tile indices.
+  raycastVision(cx, cy, sight, fly, height, losBlock) {
+    const { w, h } = this.map;
+    const viewerH = fly ? 99 : (height ? height[cy * w + cx] : 0);
+    const r2 = sight * sight;
+    const out = [];
+    const x0min = Math.max(0, cx - sight), x0max = Math.min(w - 1, cx + sight);
+    const y0min = Math.max(0, cy - sight), y0max = Math.min(h - 1, cy + sight);
+    for (let ty = y0min; ty <= y0max; ty++) {
+      for (let tx = x0min; tx <= x0max; tx++) {
+        const dx = tx - cx, dy = ty - cy;
+        if (dx * dx + dy * dy > r2) continue;
+        if (this.rayClear(cx, cy, tx, ty, viewerH, height, losBlock, w)) out.push(ty * w + tx);
+      }
+    }
+    return out;
+  }
+
+  // Integer supercover-ish DDA from (cx,cy) to (tx,ty). Steps in unit fractions
+  // of the longer axis and blocks on any intermediate tile that is a blocker or
+  // higher than the viewer. The target tile itself is never treated as a
+  // blocker (you can see the cliff/blocker face but not past it).
+  rayClear(cx, cy, tx, ty, viewerH, height, losBlock, w) {
+    const ddx = tx - cx, ddy = ty - cy;
+    const steps = Math.max(Math.abs(ddx), Math.abs(ddy));
+    if (steps <= 1) return true;                 // adjacent/self: always clear
+    // Sample the segment at each of the (steps-1) interior points. Round to the
+    // nearest tile with integer math: floor((ddx*i + steps/2) / steps).
+    const halfN = steps >> 1;
+    for (let i = 1; i < steps; i++) {
+      const sx = cx + (((ddx * i + (ddx >= 0 ? halfN : -halfN)) / steps) | 0);
+      const sy = cy + (((ddy * i + (ddy >= 0 ? halfN : -halfN)) / steps) | 0);
+      if (sx === tx && sy === ty) continue;      // never block on the target
+      const idx = sy * w + sx;
+      if (losBlock && losBlock[idx]) return false;
+      if (height && height[idx] > viewerH) return false;
+    }
+    return true;
   }
 
   // ---------- end conditions & desync detection ----------
@@ -700,8 +902,10 @@ export class Sim {
     const h = makeHash();
     h.mix(this.tick);
     h.mix(this.minerals[0]); h.mix(this.minerals[1]);
+    h.mix(this.gas[0]); h.mix(this.gas[1]);
     for (const e of this.entities) {
       h.mix(e.id); h.mix(e.x); h.mix(e.y); h.mix(e.hp | 0);
+      if (e.amount !== undefined) h.mix(e.amount | 0);   // resource depletion
     }
     return h.value();
   }

@@ -12,6 +12,17 @@
     } }
   </script>
   <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+  <script>
+    // Surface script/module failures in the menu instead of dying silently
+    // (capture phase so non-bubbling resource errors are seen too).
+    window.addEventListener("error", (e) => {
+      const el = document.getElementById("menu-msg");
+      if (!el) return;
+      const msg = e.message || (e.target && e.target.src ? "failed to load " + e.target.src : "unknown error");
+      el.textContent = "Load error: " + msg + " - hard refresh (Ctrl+Shift+R) usually fixes stale files";
+      el.classList.add("error");
+    }, true);
+  </script>
 </head>
 <body>
   <canvas id="game"></canvas>
