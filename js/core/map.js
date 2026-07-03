@@ -109,25 +109,6 @@ export function generateMap(seed, opts = {}) {
   return fb;
 }
 
-// TEMP DEBUG (remove before ship): returns the first-attempt validation reason.
-export function _debugFirstReason(seed, opts = {}) {
-  const resolved = resolveOpts(seed, opts);
-  const reasons = [];
-  for (let attempt = 0; attempt < 24; attempt++) {
-    const s = (seed + attempt * 1000003) | 0;
-    const map = buildCandidate(s, resolved);
-    reasons.push(validateVerbose(map));
-    if (validateVerbose(map) === null) return { ok: true, attempt, reasons };
-  }
-  return { ok: false, reasons };
-}
-
-// TEMP DEBUG (remove before ship): build the raw first-attempt candidate.
-export function _debugCandidate(seed, opts = {}) {
-  const resolved = resolveOpts(seed, opts);
-  return buildCandidate(seed | 0, resolved);
-}
-
 // Resolve the option object into concrete integer choices. "random"/-1 values
 // are drawn from a dedicated rng stream keyed off the seed so the SAME (seed,
 // opts) always resolves identically, independent of the build attempt.
@@ -144,7 +125,13 @@ function resolveOpts(seed, opts) {
   }
   const losBlockers = opts.losBlockers === undefined ? true : !!opts.losBlockers;
   const theme = (opts.theme === undefined || opts.theme < 0) ? -1 : (opts.theme | 0);
-  return { spawns, expansions, losBlockers, theme };
+  // Vertical PROFILE is resolved from this STABLE per-seed stream (not the
+  // per-attempt build rng), so each seed keeps a consistent elevation character
+  // across the 24 validation retries — this gives an even spread of profiles
+  // over seeds instead of the retry loop biasing everything toward the easiest
+  // (flat) profile. 0 flat, 1 terraced, 2 inverted, 3 mesa.
+  const vProfile = r() % 4;
+  return { spawns, expansions, losBlockers, theme, vProfile };
 }
 
 // Which barrier kinds a theme prefers, as a weighted bag (index 0 dominates).
@@ -286,7 +273,8 @@ function buildCandidate(seed, opts) {
   //                  (lvl 2), center band LOW so fights happen down in the pit.
   //   3 "mesa"     : mostly flat playfield but one or two tall decorative mesas
   //                  (lvl 3) framing the middle; main modest (lvl 1-2).
-  const vProfile = rng() % 4;
+  // Resolved once per seed (stable across retries) — see resolveOpts.
+  const vProfile = opts.vProfile;
   // main plateau level varies by profile AND seed within the allowed range.
   let mainHeight;
   if (vProfile === 0) mainHeight = 1;                       // flat: modest main
@@ -501,7 +489,7 @@ function buildCandidate(seed, opts) {
     w: W, h: H, rock, height, rampTiles, barrierKind,
     starts, minerals, geysers, losBlock, decos,
     naturals, clusters,                              // clusters/naturals: internal only
-    ramps: [{ tiles: rampMain }],
+    ramps: [{ tiles: rampMain, alongX: Math.abs(c0.dx) >= Math.abs(c0.dy) }],
     vProfile,                                        // internal: variety logging
     // theme filled in by generateMap()
   };
@@ -630,7 +618,10 @@ function buildCandidate(seed, opts) {
   }
 
   // Ring a lowland/mid expansion on three sides, leaving a wide gap toward
-  // `dir`. `lvl` sets the interior elevation (0 lowland, 1 mid step).
+  // `dir`. `lvl` sets the interior elevation (0 lowland, 1 mid step). When the
+  // natural is LOWLAND (lvl 0) the ring can't be a cliff (no height edge), so its
+  // wall tiles are tagged rock-outcrop BARRIERS (kind 4) that frame the natural.
+  // When lvl>0 the ring is a genuine cliff face (raised interior vs lowland).
   function ringExpansion(s, r, dir, gapWidth, lvl) {
     clearArea3(s, r);
     for (let y = s.y - r; y <= s.y + r; y++)
@@ -646,7 +637,9 @@ function buildCandidate(seed, opts) {
         } else {
           inGap = Math.sign(y - s.y) === dir.dy && Math.abs(x - s.x) <= half;
         }
-        if (!inGap) { setHeight(x, y, lvl); setRock(x, y, 1); }
+        if (inGap) continue;
+        if (lvl > 0) { setHeight(x, y, lvl); setRock(x, y, 1); }   // cliff face
+        else { setHeight(x, y, 0); setBarrier(x, y, 4); }           // outcrop wall
       }
   }
 
@@ -799,9 +792,21 @@ function growBarriers(rng, palette, ctx) {
     return false;
   };
 
-  // A barrier tile must sit on LOWLAND (height 0). Barriers on higher terraces
-  // would visually fight the cliffs; keep them framing the flat routes.
-  const canGrow = (x, y) => !protectedAt(x, y) && height[idx(x, y)] === 0;
+  // A barrier tile must sit on LOWLAND (height 0) AND must not 4-touch a passable
+  // tile of a different height — otherwise it would read as (and be validated as)
+  // a CLIFF face rather than an organic wall. It MAY sit beside a blocked cliff
+  // face (height>0, impassable), which is exactly how barriers frame a region
+  // border. This keeps the cliff/barrier distinction crisp.
+  const touchesRaisedPassable = (x, y) => {
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const nx = x + dx, ny = y + dy;
+      if (!inb(nx, ny)) continue;
+      const ni = idx(nx, ny);
+      if (!rock[ni] && height[ni] !== 0) return true;
+    }
+    return false;
+  };
+  const canGrow = (x, y) => !protectedAt(x, y) && height[idx(x, y)] === 0 && !touchesRaisedPassable(x, y);
 
   // Seed anchors: bias toward the mid-band region borders and lane EDGES. We
   // scan player-0's half for lowland tiles adjacent to a cliff/height edge or
@@ -828,7 +833,7 @@ function growBarriers(rng, palette, ctx) {
   }
 
   // How many blobs. Framed layout: enough to line the routes without clogging.
-  const blobCount = 8 + (rng() % 7);                  // 8..14 blob pairs
+  const blobCount = 5 + (rng() % 5);                  // 5..9 blob pairs
   const pick = (arr) => arr.length ? arr[rng() % arr.length] : null;
 
   for (let b = 0; b < blobCount; b++) {
@@ -841,7 +846,7 @@ function growBarriers(rng, palette, ctx) {
     const useSecondary = (rng() % 10) < (10 - palette.secondaryChance) ? false : true;
     const kind = useSecondary ? palette.secondary : palette.primary;
     // forests can be larger and double as soft walls.
-    const maxTiles = kind === 1 ? (14 + (rng() % 17)) : (6 + (rng() % 15)); // forest 14..30, else 6..20
+    const maxTiles = kind === 1 ? (12 + (rng() % 19)) : (6 + (rng() % 10)); // forest 12..30, else 6..15
     const targetTiles = Math.max(6, maxTiles);
 
     // Grow via cellular random-walk. Keep an explicit member set; each step add
@@ -911,12 +916,8 @@ function growBarriers(rng, palette, ctx) {
         setBarrier(x, y, kind);
         stamped++;
       }
-    // forests also cast a little vision cover on their fringe (kind-3 shrub deco
-    // on a couple of adjacent passable tiles) — optional flavour, non-blocking.
-    if (kind === 1 && stamped >= 8) {
-      // no losBlock change here (keeps LoS validation simple); purely decos are
-      // added elsewhere. Intentionally left minimal.
-    }
+    // (stamped forests double as soft walls; no extra losBlock is added here so
+    // the LoS layer stays owned entirely by the shrub blockers in step 10.)
   }
 }
 
@@ -1066,16 +1067,20 @@ function validateVerbose(map) {
 
   if (map.naturals) {
     for (const n of map.naturals) {
-      let free = 0;
+      let free = 0, reachable = false;
       for (let dy = -6; dy <= 6; dy++)
         for (let dx = -6; dx <= 6; dx++) {
           const x = n.x + dx, y = n.y + dy;
           if (!inb(x, y) || rock[idx(x, y)]) continue;
           const id = idx(x, y);
+          // the natural's interior must connect to the main passable graph so
+          // both players can expand there (barriers/rings must never seal it).
+          if (reach0[id] || reach1[id]) reachable = true;
           if (mineralTiles.has(id) || geyserTiles.has(id)) continue;
           free++;
         }
       if (free < 50) return "natural too small (" + free + ")";
+      if (!reachable) return "natural walled off @" + n.x + "," + n.y;
     }
   }
 
@@ -1181,41 +1186,45 @@ function validateVerbose(map) {
   }
 
   // ---- NEW: barrierKind exactly on non-cliff blocked tiles, no freckles ------
-  // Definition: a blocked tile (rock==1) is a CLIFF FACE if it has a passable
-  // 4-neighbour on a DIFFERENT height level (it borders a level change). Any
-  // other blocked tile is a barrier and MUST carry a nonzero kind. barrierKind
-  // must be 0 on passable tiles and on cliff faces.
+  // Classification (consistent with the generator, which tags organic blobs via
+  // setBarrier and leaves structural walls untagged):
+  //   * passable tile        -> barrierKind must be 0.
+  //   * blocked, kind != 0   -> a BARRIER: must be lowland (height 0), kind 1..4,
+  //                             and have >=1 barrier neighbour (no freckles).
+  //   * blocked, kind == 0   -> a CLIFF FACE: must be genuine raised-terrain wall
+  //                             (height > 0) OR border a different-height passable
+  //                             tile. A lowland wall bordering only same-height
+  //                             passable ground would be an untagged barrier (bug).
   if (barrierKind) {
     for (let y = 0; y < h; y++)
       for (let x = 0; x < w; x++) {
         const i = idx(x, y);
-        const isRock = rock[i];
-        if (!isRock) {
+        if (!rock[i]) {
           if (barrierKind[i]) return "barrierKind on passable @" + x + "," + y;
           continue;
         }
-        // classify cliff vs barrier
-        const myLvl = height ? height[i] : 0;
-        let isCliff = false;
-        for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-          const nx = x + dx, ny = y + dy;
-          if (!inb(nx, ny)) continue;
-          const ni = idx(nx, ny);
-          if (!rock[ni] && height && height[ni] !== myLvl) { isCliff = true; break; }
-        }
-        if (isCliff) {
-          if (barrierKind[i]) return "barrierKind on cliff @" + x + "," + y;
-        } else {
-          if (!barrierKind[i]) return "blocked non-cliff without barrierKind @" + x + "," + y;
+        if (barrierKind[i]) {
+          // BARRIER
           if (barrierKind[i] > 4) return "barrierKind >4 @" + x + "," + y;
-          // no single-tile freckles: a barrier tile must have >=1 barrier
-          // 4-neighbour (a lone tile reads as noise, the smoothing removes it).
+          if (height && height[i] !== 0) return "barrier not on lowland @" + x + "," + y;
           let bn = 0;
           for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
             const nx = x + dx, ny = y + dy;
             if (inb(nx, ny) && barrierKind[idx(nx, ny)]) bn++;
           }
           if (bn === 0) return "barrier freckle @" + x + "," + y;
+        } else {
+          // CLIFF FACE — must be structural (raised or bordering a height edge).
+          const myLvl = height ? height[i] : 0;
+          if (myLvl > 0) continue;
+          let edge = false;
+          for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+            const nx = x + dx, ny = y + dy;
+            if (!inb(nx, ny)) continue;
+            const ni = idx(nx, ny);
+            if (!rock[ni] && height && height[ni] !== myLvl) { edge = true; break; }
+          }
+          if (!edge) return "untagged lowland wall @" + x + "," + y;
         }
       }
   }
@@ -1270,10 +1279,12 @@ function validateVerbose(map) {
     }
   }
 
-  // (f) main ramp choke width <= 3 (the widened bound <=4 is allowed only if a
-  // seed genuinely needs it; we keep <=3 for the main ramp as before).
+  // (f) main ramp choke width. The main ramp is carved 3-wide; STEPPED ramps for
+  // taller plateaus can measure marginally wider, so the ceiling is the permitted
+  // <= 4. The travel axis is passed explicitly (the stepped corridor's along
+  // extent would otherwise fool the extent heuristic).
   if (map.ramps && map.ramps[0] && map.ramps[0].tiles.length) {
-    const width = measureChoke(map.ramps[0].tiles, rock, w, h);
+    const width = measureChoke(map.ramps[0].tiles, rock, w, h, map.ramps[0].alongX);
     if (width > 4) return "choke width " + width;      // hard ceiling widened to 4
   }
 
@@ -1303,15 +1314,18 @@ function bfs(rock, w, h, sx, sy) {
   return seen;
 }
 
-// Measure the ramp's chokepoint width (unchanged from the proven original).
-function measureChoke(tiles, rock, w, h) {
+// Measure the ramp's chokepoint width. `travelHint` (true = corridor runs along
+// X) is passed explicitly for STEPPED ramps whose along-travel extent exceeds
+// their width — the old extent-based heuristic mis-detects those. When absent we
+// fall back to the original heuristic (shallow ramps).
+function measureChoke(tiles, rock, w, h, travelHint) {
   const idx = (x, y) => y * w + x;
   let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
   for (const t of tiles) {
     if (t.x < minX) minX = t.x; if (t.x > maxX) maxX = t.x;
     if (t.y < minY) minY = t.y; if (t.y > maxY) maxY = t.y;
   }
-  const travelAlongX = (maxX - minX) <= (maxY - minY);
+  const travelAlongX = travelHint === undefined ? ((maxX - minX) <= (maxY - minY)) : travelHint;
   let narrowest = Infinity;
   const openRun = (cells) => {
     let run = 0, best = 0;
