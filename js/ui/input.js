@@ -225,45 +225,65 @@ export class Input {
       if (this.placing) this.cancelPlace();
       else if (this.attackMode) this.setAttackMode(false);
       else { this.selection.clear(); this.hud.refreshSelection(); }
+      return;
     }
-    if (k === "a" && !e.repeat && this.mySelectedUnitIds().length) this.setAttackMode(true);
-    if (k === "i" && !e.repeat) this.selectIdleWorker();
-    if (k === "s" && !e.repeat) {
-      const ids = this.mySelectedUnitIds();
-      if (ids.length) { this.game.issue({ t: "stop", ids }); this.audio.ack(); }
+    if (k === "tab") {
+      e.preventDefault();
+      this.hud.cycleSubgroup(e.shiftKey ? -1 : 1);
+      return;
     }
+    if (k === "i" && !e.repeat) { this.selectIdleWorker(); return; }
 
-    // control groups: Ctrl/Alt+digit assigns, digit recalls,
-    // double-tap digit centers the camera on the group
-    if (k >= "1" && k <= "9") {
+    // control groups (e.code, so Shift+digit works on every layout):
+    // Ctrl/Alt+digit assigns, Shift+digit adds, digit recalls,
+    // double-tap centers the camera. Buildings are allowed in groups.
+    const digit = e.code?.startsWith("Digit") ? e.code.slice(5) : null;
+    if (digit && digit >= "1" && digit <= "9") {
+      const ids = this.mySelected().map((u) => u.id);
       if (e.ctrlKey || e.altKey) {
         e.preventDefault();
-        const mine = this.mySelected().filter((u) => u.unit).map((u) => u.id);
-        if (mine.length) {
-          this.groups[k] = new Set(mine);
-          this.hud.toastInfo(`Group ${k} set (${mine.length})`);
+        if (ids.length) {
+          this.groups[digit] = new Set(ids);
+          this.hud.toastInfo(`Group ${digit} set (${ids.length})`);
           this.audio.select();
         }
         return;
       }
-      const grp = this.groups[k];
+      if (e.shiftKey) {
+        if (ids.length) {
+          const grp = this.groups[digit] || (this.groups[digit] = new Set());
+          ids.forEach((id) => grp.add(id));
+          this.hud.toastInfo(`Group ${digit}: ${grp.size} member${grp.size > 1 ? "s" : ""}`);
+          this.audio.select();
+        }
+        return;
+      }
+      const grp = this.groups[digit];
       if (grp) {
-        const alive = [...grp].filter((id) => this.sim.byId.has(id));
         grp.forEach((id) => { if (!this.sim.byId.has(id)) grp.delete(id); });
+        const alive = [...grp];
         if (!alive.length) return;
         this.selection.clear();
         alive.forEach((id) => this.selection.add(id));
+        const firstBuilding = alive.map((id) => this.sim.byId.get(id)).find((u) => u.building);
+        if (firstBuilding) this.renderer.rallySelection = firstBuilding.id;
         this.hud.refreshSelection();
         this.audio.select();
         const now = performance.now();
-        if (this.lastRecall.key === k && now - this.lastRecall.time < 450) {
-          // double-tap: jump camera to the group
+        if (this.lastRecall.key === digit && now - this.lastRecall.time < 450) {
           let cx = 0, cy = 0;
           for (const id of alive) { const u = this.sim.byId.get(id); cx += u.x; cy += u.y; }
           this.renderer.camera.jumpTo(cx / alive.length / FP, cy / alive.length / FP);
         }
-        this.lastRecall = { key: k, time: now };
+        this.lastRecall = { key: digit, time: now };
       }
+      return;
+    }
+
+    // grid hotkeys from the command card (QWER / AS)
+    if (!e.ctrlKey && !e.altKey && !e.metaKey && !e.repeat) {
+      const cmd = this.hud.hotkeys?.[k];
+      if (cmd) this.hud.command(cmd);
     }
   }
 
@@ -370,9 +390,9 @@ export class Input {
     if (this.keys.has("arrowright")) dx += s;
     if (this.keys.has("arrowup")) dz -= s;
     if (this.keys.has("arrowdown")) dz += s;
-    // WASD pans too, unless a selection hotkey context is active
-    if (this.keys.has("q")) cam.rotate(-1.6 * dt);
-    if (this.keys.has("e")) cam.rotate(1.6 * dt);
+    // camera rotation on ,/. (Q/E belong to the grid hotkeys now)
+    if (this.keys.has(",")) cam.rotate(-1.6 * dt);
+    if (this.keys.has(".")) cam.rotate(1.6 * dt);
     const edge = 16;
     if (this.mouse.inside && !this.drag) {
       if (this.mouse.x < edge) dx -= s;

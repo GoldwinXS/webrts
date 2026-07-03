@@ -1,6 +1,6 @@
 // DOM HUD: resource bar, selection panel, command card, minimap, toasts.
 import { FP, fpToTile } from "../core/fixed.js";
-import { UNITS, BUILDINGS, PLAYER_COLORS } from "../core/data.js";
+import { UNITS, BUILDINGS, PLAYER_COLORS, MAX_QUEUE } from "../core/data.js";
 
 export class Hud {
   constructor(game, renderer, audio) {
@@ -12,6 +12,9 @@ export class Hud {
     this.input = null; // set by main.js after Input is constructed
     this.cardSig = ""; // structural signature; card DOM rebuilt only on change
     this.blips = [];   // minimap under-attack markers
+    this.activeType = null; // Tab-cycled subgroup driving the command card
+    this.hotkeys = {}; // grid key -> command, rebuilt with the card
+    this.recentTrains = []; // {bid, until} — issued but not yet in a queue
 
     this.$minerals = document.getElementById("res-minerals");
     this.$supply = document.getElementById("res-supply");
@@ -74,20 +77,30 @@ export class Hud {
       .filter(Boolean);
     const mine = sel.filter((e) => e.owner === this.pid);
 
-    // summary
     if (!sel.length) {
       this.$selPanel.innerHTML = "";
       this.$cmdCard.innerHTML = "";
       this.cardSig = "";
+      this.activeType = null;
+      this.hotkeys = {};
       return;
     }
+
+    // subgroups: distinct owned types in selection order; Tab cycles these
+    const types = [];
+    for (const e of mine) if (!types.includes(e.type)) types.push(e.type);
+    if (!this.activeType || !types.includes(this.activeType)) this.activeType = types[0] || null;
+
+    // ---- info panel ----
     const counts = {};
     for (const e of sel) counts[e.type] = (counts[e.type] || 0) + 1;
     let html = "";
     for (const [type, n] of Object.entries(counts)) {
       const name = UNITS[type]?.name || BUILDINGS[type]?.name || "Minerals";
-      html += `<div class="sel-row"><span>${name}</span><b>${n > 1 ? "x" + n : ""}</b></div>`;
+      const active = type === this.activeType && types.length > 1;
+      html += `<div class="sel-row${active ? " active" : ""}" data-type="${type}"><span>${name}</span><b>${n > 1 ? "x" + n : ""}</b></div>`;
     }
+    if (types.length > 1) html += `<div class="sel-sub">Tab cycles subgroup</div>`;
     if (sel.length === 1) {
       const e = sel[0];
       if (e.type === "mineral") html += `<div class="sel-sub">${e.amount} remaining</div>`;
@@ -104,37 +117,66 @@ export class Hud {
       }
     }
     this.$selPanel.innerHTML = html;
+    for (const row of this.$selPanel.querySelectorAll(".sel-row[data-type]")) {
+      row.addEventListener("click", () => {
+        this.activeType = row.dataset.type;
+        this.cardSig = "";
+        this.refreshSelection();
+      });
+    }
 
-    // command card: rebuild only when the *structure* changes, so buttons
-    // keep hover/focus state between the 100ms HUD refreshes
-    const workers = mine.filter((e) => e.type === "worker");
-    const combat = mine.filter((e) => e.unit);
-    const building = mine.find((e) => e.building && e.done);
-    const sig = `${workers.length > 0}|${combat.length > 0}|${building ? building.id : 0}`;
+    // ---- command card: grid hotkeys (QWER row, AS pinned for combat) ----
+    const anyUnits = mine.some((e) => e.unit);
+    const sig = `${types.join(",")}|${this.activeType}|${anyUnits}`;
     if (sig === this.cardSig) return;
     this.cardSig = sig;
 
-    let card = "";
-    if (workers.length) {
-      for (const [key, d] of Object.entries(BUILDINGS)) {
-        card += this.btn(`build-${key}`, `${d.name}`, `${d.cost}`);
-      }
+    const slots = [];
+    if (this.activeType === "worker") {
+      const order = ["depot", "barracks", "hq"];
+      const keys = ["q", "w", "e"];
+      order.forEach((b, i) =>
+        slots.push({ key: keys[i], cmd: `build-${b}`, label: BUILDINGS[b].name, sub: `${BUILDINGS[b].cost}` }));
     }
-    if (building) {
-      for (const t of BUILDINGS[building.type].trains || []) {
+    const activeBuilding = mine.find((e) => e.type === this.activeType && e.building && e.done);
+    if (activeBuilding) {
+      const keys = ["q", "w", "e", "r"];
+      (BUILDINGS[activeBuilding.type].trains || []).forEach((t, i) => {
         const d = UNITS[t];
-        card += this.btn(`train-${t}`, `${d.name}`, `${d.cost} · ${d.supply} supply`);
-      }
+        slots.push({ key: keys[i], cmd: `train-${t}`, label: d.name, sub: `${d.cost} · ${d.supply} supply` });
+      });
     }
-    if (combat.length) {
-      card += this.btn("attack", "Attack-move", "A");
-      card += this.btn("stop", "Stop", "S");
+    if (anyUnits) {
+      slots.push({ key: "a", cmd: "attack", label: "Attack-move", sub: "all units" });
+      slots.push({ key: "s", cmd: "stop", label: "Stop", sub: "all units" });
+    }
+
+    this.hotkeys = {};
+    let card = "";
+    for (const s of slots) {
+      this.hotkeys[s.key] = s.cmd;
+      card += `<button data-cmd="${s.cmd}"><kbd>${s.key.toUpperCase()}</kbd><span>${s.label}</span><small>${s.sub}</small></button>`;
     }
     this.$cmdCard.innerHTML = card;
     for (const b of this.$cmdCard.querySelectorAll("button")) {
       b.addEventListener("pointerdown", (e) => e.stopPropagation());
-      b.addEventListener("click", () => this.command(b.dataset.cmd, building));
+      b.addEventListener("click", () => this.command(b.dataset.cmd));
     }
+  }
+
+  // Tab cycles which subgroup of the selection drives the command card.
+  cycleSubgroup(dir = 1) {
+    const sel = [...this.renderer.selection]
+      .map((id) => this.sim.byId.get(id))
+      .filter((e) => e && e.owner === this.pid);
+    const types = [];
+    for (const e of sel) if (!types.includes(e.type)) types.push(e.type);
+    if (types.length < 2) return;
+    const i = types.indexOf(this.activeType);
+    this.activeType = types[(i + dir + types.length) % types.length];
+    this.cardSig = "";
+    this.refreshSelection();
+    this.audio.select();
   }
 
   orderLabel(e) {
@@ -155,22 +197,34 @@ export class Hud {
     }
   }
 
-  btn(cmd, label, sub) {
-    return `<button data-cmd="${cmd}"><span>${label}</span><small>${sub}</small></button>`;
-  }
-
-  command(cmd, building) {
+  command(cmd) {
     if (cmd.startsWith("build-")) this.input?.startPlacing(cmd.slice(6));
-    else if (cmd.startsWith("train-") && building) {
+    else if (cmd.startsWith("train-")) {
       const t = cmd.slice(6);
       const d = UNITS[t];
+      // among selected finished buildings that can train t, pick the one
+      // with the shortest queue — hotkeying 3 barracks together macros right.
+      // Issued commands take a tick to land in queues, so count our own
+      // just-issued trains too or rapid presses would stack on one building.
+      const now = performance.now();
+      this.recentTrains = this.recentTrains.filter((r) => r.until > now);
+      const pending = (bid) => this.recentTrains.filter((r) => r.bid === bid).length;
+      const load = (e) => e.queue.length + pending(e.id);
+      const candidates = [...this.renderer.selection]
+        .map((id) => this.sim.byId.get(id))
+        .filter((e) => e && e.owner === this.pid && e.building && e.done &&
+          (BUILDINGS[e.type].trains || []).includes(t) && load(e) < MAX_QUEUE)
+        .sort((a, b) => load(a) - load(b) || a.id - b.id);
+      if (!candidates.length) { this.audio.error(); return this.toast("Production queues are full"); }
       const s = this.sim.supplyOf(this.pid);
       if (!this.sim.canAfford(this.pid, d.cost)) { this.audio.error(); return this.toast("Not enough minerals"); }
       if (s.used + d.supply > s.cap) { this.audio.error(); return this.toast("Need more supply - build a Supply Depot"); }
-      this.game.issue({ t: "train", buildingId: building.id, unit: t });
+      this.game.issue({ t: "train", buildingId: candidates[0].id, unit: t });
+      this.recentTrains.push({ bid: candidates[0].id, until: now + 600 });
       this.audio.trained();
-    } else if (cmd === "attack") this.input?.setAttackMode(true);
-    else if (cmd === "stop") {
+    } else if (cmd === "attack") {
+      if (this.input?.mySelectedUnitIds().length) this.input.setAttackMode(true);
+    } else if (cmd === "stop") {
       const ids = this.input?.mySelectedUnitIds() || [];
       if (ids.length) { this.game.issue({ t: "stop", ids }); this.audio.ack(); }
     }
