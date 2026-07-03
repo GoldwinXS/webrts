@@ -614,8 +614,8 @@ export class Renderer {
   makeMesh(e) {
     let group;
     const color = e.owner >= 0 ? this.playerColors[e.owner] : null;
-    if (e.type === "mineral") {
-      group = makeMineralVisual(e);
+    if (e.type === "mineral" || e.type === "geyser") {
+      group = makeMineralVisual(e);   // placeholder geyser visual; Wave 2 gives it its own
     } else if (e.unit) {
       group = makeUnitVisual(e, color);
       this.addRingAndBar(group, e, 0.55, 1.25);
@@ -769,7 +769,7 @@ export class Renderer {
 
   entityVisible(e) {
     if (e.owner === this.localPlayer) return true;
-    if (e.type === "mineral") return true;                  // map is revealed
+    if (e.type === "mineral" || e.type === "geyser") return true; // map is revealed
     const f = this.sim.fog[this.localPlayer][fpToTile(e.y) * this.sim.map.w + fpToTile(e.x)];
     if (e.building) return f === 2 || (e.seenBy & (1 << this.localPlayer)) !== 0;
     return f === 2;                                         // enemy units: live sight only
