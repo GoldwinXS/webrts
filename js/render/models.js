@@ -194,9 +194,21 @@ export function makeMineralVisual(e) {
   baseRock.scale.set(0.85, 0.4, 0.85);
   baseRock.position.y = 0.02;
   group.add(baseRock, main, s1, s2, s3);
+  liftToGround(group, -0.06);
   group.userData.crystal = main;
   group.userData.anim = { kind: "mineral", mat };
   return group;
+}
+
+// Raise a resource/prop group so its lowest point rests near ground level
+// instead of sinking into the tile.
+function liftToGround(group, floor = -0.05) {
+  group.updateMatrixWorld(true);
+  const bb = new THREE.Box3().setFromObject(group);
+  if (bb.min.y < floor) {
+    const dy = floor - bb.min.y;
+    for (const c of group.children) c.position.y += dy;
+  }
 }
 
 // Vespene geyser: squat rocky vent cone with a glowing green throat and a slow
@@ -233,6 +245,7 @@ export function makeGeyserVisual(e, rockColor) {
   const plume = new THREE.Mesh(G.plume, plumeMat);
   plume.position.y = 0.8;
   group.add(cone, throat, plume);
+  liftToGround(group, -0.05);
   group.userData.anim = { kind: "geyser", throatMat, plume, plumeMat };
   return group;
 }
@@ -607,6 +620,18 @@ export function makeUnitVisual(e, color) {
   }
 
   group.add(body);
+  // Keep ground units from sinking: lift the body's PARTS so its lowest point
+  // rests near ground level. We move the children (not body.position.y, which
+  // animateVisual overwrites each frame with the idle/walk bob). Flyers are
+  // exempt (they render at cruise altitude).
+  if (!e.fly) {
+    body.updateMatrixWorld(true);
+    const bb = new THREE.Box3().setFromObject(body);
+    if (bb.min.y < -0.03) {
+      const dy = -0.03 - bb.min.y;
+      for (const c of body.children) c.position.y += dy;
+    }
+  }
   group.userData.body = body;
   group.userData.mats = mats;
   group.userData.anim = anim;
@@ -863,7 +888,18 @@ export function makeBuildingVisual(e, color, size) {
     anim.door = door;
   }
 
-  group.add(built);
+  // Auto-fit the assembled model inside its tile footprint so buildings never
+  // overflow their placement grid or overlap neighbours in a base. A uniform
+  // wrapper scale keeps proportions; the renderer's construction progress
+  // still drives built.scale.y independently (composes with the wrapper).
+  built.updateMatrixWorld(true);
+  const _bb = new THREE.Box3().setFromObject(built);
+  const halfXZ = Math.max(Math.abs(_bb.min.x), Math.abs(_bb.max.x), Math.abs(_bb.min.z), Math.abs(_bb.max.z));
+  const target = size / 2 - 0.1;
+  const fit = new THREE.Group();
+  if (halfXZ > target) fit.scale.setScalar(target / halfXZ);
+  fit.add(built);
+  group.add(fit);
 
   // construction scaffold: four corner posts, hidden once done
   const scaffold = new THREE.Group();
