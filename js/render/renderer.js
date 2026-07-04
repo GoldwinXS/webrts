@@ -10,7 +10,7 @@ import { FP, HALF, fpToTile } from "../core/fixed.js";
 import { makeRng } from "../core/fixed.js";
 import { BUILDINGS, PLAYER_COLORS } from "../core/data.js";
 import { RtsCamera } from "./camera.js";
-import { makeUnitVisual, makeBuildingVisual, makeMineralVisual, makeGeyserVisual, makeShrubVisual, animateVisual, animateShrub, SHARED, propToon, toonGradient, barrierMaterials } from "./models.js";
+import { makeUnitVisual, makeBuildingVisual, makeMineralVisual, makeGeyserVisual, makeShrubVisual, animateVisual, animateShrub, SHARED, propToon, toonGradient, barrierMaterials } from "./models/index.js";
 import { UNITS } from "../core/data.js";
 import { THEMES } from "../core/map.js";
 import { Effects } from "./fx.js";
@@ -354,17 +354,61 @@ export class Renderer {
       }
     }
     // Subtle surface detail
-    ctx.globalAlpha = 0.1;
     if (tName === "verdant") {
-      ctx.strokeStyle = rgbStr(lift(th.ground, 0.15));
-      ctx.lineWidth = 1.5;
-      const bladeCount = Math.floor(w * h * 0.8);
-      for (let i = 0; i < bladeCount; i++) {
+      // 1. Draw stylized grass clumps/tufts
+      ctx.strokeStyle = rgbStr(lift(th.ground, 0.18));
+      ctx.lineWidth = 1.2;
+      ctx.globalAlpha = 0.25;
+      const clumpCount = Math.floor(w * h * 0.4);
+      for (let i = 0; i < clumpCount; i++) {
         const x = texRnd() * w * PX, y = texRnd() * h * PX;
-        const len = 3 + texRnd() * 4;
-        const ang = -Math.PI / 2 + (texRnd() - 0.5) * 0.5;
-        ctx.beginPath(); ctx.moveTo(x, y);
-        ctx.lineTo(x + Math.cos(ang) * len, y + Math.sin(ang) * len); ctx.stroke();
+        // Draw a cute 3-blade tuft/clump of grass
+        const hScale = 1.0 + texRnd() * 0.5;
+        // Central blade
+        ctx.beginPath();
+        ctx.moveTo(x, y);
+        ctx.quadraticCurveTo(x, y - 4 * hScale, x - 1, y - 5 * hScale);
+        ctx.stroke();
+        // Left blade curving left
+        ctx.beginPath();
+        ctx.moveTo(x, y);
+        ctx.quadraticCurveTo(x - 2, y - 3 * hScale, x - 4, y - 3.5 * hScale);
+        ctx.stroke();
+        // Right blade curving right
+        ctx.beginPath();
+        ctx.moveTo(x, y);
+        ctx.quadraticCurveTo(x + 2, y - 3 * hScale, x + 4, y - 3.5 * hScale);
+        ctx.stroke();
+      }
+
+      // 2. Draw tiny scattered clovers
+      ctx.fillStyle = rgbStr(lift(th.ground, -0.15)); // slightly darker green for depth
+      ctx.globalAlpha = 0.35;
+      const cloverCount = Math.floor(w * h * 0.15);
+      for (let i = 0; i < cloverCount; i++) {
+        const cx = texRnd() * w * PX, cy = texRnd() * h * PX;
+        const leafR = 1.0 + texRnd() * 0.5;
+        // 3 leaves
+        ctx.beginPath(); ctx.arc(cx - 0.8, cy - 0.5, leafR, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(cx + 0.8, cy - 0.5, leafR, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(cx, cy + 0.8, leafR, 0, Math.PI * 2); ctx.fill();
+      }
+
+      // 3. Draw tiny scattered white daisies
+      ctx.globalAlpha = 0.7;
+      const flowerCount = Math.floor(w * h * 0.08);
+      for (let i = 0; i < flowerCount; i++) {
+        const fx = texRnd() * w * PX, fy = texRnd() * h * PX;
+        const petalR = 0.8;
+        // Draw 4 tiny white petals
+        ctx.fillStyle = "#ffffff";
+        ctx.beginPath(); ctx.arc(fx - 0.8, fy, petalR, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(fx + 0.8, fy, petalR, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(fx, fy - 0.8, petalR, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(fx, fy + 0.8, petalR, 0, Math.PI * 2); ctx.fill();
+        // Draw yellow center
+        ctx.fillStyle = "#ffd700";
+        ctx.beginPath(); ctx.arc(fx, fy, 0.6, 0, Math.PI * 2); ctx.fill();
       }
     } else if (tName === "ashen") {
       ctx.strokeStyle = rgbStr([th.ground[0]*0.4, th.ground[1]*0.4, th.ground[2]*0.4].map(CH));
