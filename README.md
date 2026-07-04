@@ -88,8 +88,18 @@ js/net/net.js         PeerJS transport (host / join by code)
 
 ## Roadmap
 
-- More unit types (air, siege) and a second resource
-- Rally points, control groups, hotkey rebinding
 - Better pathing under congestion (flow fields)
-- Replays (free with lockstep: record the command stream)
 - Lobby improvements: rematch, spectators
+- Adaptive input delay based on network latency
+
+## Recent improvements
+
+- **Replay system** — save replays from the game-over screen
+- **AI improvements** — builds starports + air units, turrets for defense,
+  researches afterburners, kites with marines, retreats when outnumbered
+- **Performance** — spatial hash grid for O(n) entity queries, pooled A*
+  pathfinding buffers, single-pass AI entity bucketing
+- **Determinism** — comprehensive checksum covers ability timers, building
+  queues, worker cargo, and order state
+- **Graphics quality settings** — Low/Medium/High presets in settings
+- **Attack notifications** — audio alert + visual toast when under attack

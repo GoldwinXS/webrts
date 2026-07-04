@@ -17,7 +17,7 @@ import { Effects } from "./fx.js";
 
 const W2 = (v) => v / FP;   // fp -> world units (1 tile = 1.0)
 const PX = 16;              // ground texture pixels per tile (56*16=896, fine)
-const HSCALE = 0.55;        // world units of elevation per height level
+const HSCALE = 1.2;         // world units of elevation per height level
 
 // clamp a 0..255 channel
 const CH = (v) => (v < 0 ? 0 : v > 255 ? 255 : v | 0);
@@ -95,7 +95,7 @@ export class Renderer {
     sun.shadow.mapSize.set(2048, 2048);
     const c = sun.shadow.camera;
     c.left = -30; c.right = 30; c.top = 30; c.bottom = -30;
-    c.near = 5; c.far = 110;
+    c.near = 5; c.far = 130;
     sun.shadow.bias = -0.0006;
     // lighter shadow: don't let shadowed terrain go fully dark
     this.renderer.shadowMap.enabled = true;
@@ -294,7 +294,7 @@ export class Renderer {
       const r = base[0] + (hiTone[0] - base[0]) * t;
       const g = base[1] + (hiTone[1] - base[1]) * t;
       const b = base[2] + (hiTone[2] - base[2]) * t;
-      return lift([r, g, b], lvl * 0.05);
+      return lift([r, g, b], lvl * 0.10);
     };
     const patch = th.patch;
 
@@ -313,7 +313,7 @@ export class Renderer {
     const rnd = () => rng() / 0xffffffff;
     ctx.save();
     ctx.globalAlpha = 0.28;
-    const blobs = 22 + (rng() % 10);
+    const blobs = 30 + (rng() % 14);
     for (let i = 0; i < blobs; i++) {
       const bx = rnd() * w, by = rnd() * h;
       const lvl = lvlAt(bx | 0, by | 0);
@@ -330,6 +330,87 @@ export class Renderer {
       ctx.arc(bx * PX, by * PX, r, 0, Math.PI * 2);
       ctx.fill();
     }
+    ctx.restore();
+
+    // ---- 2b. ground texture detail (organic noise patches) ----
+    ctx.save();
+    const texRng = makeRng(this.sim.seed ^ 0x7e57);
+    const texRnd = () => texRng() / 0xffffffff;
+    const tName = th.name;
+    // Organic color patches: large soft circles for natural variation
+    const patchColors = tName === "verdant"
+      ? [[95, 130, 65], [70, 105, 50], [110, 145, 80]]
+      : tName === "ashen"
+      ? [[120, 95, 70], [95, 75, 55], [140, 115, 85]]
+      : [[170, 195, 220], [140, 170, 200], [200, 220, 240]];
+    for (let round = 0; round < 3; round++) {
+      ctx.fillStyle = "rgb(" + patchColors[round][0] + "," + patchColors[round][1] + "," + patchColors[round][2] + ")";
+      ctx.globalAlpha = 0.05 + round * 0.02;
+      const patchCount = Math.floor(w * h * 0.25);
+      for (let i = 0; i < patchCount; i++) {
+        const x = texRnd() * w * PX, y = texRnd() * h * PX;
+        const r = 10 + texRnd() * 25;
+        ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+      }
+    }
+    // Subtle surface detail
+    ctx.globalAlpha = 0.1;
+    if (tName === "verdant") {
+      ctx.strokeStyle = rgbStr(lift(th.ground, 0.15));
+      ctx.lineWidth = 1.5;
+      const bladeCount = Math.floor(w * h * 0.8);
+      for (let i = 0; i < bladeCount; i++) {
+        const x = texRnd() * w * PX, y = texRnd() * h * PX;
+        const len = 3 + texRnd() * 4;
+        const ang = -Math.PI / 2 + (texRnd() - 0.5) * 0.5;
+        ctx.beginPath(); ctx.moveTo(x, y);
+        ctx.lineTo(x + Math.cos(ang) * len, y + Math.sin(ang) * len); ctx.stroke();
+      }
+    } else if (tName === "ashen") {
+      ctx.strokeStyle = rgbStr([th.ground[0]*0.4, th.ground[1]*0.4, th.ground[2]*0.4].map(CH));
+      ctx.lineWidth = 0.8;
+      const crackCount = Math.floor(w * h * 0.2);
+      for (let i = 0; i < crackCount; i++) {
+        const x = texRnd() * w * PX, y = texRnd() * h * PX;
+        const len = 6 + texRnd() * 14, ang = texRnd() * Math.PI;
+        ctx.beginPath(); ctx.moveTo(x, y);
+        ctx.lineTo(x + Math.cos(ang) * len, y + Math.sin(ang) * len); ctx.stroke();
+      }
+    } else if (tName === "frozen") {
+      ctx.strokeStyle = rgbStr(lift(th.groundHi, 0.25));
+      ctx.lineWidth = 0.6;
+      const crystalCount = Math.floor(w * h * 0.2);
+      for (let i = 0; i < crystalCount; i++) {
+        const x = texRnd() * w * PX, y = texRnd() * h * PX;
+        const len = 4 + texRnd() * 6, ang = texRnd() * Math.PI;
+        ctx.beginPath(); ctx.moveTo(x, y);
+        ctx.lineTo(x + Math.cos(ang) * len, y + Math.sin(ang) * len); ctx.stroke();
+      }
+    }
+    // Ramp tiles: smooth gradient blend
+    if (rampTiles) {
+      ctx.globalAlpha = 0.12;
+      const grad = ctx.createLinearGradient(0, 0, 0, PX);
+      grad.addColorStop(0, rgbStr(lift(th.ground, 0.12)));
+      grad.addColorStop(1, rgbStr([th.ground[0]*0.7, th.ground[1]*0.7, th.ground[2]*0.7].map(CH)));
+      ctx.fillStyle = grad;
+      for (let y = 0; y < h; y++)
+        for (let x = 0; x < w; x++) {
+          if (!rampTiles[y * w + x]) continue;
+          ctx.fillRect(x * PX, y * PX, PX, PX);
+        }
+    }
+    // Cliff face: rock-like irregular shapes
+    ctx.globalAlpha = 0.08;
+    ctx.fillStyle = tName === "verdant" ? "rgb(85,75,60)" : tName === "ashen" ? "rgb(70,55,45)" : "rgb(90,100,115)";
+    for (let y = 0; y < h; y++)
+      for (let x = 0; x < w; x++) {
+        if (!isCliffFace(x, y)) continue;
+        for (let i = 0; i < 2; i++) {
+          ctx.fillRect(x * PX + texRnd() * PX, y * PX + texRnd() * PX,
+            2 + texRnd() * 4, 1 + texRnd() * 3);
+        }
+      }
     ctx.restore();
 
     // ---- 3. losBlock tiles: slightly darker + denser ------------------------
@@ -368,61 +449,66 @@ export class Renderer {
       }
     }
 
-    // ---- 5. cliff FACE fill: rocky cliff tone, darker than the plateau top --
-    // Paint cliff-face tiles with the theme cliffTop tone (rocky), so vertical
-    // walls read distinctly from the grassy plateau. A top-edge highlight line
-    // makes ledges pop.
+    // ---- 5. cliff FACE fill: rocky cliff tone with directional highlights --
+    // Paint cliff-face tiles with the theme cliffTop tone (rocky), darker than
+    // the plateau top for depth. Highlights on every side facing higher ground
+    // so the cliff lip reads naturally regardless of orientation.
     const cliffTone = th.cliffTop;
+    const cliffDark = [cliffTone[0] * 0.58, cliffTone[1] * 0.58, cliffTone[2] * 0.58].map(CH);
+    const cliffMid = [cliffTone[0] * 0.78, cliffTone[1] * 0.78, cliffTone[2] * 0.78].map(CH);
+    const lipW = Math.max(2, (OW / 2) | 0);
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
         if (!isCliffFace(x, y)) continue;
         const px = x * PX, py = y * PX;
-        // darker rocky band across the face tile
-        ctx.fillStyle = rgbStr([cliffTone[0] * 0.72, cliffTone[1] * 0.72, cliffTone[2] * 0.72].map(CH));
-        ctx.fillRect(px + OW, py + OW, PX - 2 * OW, PX - 2 * OW);
-        // top-edge highlight: bright line on the upper side toward higher ground
         const l = lvlAt(x, y);
-        if (lvlAt(x, y - 1) >= l) {
-          ctx.fillStyle = "rgba(255,255,255,0.16)";
-          ctx.fillRect(px, py, PX, Math.max(1, (OW / 2) | 0));
-        }
+        ctx.fillStyle = rgbStr(cliffDark);
+        ctx.fillRect(px + OW, py + OW, PX - 2 * OW, PX - 2 * OW);
+        ctx.fillStyle = rgbStr(cliffMid);
+        ctx.fillRect(px + OW + 1, py + OW + 1, PX - 2 * OW - 2, PX - 2 * OW - 2);
+        ctx.fillStyle = rgbStr(cliffTone);
+        if (lvlAt(x, y - 1) >= l) ctx.fillRect(px, py, PX, lipW);
+        if (lvlAt(x, y + 1) >= l) ctx.fillRect(px, py + PX - lipW, PX, lipW);
+        if (lvlAt(x - 1, y) >= l) ctx.fillRect(px, py, lipW, PX);
+        if (lvlAt(x + 1, y) >= l) ctx.fillRect(px + PX - lipW, py, lipW, PX);
+        ctx.fillStyle = "rgba(255,255,255,0.14)";
+        if (lvlAt(x, y - 1) >= l) ctx.fillRect(px, py, PX, 1);
+        if (lvlAt(x, y + 1) >= l) ctx.fillRect(px, py + PX - 1, PX, 1);
+        if (lvlAt(x - 1, y) >= l) ctx.fillRect(px, py, 1, PX);
+        if (lvlAt(x + 1, y) >= l) ctx.fillRect(px + PX - 1, py, 1, PX);
       }
     }
 
-    // ---- 6. ramps: worn-path lighter tone + perpendicular ladder bands ------
+    // ---- 6. ramps: smooth level blend + subtle worn path --------------------
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
         if (!isRamp(x, y)) continue;
         const px = x * PX, py = y * PX;
         const l = lvlAt(x, y);
-        // worn path: distinctly lighter, slightly desaturated dirt tone
-        const path = lift(toneFor(l), 0.22);
-        ctx.fillStyle = rgbStr([path[0] * 0.95 + 20, path[1] * 0.92 + 14, path[2] * 0.85 + 8].map(CH));
+        // Find the highest adjacent level to blend toward
+        let rampHi = l;
+        if (lvlAt(x, y - 1) > rampHi) rampHi = lvlAt(x, y - 1);
+        if (lvlAt(x, y + 1) > rampHi) rampHi = lvlAt(x, y + 1);
+        if (lvlAt(x - 1, y) > rampHi) rampHi = lvlAt(x - 1, y);
+        if (lvlAt(x + 1, y) > rampHi) rampHi = lvlAt(x + 1, y);
+        const loT = toneFor(l);
+        const hiT = toneFor(rampHi);
+        const mid = [(loT[0] + hiT[0]) * 0.5, (loT[1] + hiT[1]) * 0.5, (loT[2] + hiT[2]) * 0.5];
+        ctx.fillStyle = rgbStr(mid);
         ctx.fillRect(px, py, PX, PX);
-        // determine ramp travel axis from which neighbors are also ramps
         const horiz = (isRamp(x - 1, y) || isRamp(x + 1, y));
-        // perpendicular stripe bands (ladder rungs)
-        ctx.fillStyle = "rgba(30,24,16,0.35)";
-        const bands = 3;
-        for (let b = 0; b < bands; b++) {
-          const o = (b + 0.5) * (PX / bands);
-          if (horiz) ctx.fillRect(px, py + o - 1, PX, 2);      // rungs across
-          else ctx.fillRect(px + o - 1, py, 2, PX);
+        ctx.fillStyle = "rgba(255,245,210,0.10)";
+        if (horiz) {
+          ctx.fillRect(px, py + (PX * 0.35) | 0, PX, (PX * 0.3) | 0);
+        } else {
+          ctx.fillRect(px + (PX * 0.35) | 0, py, (PX * 0.3) | 0, PX);
         }
-        // side edging lines along the ramp direction
-        ctx.fillStyle = "rgba(20,16,10,0.5)";
-        if (horiz) { ctx.fillRect(px, py, PX, 2); ctx.fillRect(px, py + PX - 2, PX, 2); }
-        else { ctx.fillRect(px, py, 2, PX); ctx.fillRect(px + PX - 2, py, 2, PX); }
+        ctx.fillStyle = "rgba(20,16,10,0.22)";
+        if (horiz) { ctx.fillRect(px, py, PX, 1); ctx.fillRect(px, py + PX - 1, PX, 1); }
+        else { ctx.fillRect(px, py, 1, PX); ctx.fillRect(px + PX - 1, py, 1, PX); }
       }
     }
 
-    // ---- 7. faint tile grid for placement legibility ------------------------
-    ctx.strokeStyle = "rgba(150,200,255,0.035)";
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    for (let x = 0; x <= w; x++) { ctx.moveTo(x * PX + 0.5, 0); ctx.lineTo(x * PX + 0.5, h * PX); }
-    for (let y = 0; y <= h; y++) { ctx.moveTo(0, y * PX + 0.5); ctx.lineTo(w * PX, y * PX + 0.5); }
-    ctx.stroke();
   }
 
   paintFog() {
@@ -929,8 +1015,8 @@ export class Renderer {
             if (near) ok = false;
           }
         }
-        q.material.color.setHex(ok ? 0x7cff6b : 0xff5f4c);
-        q.visible = true;
+        q.material.color.setHex(0x7cff6b);
+        q.visible = ok;
       }
     }
   }

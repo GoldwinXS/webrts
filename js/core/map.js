@@ -221,6 +221,11 @@ function buildCandidate(seed, opts) {
   };
 
   // ---- base placement style (variation axis #1) -----------------------------
+  // Left at 6..11: with the enlarged plateauR=7, only the outermost cliff-ring
+  // row can clip off a low-inset edge and the step-6 re-flatten keeps the top
+  // uniform, so no extra inset is needed. Kept small so close spawns and the
+  // center feature still fit; a base collision just fails validation and the
+  // attempt loop retries deterministically with a fresh sub-seed.
   const inset = 6 + (rng() % 6);                    // 6..11 tiles from the edge
   let start0;
   if (mode === "reflect") {
@@ -283,7 +288,12 @@ function buildCandidate(seed, opts) {
   else mainHeight = 1 + (rng() & 1);                       // mesa: 1 or 2
 
   // ---- 1. main plateau + cliff ring + stepped ramp --------------------------
-  const plateauR = 6;                               // plateau half-extent (13x13 top)
+  // Enlarged from 6 -> 7 so a maxed tech tree (Command Post + 2 depots + 3
+  // barracks + factory + starport + 2 turrets + refineries, ~70 tiles of
+  // footprint PLUS worker-pathing gaps) fits with room to spare. A 15x15 top
+  // (225 tiles) leaves ~115+ genuinely-free build tiles after the mineral line,
+  // geysers and ramp are counted out (see validate()).
+  const plateauR = 7;                               // plateau half-extent (15x15 top)
   raisePlateau(start0, plateauR, mainHeight);
 
   const c0 = toCenter(start0);
@@ -296,7 +306,7 @@ function buildCandidate(seed, opts) {
   // ---- 2. natural expansion (just outside the main ramp) --------------------
   // The natural sits at level 1 for terraced/inverted profiles (a mid step down
   // from a high main), else lowland 0. A ramp links it to the ramp foot.
-  const natR = 4;                                   // natural half-extent (9x9)
+  const natR = 4;                                   // natural half-extent (9x9); its r6 validation window already yields ~113 free tiles, comfortably matching the bigger main
   const natWidth = 4 + (rng() & 1);                 // 4 or 5 wide opening
   const natLvl = (vProfile === 1 || vProfile === 2) ? 1 : 0;
   const nat0 = {
@@ -319,8 +329,8 @@ function buildCandidate(seed, opts) {
       y: clampTile(start0.y + c0.dy * reach + perp.y, H),
     };
     // extra expansions sit on lowland (flatten a pocket) so their CP is easy.
-    for (let dy = -3; dy <= 3; dy++)
-      for (let dx = -3; dx <= 3; dx++) { setHeight(ex.x + dx, ex.y + dy, 0); setRamp(ex.x + dx, ex.y + dy, 0); }
+    for (let dy = -5; dy <= 5; dy++)
+      for (let dx = -5; dx <= 5; dx++) { setHeight(ex.x + dx, ex.y + dy, 0); setRamp(ex.x + dx, ex.y + dy, 0); }
     clearArea3(ex, 3);
     expansions.push(ex);
   }
@@ -347,6 +357,20 @@ function buildCandidate(seed, opts) {
   clearLane(nat0, { x: partner(nat0.x, nat0.y)[0], y: partner(nat0.x, nat0.y)[1] }, 2);
 
   // Re-assert build areas (later steps may have intruded).
+  // Re-flatten the ENTIRE plateau top (full radius plateauR) to mainHeight (not
+  // just clear rock): a neighbouring terrace/mesa/center-skirt can otherwise
+  // leave a wedge of the 15x15 top at the wrong elevation, which the radius-7
+  // validator counts OUT and can drop the guaranteed build area below 115.
+  // Restamping the FULL top keeps it uniform and level with the start, and — by
+  // covering the whole ±plateauR window — avoids introducing a passable
+  // level-step at the top's own edge. rampTiles inside the top are cleared (the
+  // ramp proper is re-cut just below via rampMain); the cliff ring at ±(plateauR+1)
+  // is re-stamped in step 8c.
+  for (let dy = -plateauR; dy <= plateauR; dy++)
+    for (let dx = -plateauR; dx <= plateauR; dx++) {
+      setHeight(start0.x + dx, start0.y + dy, mainHeight);
+      setRamp(start0.x + dx, start0.y + dy, 0);
+    }
   clearArea3(start0, plateauR - 1);
   ringExpansion(nat0, natR, c0, natWidth, natLvl);
   if (natLvl > 0) carveStepRamp(nat0, natR, c0, natWidth, natLvl, 0);
@@ -378,12 +402,12 @@ function buildCandidate(seed, opts) {
   };
 
   const perpU = { x: -c0.dy, y: c0.dx };
-  const gA = { x: start0.x + perpU.x * 6, y: start0.y + perpU.y * 6 };
-  const gB = { x: start0.x - perpU.x * 6, y: start0.y - perpU.y * 6 };
+  const gA = { x: start0.x + perpU.x * 4, y: start0.y + perpU.y * 4 };
+  const gB = { x: start0.x - perpU.x * 4, y: start0.y - perpU.y * 4 };
   const mainGeyserA = placeGeyser(gA.x, gA.y, -perpU.x || c0.dx, -perpU.y || c0.dy) || null;
   const mainGeyserB = placeGeyser(gB.x, gB.y, perpU.x || c0.dx, perpU.y || c0.dy) || null;
 
-  const ng = { x: clampTile(nat0.x - c0.dx * 7, W), y: clampTile(nat0.y - c0.dy * 7, H) };
+  const ng = { x: clampTile(nat0.x - c0.dx * 4, W), y: clampTile(nat0.y - c0.dy * 4, H) };
   for (let dy = -1; dy <= 2; dy++)
     for (let dx = -1; dx <= 2; dx++) {
       const x = ng.x + dx, y = ng.y + dy;
@@ -405,8 +429,12 @@ function buildCandidate(seed, opts) {
     if (!inb(tx, ty)) return;
     if (nearGeyser(tx, ty)) return;
     const d2 = tdist2(tx, ty, base.x, base.y);
-    if (d2 < 6 * 6 || d2 > 9 * 9) return;            // 6..9 tile band
+    if (d2 < 4 * 4 || d2 > 7 * 7) return;            // 4..7 tile band (inside plateau)
     if (rock[idx(tx, ty)] && height[idx(tx, ty)]) return; // don't punch cliffs
+    // Ensure mineral sits on the same elevation as its base (fixes expansion
+    // minerals landing on a cliff edge or different level than the base)
+    const baseLvl = height[idx(base.x, base.y)] || 0;
+    if (height[idx(tx, ty)] !== baseLvl) { setHeight(tx, ty, baseLvl); setRamp(tx, ty, 0); }
     setRock(tx, ty, 0);
     minerals.push({ x: tileToFp(tx), y: tileToFp(ty) });
     const [px, py] = partner(tx, ty);
@@ -438,6 +466,22 @@ function buildCandidate(seed, opts) {
     if (ei === 0 && natGeyser) exCluster.res.push(natGeyser);
   }
 
+  // ---- 8c. re-assert main plateau cliff ring ------------------------------
+  // Resource clearing (geysers/minerals) may have punched holes in the cliff
+  // ring, creating alternate entrances. Re-stamp the ring to seal the base
+  // perimeter, preserving only ramp tiles and resource tiles.
+  for (let y = start0.y - plateauR - 1; y <= start0.y + plateauR + 1; y++)
+    for (let x = start0.x - plateauR - 1; x <= start0.x + plateauR + 1; x++) {
+      const edge = (x < start0.x - plateauR || x > start0.x + plateauR ||
+                    y < start0.y - plateauR || y > start0.y + plateauR);
+      if (!edge || !inb(x, y)) continue;
+      if (rampTiles[idx(x, y)]) continue;             // keep ramp opening
+      const hasRes = geyserTiles.some(gt => gt.x === x && gt.y === y) ||
+                     minerals.some(m => ((m.x / 256) | 0) === x && ((m.y / 256) | 0) === y);
+      if (hasRes) continue;
+      setRock(x, y, 1); setHeight(x, y, mainHeight);
+    }
+
   // ---- 8b. decorative mesas (extra vertical drama, per profile) -------------
   // flat/mesa profiles drop a tall standalone mesa pair off a flank so the
   // skyline isn't monotone. Purely decorative high ground (walled, no ramp) — it
@@ -452,8 +496,16 @@ function buildCandidate(seed, opts) {
       const perpM = { x: -c0.dy, y: c0.dx };
       const mx = clampTile(start0.x + c0.dx * along + perpM.x * side * (7 + (rng() % 3)), W);
       const my = clampTile(start0.y + c0.dy * along + perpM.y * side * (7 + (rng() % 3)), H);
-      if (Math.abs(mx - start0.x) <= plateauR + 2 && Math.abs(my - start0.y) <= plateauR + 2) continue;
-      if (Math.abs(mx - nat0.x) <= natR + 2 && Math.abs(my - nat0.y) <= natR + 2) continue;
+      // Keep the mesa's FULL footprint (its top radius mr + 1 cliff ring) clear of
+      // the main plateau's radius-7 validation window and the natural. Guard on
+      // EITHER axis (box overlap), and account for the mesa radius — a
+      // clampTile() near a map edge can otherwise pull a mesa's skirt back onto
+      // the enlarged plateau top and shave the guaranteed build area below 115.
+      const mesaReach = mr + 1;
+      if (Math.abs(mx - start0.x) <= plateauR + 1 + mesaReach &&
+          Math.abs(my - start0.y) <= plateauR + 1 + mesaReach) continue;
+      if (Math.abs(mx - nat0.x) <= natR + 1 + mesaReach &&
+          Math.abs(my - nat0.y) <= natR + 1 + mesaReach) continue;
       raiseMesa({ x: mx, y: my }, mr, 3, minerals, geyserTiles); // tall level-3 mesa
     }
   }
@@ -785,8 +837,11 @@ function growBarriers(rng, palette, ctx) {
     if (rampTiles[i]) return true;                    // never on a ramp
     if (rock[i]) return true;                         // already blocked (cliff)
     if (mineralSet.has(i)) return true;
-    // keep clear of every base main (mining arc radius) and expansion.
-    for (const s of starts) if (Math.abs(x - s.x) <= plateauR + 3 && Math.abs(y - s.y) <= plateauR + 3) return true;
+    // keep clear of every base main (mining arc radius) and expansion. The main
+    // margin is plateauR+4 (not +3): the cliff ring outer face sits at plateauR+1,
+    // so this leaves a >=2-tile clean lowland gap around the enlarged plateau and
+    // avoids a 1-tile buildable sliver pinched between the plateau edge and a barrier.
+    for (const s of starts) if (Math.abs(x - s.x) <= plateauR + 4 && Math.abs(y - s.y) <= plateauR + 4) return true;
     for (const e of expansions) if (Math.abs(x - e.x) <= naturalsR + 4 && Math.abs(y - e.y) <= naturalsR + 4) return true;
     for (const g of geyserTiles) if (Math.abs(x - g.x) <= 2 && Math.abs(y - g.y) <= 2) return true;
     return false;
@@ -833,7 +888,7 @@ function growBarriers(rng, palette, ctx) {
   }
 
   // How many blobs. Framed layout: enough to line the routes without clogging.
-  const blobCount = 5 + (rng() % 5);                  // 5..9 blob pairs
+  const blobCount = 7 + (rng() % 6);                  // 7..12 blob pairs
   const pick = (arr) => arr.length ? arr[rng() % arr.length] : null;
 
   for (let b = 0; b < blobCount; b++) {
@@ -981,9 +1036,9 @@ function placeLosBlockers(rng, setLos, addDeco, rock, height, losBlock, W, H,
 
 function arcOffsets(dx, dy, n, style = 0) {
   const bases = [
-    [[7, -3], [7, -1], [7, 1], [7, 3], [6, 4], [4, 6], [6, 0]],
-    [[7, -2], [7, 0], [7, 2], [6, -3], [6, 3], [5, 5], [8, 1]],
-    [[6, -4], [6, 4], [7, -2], [7, 2], [5, 5], [4, 6], [8, 0]],
+    [[5, -3], [5, -1], [5, 1], [5, 3], [4, -4], [4, 4], [5, 0]],
+    [[5, -2], [5, 0], [5, 2], [4, -3], [4, 3], [4, 4], [3, 5]],
+    [[4, -4], [4, 4], [5, -2], [5, 2], [4, 3], [3, 4], [5, 0]],
   ];
   const base = bases[style % bases.length];
   const out = [];
@@ -1062,7 +1117,12 @@ function validateVerbose(map) {
         if (!reach0[id] && !reach1[id]) continue;
         plateauFree++;
       }
-    if (plateauFree < 70) return "main plateau too small (" + plateauFree + ")";
+    // Raised 70 -> 115: a maxed tech tree (~70 tiles of footprint) plus the
+    // worker-pathing gaps and build-grid slack between structures needs this much
+    // genuinely-free room. The radius-7 window matches the enlarged plateauR=7
+    // top (15x15) exactly, and minerals/geysers/ramp/off-level tiles are all
+    // counted OUT above, so this is real building space.
+    if (plateauFree < 115) return "main plateau too small (" + plateauFree + ")";
   }
 
   if (map.naturals) {
@@ -1079,7 +1139,11 @@ function validateVerbose(map) {
           if (mineralTiles.has(id) || geyserTiles.has(id)) continue;
           free++;
         }
-      if (free < 50) return "natural too small (" + free + ")";
+      // Raised 50 -> 80: the natural now needs room for a Command Post plus a
+      // handful of production/defense structures, not just a deposit. The r6
+      // window (13x13) around a natR=4 ring already yields ~113 free, so this is
+      // comfortably satisfied without enlarging the ring.
+      if (free < 80) return "natural too small (" + free + ")";
       if (!reachable) return "natural walled off @" + n.x + "," + n.y;
     }
   }
@@ -1106,7 +1170,7 @@ function validateVerbose(map) {
       const d2 = cdist2(tx, ty, s.x, s.y);
       if (d2 <= 11 * 11) {
         cnt++;
-        if (d2 < 6 * 6) return "patch too close to start @" + tx + "," + ty + " (d2=" + d2 + ")";
+        if (d2 < 4 * 4) return "patch too close to start @" + tx + "," + ty + " (d2=" + d2 + ")";
         if (d2 < nearest2) nearest2 = d2;
       }
     }
@@ -1116,7 +1180,7 @@ function validateVerbose(map) {
     const tx = (g.x / 256) | 0, ty = (g.y / 256) | 0;
     for (const s of starts) {
       const d2 = cdist2(tx, ty, s.x, s.y);
-      if (d2 <= 11 * 11 && d2 < 6 * 6) return "geyser too close to start @" + tx + "," + ty;
+      if (d2 <= 11 * 11 && d2 < 4 * 4) return "geyser too close to start @" + tx + "," + ty;
     }
   }
 

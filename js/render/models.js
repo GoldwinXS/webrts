@@ -35,59 +35,92 @@ export function propToon(opts = {}) {
   });
 }
 
-// shared geometries (created once)
+// shared geometries (created once). Slightly-more-segmented primitives read as
+// gently bevelled without inflating tri counts; every key below is reused across
+// many instances so nothing is allocated per make* call beyond a Group.
 const G = {
-  // worker drone
-  dronePod: new THREE.SphereGeometry(0.3, 14, 12),
-  droneThruster: new THREE.CylinderGeometry(0.07, 0.1, 0.16, 8),
-  droneEye: new THREE.BoxGeometry(0.26, 0.06, 0.05),
+  // worker drone — rounder friendly utility bot
+  dronePod: new THREE.SphereGeometry(0.3, 18, 14),
+  droneBelly: new THREE.SphereGeometry(0.22, 14, 10),     // lower chassis blister
+  droneCollar: new THREE.TorusGeometry(0.24, 0.05, 8, 20), // brow ring around eye
+  droneThruster: new THREE.CylinderGeometry(0.08, 0.11, 0.18, 10),
+  droneThrusterGlow: new THREE.CylinderGeometry(0.07, 0.07, 0.04, 10),
+  droneEye: new THREE.SphereGeometry(0.1, 12, 10),          // single round glowing eye
   droneArm: new THREE.BoxGeometry(0.06, 0.06, 0.3).translate(0, 0, 0.15),
-  droneDrill: new THREE.ConeGeometry(0.05, 0.16, 6).rotateX(Math.PI / 2).translate(0, 0, 0.36),
+  droneForearm: new THREE.CylinderGeometry(0.045, 0.055, 0.22, 8).rotateX(Math.PI / 2).translate(0, 0, 0.34),
+  droneElbow: new THREE.SphereGeometry(0.055, 8, 6),        // articulation joint
+  droneDrill: new THREE.ConeGeometry(0.05, 0.16, 8).rotateX(Math.PI / 2).translate(0, 0, 0.36),
   crystal: new THREE.OctahedronGeometry(0.14),
-  // marine
-  torso: new THREE.CapsuleGeometry(0.2, 0.28, 4, 10),
-  head: new THREE.SphereGeometry(0.13, 10, 8),
-  visor: new THREE.BoxGeometry(0.16, 0.06, 0.06),
-  leg: new THREE.BoxGeometry(0.09, 0.28, 0.09).translate(0, -0.14, 0),
-  gunBody: new THREE.BoxGeometry(0.07, 0.09, 0.42),
-  gunTip: new THREE.CylinderGeometry(0.025, 0.025, 0.14, 6).rotateX(Math.PI / 2),
-  pack: new THREE.BoxGeometry(0.22, 0.26, 0.12),
-  // brute
-  bruteBody: new THREE.DodecahedronGeometry(0.4),
+  // marine — iconic armored footman
+  torso: new THREE.CapsuleGeometry(0.21, 0.26, 5, 12),
+  chestPlate: new THREE.BoxGeometry(0.28, 0.24, 0.1),      // beveled feel via placement
+  collar: new THREE.CylinderGeometry(0.11, 0.15, 0.12, 10),// neck ring under helmet
+  head: new THREE.SphereGeometry(0.135, 14, 12),
+  visor: new THREE.BoxGeometry(0.17, 0.05, 0.06),
+  pauldron: new THREE.SphereGeometry(0.13, 12, 8),         // shoulder guard
+  leg: new THREE.BoxGeometry(0.1, 0.24, 0.1).translate(0, -0.12, 0),
+  boot: new THREE.BoxGeometry(0.12, 0.09, 0.16).translate(0, -0.04, 0.02),
+  gunBody: new THREE.BoxGeometry(0.08, 0.1, 0.46),
+  gunReceiver: new THREE.BoxGeometry(0.1, 0.13, 0.18),      // chunky mid-body
+  gunMag: new THREE.BoxGeometry(0.06, 0.16, 0.08),
+  gunTip: new THREE.CylinderGeometry(0.035, 0.045, 0.16, 8).rotateX(Math.PI / 2), // muzzle
+  pack: new THREE.BoxGeometry(0.24, 0.28, 0.13),
+  // brute — hunched armored bruiser
+  bruteCore: new THREE.SphereGeometry(0.42, 12, 10),       // hunched mass (squashed)
+  bruteBody: new THREE.DodecahedronGeometry(0.4),          // kept for compatibility
+  bruteChest: new THREE.BoxGeometry(0.46, 0.34, 0.32),     // armored chest slab
+  bruteShoulder: new THREE.SphereGeometry(0.18, 12, 9),    // big pauldron
+  bruteHead: new THREE.SphereGeometry(0.16, 12, 10),       // low bull head
+  bruteJaw: new THREE.BoxGeometry(0.22, 0.1, 0.16),
   bruteArm: new THREE.BoxGeometry(0.14, 0.4, 0.14).translate(0, -0.2, 0),
-  bruteFist: new THREE.SphereGeometry(0.11, 8, 6),
-  spike: new THREE.ConeGeometry(0.06, 0.2, 6),
+  bruteForearm: new THREE.BoxGeometry(0.18, 0.24, 0.18).translate(0, -0.12, 0),
+  bruteFist: new THREE.SphereGeometry(0.11, 10, 8),
+  bruteGauntlet: new THREE.BoxGeometry(0.22, 0.2, 0.22),   // oversized knuckles
+  spike: new THREE.ConeGeometry(0.06, 0.2, 8),
   // buildings
-  lamp: new THREE.SphereGeometry(0.07, 8, 6),
-  pole: new THREE.CylinderGeometry(0.03, 0.03, 1.4, 6),
+  lamp: new THREE.SphereGeometry(0.07, 10, 8),
+  pole: new THREE.CylinderGeometry(0.03, 0.03, 1.4, 8),
+  antenna: new THREE.CylinderGeometry(0.018, 0.03, 0.9, 6).translate(0, 0.45, 0),
   dish: new THREE.BoxGeometry(0.5, 0.06, 0.18),
+  vent: new THREE.CylinderGeometry(0.16, 0.2, 0.3, 10),    // rounded roof vent
+  pipe: new THREE.CylinderGeometry(0.09, 0.09, 0.6, 8),    // greeble pipe
   scaffold: new THREE.BoxGeometry(0.08, 1, 0.08),
   mineral: new THREE.OctahedronGeometry(0.45),
   mineralSmall: new THREE.OctahedronGeometry(0.22),
   ring: new THREE.RingGeometry(0.5, 0.6, 28),
   bar: new THREE.PlaneGeometry(1, 0.11),
   flag: new THREE.BoxGeometry(0.34, 0.2, 0.02),
-  // tank
-  tankHull: new THREE.BoxGeometry(0.9, 0.28, 1.15),
-  tankTread: new THREE.BoxGeometry(0.24, 0.34, 1.25),
+  // tank — low wide siege tank
+  tankHull: new THREE.BoxGeometry(0.86, 0.24, 1.02),
+  tankGlacis: new THREE.BoxGeometry(0.86, 0.24, 0.34),     // sloped front plate
+  tankTread: new THREE.BoxGeometry(0.24, 0.32, 1.28),
+  tankGuard: new THREE.BoxGeometry(0.3, 0.08, 1.34),       // tread guard over each track
+  tankWheel: new THREE.CylinderGeometry(0.11, 0.11, 0.26, 12).rotateZ(Math.PI / 2),
   tankTurret: new THREE.BoxGeometry(0.5, 0.26, 0.55),
-  tankMantlet: new THREE.BoxGeometry(0.34, 0.2, 0.2),
-  tankBarrel: new THREE.CylinderGeometry(0.055, 0.07, 1.1, 10).rotateX(Math.PI / 2).translate(0, 0, 0.55),
-  tankMuzzle: new THREE.CylinderGeometry(0.09, 0.09, 0.14, 10).rotateX(Math.PI / 2),
-  // wraith
-  wraithFuse: new THREE.CylinderGeometry(0.08, 0.16, 0.95, 10).rotateX(Math.PI / 2),
-  wraithNose: new THREE.ConeGeometry(0.08, 0.34, 10).rotateX(-Math.PI / 2).translate(0, 0, 0.62),
-  wraithWing: new THREE.BoxGeometry(1.05, 0.05, 0.34),
-  wraithTail: new THREE.BoxGeometry(0.5, 0.05, 0.2),
-  wraithFin: new THREE.BoxGeometry(0.05, 0.28, 0.24),
-  wraithEngine: new THREE.CylinderGeometry(0.09, 0.06, 0.18, 10).rotateX(Math.PI / 2),
-  // banshee
-  bansheeBody: new THREE.CapsuleGeometry(0.19, 0.62, 4, 12).rotateX(Math.PI / 2),
-  bansheeCanopy: new THREE.SphereGeometry(0.15, 10, 8),
-  bansheeArm: new THREE.BoxGeometry(0.07, 0.07, 0.42),
-  bansheeRotor: new THREE.CylinderGeometry(0.56, 0.56, 0.008, 20),
-  bansheeHub: new THREE.CylinderGeometry(0.05, 0.05, 0.14, 8),
-  bansheeGun: new THREE.CylinderGeometry(0.05, 0.05, 0.4, 8).rotateX(Math.PI / 2).translate(0, 0, 0.2),
+  tankTurretBevel: new THREE.CylinderGeometry(0.3, 0.34, 0.24, 10), // beveled turret cheeks
+  tankMantlet: new THREE.BoxGeometry(0.34, 0.22, 0.2),
+  tankBarrel: new THREE.CylinderGeometry(0.05, 0.065, 0.66, 12).rotateX(Math.PI / 2).translate(0, 0, 0.33),
+  tankBarrel2: new THREE.CylinderGeometry(0.07, 0.075, 0.4, 12).rotateX(Math.PI / 2).translate(0, 0, 0.14), // stepped inner section
+  tankMuzzle: new THREE.CylinderGeometry(0.09, 0.09, 0.16, 12).rotateX(Math.PI / 2), // muzzle brake
+  // wraith — sleek air-superiority dart
+  wraithFuse: new THREE.CylinderGeometry(0.09, 0.17, 0.95, 12).rotateX(Math.PI / 2),
+  wraithSpine: new THREE.BoxGeometry(0.1, 0.1, 0.6),        // dorsal spine
+  wraithNose: new THREE.ConeGeometry(0.09, 0.4, 12).rotateX(-Math.PI / 2).translate(0, 0, 0.64),
+  wraithWing: new THREE.BoxGeometry(1.15, 0.045, 0.36),
+  wraithTail: new THREE.BoxGeometry(0.52, 0.045, 0.2),
+  wraithFin: new THREE.BoxGeometry(0.05, 0.3, 0.24),
+  wraithNacelle: new THREE.CapsuleGeometry(0.075, 0.3, 4, 10).rotateX(Math.PI / 2), // engine pod
+  wraithEngine: new THREE.CylinderGeometry(0.09, 0.06, 0.1, 12).rotateX(Math.PI / 2),
+  wraithEngineGlow: new THREE.CylinderGeometry(0.06, 0.03, 0.05, 12).rotateX(Math.PI / 2),
+  // banshee — heavier armored gunship
+  bansheeBody: new THREE.CapsuleGeometry(0.2, 0.62, 5, 14).rotateX(Math.PI / 2),
+  bansheeArmor: new THREE.BoxGeometry(0.34, 0.2, 0.5),     // fuselage armor slab
+  bansheeCanopy: new THREE.SphereGeometry(0.15, 12, 10),
+  bansheeArm: new THREE.BoxGeometry(0.08, 0.08, 0.44),
+  bansheeRotor: new THREE.CylinderGeometry(0.56, 0.56, 0.008, 24),
+  bansheeHub: new THREE.CylinderGeometry(0.06, 0.05, 0.16, 10),
+  bansheeGun: new THREE.CylinderGeometry(0.055, 0.06, 0.4, 10).rotateX(Math.PI / 2).translate(0, 0, 0.2),
+  bansheePod: new THREE.BoxGeometry(0.14, 0.14, 0.3),      // under-slung rocket pod
   // blob shadow for flyers
   blob: new THREE.CircleGeometry(1, 20),
   // geyser
@@ -118,6 +151,10 @@ export const SHARED = G;
 
 const DARK = new THREE.MeshStandardMaterial({ color: 0x232830, roughness: 0.5, metalness: 0.5 });
 const GUNMETAL = new THREE.MeshStandardMaterial({ color: 0x30363f, roughness: 0.35, metalness: 0.7 });
+// warm neutral trim: the "one accent" tone that reads on every chassis without
+// stealing from the team color. Kept non-emissive so damage-flash stays on mats.
+const TRIM = new THREE.MeshStandardMaterial({ color: 0x8a929c, roughness: 0.4, metalness: 0.6 });
+const RUBBER = new THREE.MeshStandardMaterial({ color: 0x1a1c20, roughness: 0.85, metalness: 0.2 });
 
 function teamMat(color, emissiveIntensity = 0.12) {
   return new THREE.MeshStandardMaterial({
@@ -144,10 +181,19 @@ export function makeMineralVisual(e) {
   main.castShadow = true;
   const s1 = new THREE.Mesh(G.mineralSmall, mat);
   s1.position.set(0.3, 0.16, -0.14);
-  s1.rotation.y = e.id;
+  s1.rotation.set(0.4, e.id, 0.2);
   const s2 = new THREE.Mesh(G.mineralSmall, mat);
   s2.position.set(-0.26, 0.14, 0.18);
-  group.add(main, s1, s2);
+  s2.rotation.set(-0.3, e.id * 1.3, 0.1);
+  // a third small shard + darker rock base for a planted, clustered read
+  const s3 = new THREE.Mesh(G.mineralSmall, mat);
+  s3.scale.setScalar(0.7);
+  s3.position.set(0.05, 0.1, 0.32);
+  s3.rotation.set(0.6, e.id * 0.5, -0.2);
+  const baseRock = new THREE.Mesh(G.boulder, propToon({ color: 0x2c3138 }));
+  baseRock.scale.set(0.85, 0.4, 0.85);
+  baseRock.position.y = 0.02;
+  group.add(baseRock, main, s1, s2, s3);
   group.userData.crystal = main;
   group.userData.anim = { kind: "mineral", mat };
   return group;
@@ -165,6 +211,11 @@ export function makeGeyserVisual(e, rockColor) {
   const throatMat = glowMat(0x7cd94f, 1.6);
   const throat = new THREE.Mesh(G.geyserThroat, throatMat);
   throat.position.y = 0.72;
+  // dark rock rim around the glowing throat for contrast
+  const rim = new THREE.Mesh(new THREE.TorusGeometry(0.34, 0.07, 8, 16), propToon({ color: rockColor }));
+  rim.rotation.x = Math.PI / 2;
+  rim.position.y = 0.72;
+  group.add(rim);
   // rounded boulders around the base for silhouette (no polyhedra)
   for (let i = 0; i < 3; i++) {
     const a = (i / 3) * Math.PI * 2 + e.id;
@@ -280,27 +331,44 @@ export function makeUnitVisual(e, color) {
   let anim;
 
   if (e.type === "worker") {
+    // plucky utility bot: rounded team-color pod, a darker belly chassis, a
+    // single round glowing eye ringed by a brow, and stubby thruster pods.
     const pod = new THREE.Mesh(G.dronePod, team);
-    pod.scale.set(1, 0.7, 1.15);
+    pod.scale.set(1, 0.78, 1.12);
     pod.castShadow = true;
+    const belly = new THREE.Mesh(G.droneBelly, GUNMETAL);
+    belly.position.set(0, -0.16, 0.02);
+    belly.scale.set(1.05, 0.8, 1.05);
+    // single expressive eye with a dark brow ring for a "face"
     const eye = new THREE.Mesh(G.droneEye, glow);
-    eye.position.set(0, 0.04, 0.26);
+    eye.position.set(0, 0.05, 0.28);
+    const brow = new THREE.Mesh(G.droneCollar, DARK);
+    brow.position.set(0, 0.05, 0.27);
+    brow.scale.setScalar(0.55);
     const tl = new THREE.Mesh(G.droneThruster, GUNMETAL);
-    tl.position.set(0.26, -0.1, 0);
+    tl.position.set(0.27, -0.09, -0.02);
+    tl.rotation.z = 0.18;
+    const tlGlow = new THREE.Mesh(G.droneThrusterGlow, glowMat(0x63e8db, 1.2));
+    tlGlow.position.set(0.29, -0.17, -0.02);
     const tr = tl.clone();
-    tr.position.x = -0.26;
+    tr.position.x = -0.27; tr.rotation.z = -0.18;
+    const trGlow = tlGlow.clone();
+    trGlow.position.x = -0.29;
     const carry = new THREE.Mesh(G.crystal, glowMat(0x63e8db, 1.4));
-    carry.position.set(0, -0.18, 0.22);
+    carry.position.set(0, -0.2, 0.24);
     carry.visible = false;
-    // manipulator arm: drill for mining, torch for welding
+    // articulated manipulator arm: upper boom + elbow + forearm + tool tip.
     const arm = new THREE.Group();
     const armMesh = new THREE.Mesh(G.droneArm, GUNMETAL);
+    const elbow = new THREE.Mesh(G.droneElbow, TRIM);
+    elbow.position.set(0, 0, 0.3);
+    const forearm = new THREE.Mesh(G.droneForearm, DARK);
     const drill = new THREE.Mesh(G.droneDrill, glowMat(0x63e8db, 0.6));
-    arm.add(armMesh, drill);
-    arm.position.set(0.12, -0.08, 0.18);
+    arm.add(armMesh, elbow, forearm, drill);
+    arm.position.set(0.14, -0.07, 0.18);
     arm.rotation.x = 0.35;       // retracted by default
     arm.scale.setScalar(0.75);
-    body.add(pod, eye, tl, tr, carry, arm);
+    body.add(pod, belly, eye, brow, tl, tlGlow, tr, trGlow, carry, arm);
     body.position.y = 0.42;
     // the eye doubles as a task light: team color when moving/idle,
     // cyan while mining, amber while constructing
@@ -309,64 +377,128 @@ export function makeUnitVisual(e, color) {
       baseColor: new THREE.Color(color), arm, drill: drill.material,
     };
   } else if (e.type === "marine") {
+    // iconic footman: bulky armored torso with a chest plate, shoulder
+    // pauldrons, a rounded helmet with a bright visor slit, a chunky rifle
+    // with a muzzle, and slightly-bent planted legs.
     const torso = new THREE.Mesh(G.torso, team);
-    torso.position.y = 0.46;
+    torso.position.y = 0.48;
+    torso.scale.set(1.08, 1, 0.95);
     torso.castShadow = true;
+    const chest = new THREE.Mesh(G.chestPlate, GUNMETAL);
+    chest.position.set(0, 0.5, 0.14);
+    chest.rotation.x = -0.12;                 // angled plate catches light
+    const collarPiece = new THREE.Mesh(G.collar, DARK);
+    collarPiece.position.set(0, 0.68, 0);
     const head = new THREE.Mesh(G.head, DARK);
-    head.position.y = 0.76;
+    head.position.y = 0.78;
+    head.scale.set(1, 1.05, 1);
     const visor = new THREE.Mesh(G.visor, glow);
-    visor.position.set(0, 0.77, 0.09);
+    visor.position.set(0, 0.79, 0.1);
+    visor.rotation.x = -0.1;
+    // shoulder pauldrons — asymmetric so it doesn't read CAD-clean
+    const pauldronL = new THREE.Mesh(G.pauldron, team);
+    pauldronL.position.set(0.24, 0.6, 0);
+    pauldronL.scale.set(1.1, 0.9, 1.05);
+    const pauldronR = new THREE.Mesh(G.pauldron, team);
+    pauldronR.position.set(-0.24, 0.58, 0);
+    pauldronR.scale.set(1, 0.85, 1);
     const pack = new THREE.Mesh(G.pack, GUNMETAL);
-    pack.position.set(0, 0.5, -0.19);
+    pack.position.set(0, 0.52, -0.2);
     const legL = new THREE.Mesh(G.leg, DARK);
-    legL.position.set(0.1, 0.3, 0);
+    legL.position.set(0.11, 0.28, 0.02);
+    legL.rotation.x = 0.08;                    // planted, slightly bent
+    const bootL = new THREE.Mesh(G.boot, TRIM);
+    bootL.position.set(0.11, 0.04, 0.04);
+    legL.add(bootL); bootL.position.set(0, -0.24, 0.02);
     const legR = new THREE.Mesh(G.leg, DARK);
-    legR.position.set(-0.1, 0.3, 0);
+    legR.position.set(-0.11, 0.28, 0.02);
+    legR.rotation.x = 0.08;
+    const bootR = bootL.clone();
+    legR.add(bootR);
     const gunGroup = new THREE.Group();
     const gun = new THREE.Mesh(G.gunBody, GUNMETAL);
+    gun.position.z = 0.06;
+    const receiver = new THREE.Mesh(G.gunReceiver, DARK);
+    receiver.position.z = -0.08;
+    const mag = new THREE.Mesh(G.gunMag, TRIM);
+    mag.position.set(0, -0.11, -0.04);
     const tip = new THREE.Mesh(G.gunTip, glow);
-    tip.position.set(0, 0, 0.26);
-    gunGroup.add(gun, tip);
-    gunGroup.position.set(0.2, 0.5, 0.16);
-    body.add(torso, head, visor, pack, legL, legR, gunGroup);
+    tip.position.set(0, 0, 0.32);
+    gunGroup.add(gun, receiver, mag, tip);
+    gunGroup.position.set(0.22, 0.5, 0.16);
+    body.add(torso, chest, collarPiece, head, visor, pauldronL, pauldronR, pack, legL, legR, gunGroup);
     anim = { kind: "marine", legL, legR, gunGroup, gunHome: 0.16 };
   } else if (e.type === "tank") {
-    // low wide hull with side tread blocks and a rotating long-barrel turret
+    // low wide siege tank: sloped glacis, defined tread guards, beefy turret
+    // with a long stepped barrel + muzzle brake.
     const hull = new THREE.Mesh(G.tankHull, team);
     hull.position.y = 0.34;
     hull.castShadow = true;
-    const treadL = new THREE.Mesh(G.tankTread, DARK);
-    treadL.position.set(0.55, 0.22, 0);
+    const glacis = new THREE.Mesh(G.tankGlacis, GUNMETAL);
+    glacis.position.set(0, 0.32, 0.52);
+    glacis.rotation.x = -0.5;                  // sloped front plate
+    const treadL = new THREE.Mesh(G.tankTread, RUBBER);
+    treadL.position.set(0.55, 0.2, 0);
     const treadR = treadL.clone();
     treadR.position.x = -0.55;
-    const skirt = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.1, 1.1), GUNMETAL);
+    // road wheels peeking from the tracks
+    for (const tx of [0.55, -0.55]) {
+      for (const tz of [-0.42, 0, 0.42]) {
+        const w = new THREE.Mesh(G.tankWheel, TRIM);
+        w.position.set(tx, 0.12, tz);
+        body.add(w);
+      }
+    }
+    const guardL = new THREE.Mesh(G.tankGuard, DARK);
+    guardL.position.set(0.55, 0.4, 0);
+    const guardR = guardL.clone();
+    guardR.position.x = -0.55;
+    const skirt = new THREE.Mesh(new THREE.BoxGeometry(1.16, 0.1, 1.0), GUNMETAL);
     skirt.position.y = 0.48;
     // turret group rotates on Y; barrel recoils along -Z of the turret
     const turret = new THREE.Group();
     const dome = new THREE.Mesh(G.tankTurret, team);
     dome.position.y = 0;
+    const cheeks = new THREE.Mesh(G.tankTurretBevel, team); // rounded turret sides
+    cheeks.rotation.x = Math.PI / 2;
+    cheeks.position.set(0, 0, 0.02);
+    cheeks.scale.set(1, 1, 0.55);
     const mantlet = new THREE.Mesh(G.tankMantlet, GUNMETAL);
     mantlet.position.set(0, 0, 0.32);
     const barrelGroup = new THREE.Group();
     const barrel = new THREE.Mesh(G.tankBarrel, GUNMETAL);
-    const muzzle = new THREE.Mesh(G.tankMuzzle, glow);
-    muzzle.position.z = 1.05;
-    barrelGroup.add(barrel, muzzle);
+    barrel.position.z = 0.44;
+    const barrelStep = new THREE.Mesh(G.tankBarrel2, DARK); // stepped inner section
+    const muzzle = new THREE.Mesh(G.tankMuzzle, GUNMETAL);
+    muzzle.position.z = 1.02;
+    const muzzleGlow = new THREE.Mesh(G.tankMuzzle, glow);
+    muzzleGlow.scale.setScalar(0.6);
+    muzzleGlow.position.z = 1.02;
+    barrelGroup.add(barrelStep, barrel, muzzle, muzzleGlow);
     barrelGroup.position.set(0, 0, 0.28);
     const hatch = new THREE.Mesh(G.droneEye, glow);
-    hatch.position.set(0, 0.16, -0.1);
-    turret.add(dome, mantlet, barrelGroup, hatch);
+    hatch.scale.set(1.4, 0.7, 1);
+    hatch.position.set(0.1, 0.16, -0.12);
+    turret.add(dome, cheeks, mantlet, barrelGroup, hatch);
     turret.position.set(0, 0.62, 0);
-    body.add(hull, treadL, treadR, skirt, turret);
+    body.add(hull, glacis, treadL, treadR, guardL, guardR, skirt, turret);
     anim = { kind: "tank", turret, barrelGroup, barrelHome: 0.28 };
   } else if (e.type === "wraith") {
-    // sleek dart: slim fuselage, swept wings, twin engine glow
+    // sleek air-superiority dart: slim fuselage, dorsal spine, swept wings, a
+    // canopy, twin engine nacelles with bright emissive exhaust.
     const fuse = new THREE.Mesh(G.wraithFuse, team);
     fuse.castShadow = true;
+    const spine = new THREE.Mesh(G.wraithSpine, GUNMETAL);
+    spine.position.set(0, 0.09, -0.06);
     const nose = new THREE.Mesh(G.wraithNose, DARK);
     const wing = new THREE.Mesh(G.wraithWing, team);
     wing.position.set(0, -0.02, -0.05);
     wing.rotation.y = 0.32;                 // sweep back
+    const wingTrim = new THREE.Mesh(G.wraithWing, TRIM);
+    wingTrim.scale.set(1, 1.4, 0.28);
+    wingTrim.position.set(0, -0.015, 0.06);
+    wingTrim.rotation.y = 0.32;
+    wing.add(wingTrim); wingTrim.position.set(0, 0, 0.09);
     const tail = new THREE.Mesh(G.wraithTail, team);
     tail.position.set(0, 0.02, -0.5);
     const fin = new THREE.Mesh(G.wraithFin, DARK);
@@ -375,16 +507,25 @@ export function makeUnitVisual(e, color) {
     cockpit.scale.set(0.7, 0.5, 1.1);
     cockpit.position.set(0, 0.1, 0.2);
     const engMat = glowMat(color, 2.4);     // >1 for bloom
-    const engL = new THREE.Mesh(G.wraithEngine, engMat);
-    engL.position.set(0.22, 0, -0.5);
-    const engR = engL.clone();
-    engR.position.x = -0.22;
-    body.add(fuse, nose, wing, tail, fin, cockpit, engL, engR);
+    // twin engine nacelles slung under the wing roots, each with a bright core
+    const nacL = new THREE.Mesh(G.wraithNacelle, GUNMETAL);
+    nacL.position.set(0.22, -0.04, -0.42);
+    const engL = new THREE.Mesh(G.wraithEngine, DARK);
+    engL.position.set(0.22, -0.04, -0.5);
+    const engLGlow = new THREE.Mesh(G.wraithEngineGlow, engMat);
+    engLGlow.position.set(0.22, -0.04, -0.55);
+    const nacR = nacL.clone(); nacR.position.x = -0.22;
+    const engR = engL.clone(); engR.position.x = -0.22;
+    const engRGlow = engLGlow.clone(); engRGlow.position.x = -0.22;
+    body.add(fuse, spine, nose, wing, tail, fin, cockpit, nacL, nacR, engL, engR, engLGlow, engRGlow);
     anim = { kind: "wraith", engMat, roll: 0 };
   } else if (e.type === "banshee") {
-    // gunship: fat body, twin overhead rotor discs, under-nose gun
+    // heavier gunship: armored fuselage, twin overhead rotor discs, under-nose
+    // gun and under-slung rocket pods. Menacing bulk.
     const bodyMesh = new THREE.Mesh(G.bansheeBody, team);
     bodyMesh.castShadow = true;
+    const armor = new THREE.Mesh(G.bansheeArmor, GUNMETAL);
+    armor.position.set(0, 0.02, 0.05);
     const canopy = new THREE.Mesh(G.bansheeCanopy, glowMat(0x9fdcff, 0.7));
     canopy.scale.set(0.9, 0.7, 1);
     canopy.position.set(0, 0.12, 0.4);
@@ -393,56 +534,75 @@ export function makeUnitVisual(e, color) {
     const gunTip = new THREE.Mesh(G.tankMuzzle, glow);
     gunTip.scale.setScalar(0.6);
     gunTip.position.set(0, -0.16, 0.62);
+    // under-slung rocket pods on the flanks
+    const podL = new THREE.Mesh(G.bansheePod, DARK);
+    podL.position.set(0.26, -0.12, 0.02);
+    const podR = podL.clone(); podR.position.x = -0.26;
+    body.add(podL, podR);
     // two rotor assemblies on thin arms
     const rotors = [];
     for (const side of [0.34, -0.34]) {
       const arm = new THREE.Mesh(G.bansheeArm, GUNMETAL);
       arm.position.set(side, 0.14, -0.05);
       arm.rotation.x = Math.PI / 2;
-      const hub = new THREE.Mesh(G.bansheeHub, DARK);
+      const hub = new THREE.Mesh(G.bansheeHub, TRIM);
       hub.position.set(side, 0.3, -0.05);
       const disc = new THREE.Mesh(G.bansheeRotor, glowMat(color, 0.6));
       disc.position.set(side, 0.37, -0.05);
       body.add(arm, hub, disc);
       rotors.push(disc);
     }
-    body.add(bodyMesh, canopy, gun, gunTip);
+    body.add(bodyMesh, armor, canopy, gun, gunTip);
     anim = { kind: "banshee", rotors, roll: 0 };
-  } else { // brute — heavy melee: big shoulder mass, low bull head, deliberate
-    // faceting on a squashed low-poly core (reads chunky, not a lone dodeca).
-    const core = new THREE.Mesh(G.bruteBody, team);
-    core.position.y = 0.5;
-    core.scale.set(1.02, 1.02, 0.9);
+  } else { // brute — heavy melee bruiser: hunched armored mass, big asymmetric
+    // shoulder plates, oversized gauntlets, a low menacing head with a glow eye.
+    const core = new THREE.Mesh(G.bruteCore, team);
+    core.position.set(0, 0.5, -0.04);
+    core.scale.set(1.05, 1.0, 0.92);
     core.castShadow = true;
-    // broad shoulder yoke: two squashed spheres sitting high & wide
-    const shoulderMat = DARK;
-    const shL = new THREE.Mesh(G.bruteFist, shoulderMat);
-    shL.scale.set(2.0, 1.5, 1.7);
-    shL.position.set(0.46, 0.86, -0.02);
-    const shR = shL.clone();
-    shR.position.x = -0.46;
-    // back spikes reduced to two, tucked into the shoulder mass for menace
+    const chest = new THREE.Mesh(G.bruteChest, GUNMETAL);
+    chest.position.set(0, 0.5, 0.14);
+    chest.rotation.x = 0.12;                   // hunched forward
+    // broad shoulder plates — asymmetric (left bigger) for menace
+    const shL = new THREE.Mesh(G.bruteShoulder, DARK);
+    shL.scale.set(1.5, 1.15, 1.35);
+    shL.position.set(0.5, 0.9, -0.02);
+    const shR = new THREE.Mesh(G.bruteShoulder, DARK);
+    shR.scale.set(1.25, 1.0, 1.2);
+    shR.position.set(-0.48, 0.82, -0.02);
+    // back spikes: two, tucked into the shoulder mass
     for (let i = 0; i < 2; i++) {
       const sp = new THREE.Mesh(G.spike, GUNMETAL);
       const a = i === 0 ? 0.5 : Math.PI - 0.5;
-      sp.position.set(Math.cos(a) * 0.34, 0.98, -0.24);
+      sp.position.set(Math.cos(a) * 0.34, 1.0, -0.26);
       sp.rotation.z = -Math.cos(a) * 0.4;
       sp.scale.setScalar(0.9);
       body.add(sp);
     }
+    // low bull head sunk between the shoulders, with a jaw and a glow eye
+    const head = new THREE.Mesh(G.bruteHead, DARK);
+    head.position.set(0, 0.62, 0.22);
+    head.scale.set(1, 0.85, 1);
+    const jaw = new THREE.Mesh(G.bruteJaw, GUNMETAL);
+    jaw.position.set(0, 0.5, 0.32);
+    const eye = new THREE.Mesh(G.droneEye, glowMat(0xff8844, 1.8));
+    eye.scale.set(1.6, 0.7, 1);
+    eye.position.set(0, 0.66, 0.34);
+    // heavy arms: upper + forearm + oversized gauntlet fist
     const armL = new THREE.Group();
     const upperL = new THREE.Mesh(G.bruteArm, DARK);
-    const fistL = new THREE.Mesh(G.bruteFist, team);
-    fistL.scale.setScalar(1.3);
-    fistL.position.y = -0.42;
-    armL.add(upperL, fistL);
-    armL.position.set(0.5, 0.62, 0);
+    const foreL = new THREE.Mesh(G.bruteForearm, GUNMETAL);
+    foreL.position.y = -0.4;
+    const gauntL = new THREE.Mesh(G.bruteGauntlet, team);
+    gauntL.position.y = -0.62;
+    const fistL = new THREE.Mesh(G.bruteFist, DARK);
+    fistL.scale.setScalar(1.2);
+    fistL.position.y = -0.78;
+    armL.add(upperL, foreL, gauntL, fistL);
+    armL.position.set(0.54, 0.66, 0.02);
     const armR = armL.clone();
-    armR.position.x = -0.5;
-    const eye = new THREE.Mesh(G.droneEye, glowMat(0xff8844, 1.8));
-    eye.scale.set(0.85, 1, 1);
-    eye.position.set(0, 0.52, 0.36);
-    body.add(core, shL, shR, armL, armR, eye);
+    armR.position.x = -0.54;
+    body.add(core, chest, shL, shR, head, jaw, eye, armL, armR);
     anim = { kind: "brute", armL, armR };
   }
 
@@ -469,60 +629,98 @@ export function makeBuildingVisual(e, color, size) {
   };
 
   if (e.type === "hq") {
+    // command center: broad dark base, team-trim mid storey, control tower with
+    // a rotating radar dish, a corner landing pad, antennae greebles.
     const b1 = new THREE.Mesh(new THREE.BoxGeometry(2.7, 0.9, 2.7), base);
     b1.position.y = 0.45;
+    const trim = new THREE.Mesh(new THREE.BoxGeometry(2.74, 0.14, 2.74), team);
+    trim.position.y = 0.86;
     const b2 = new THREE.Mesh(new THREE.BoxGeometry(2.0, 0.6, 2.0), team);
     b2.position.y = 1.2;
-    const tower = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.65, 0.8, 8), base);
-    tower.position.y = 1.9;
+    // beveled tower shoulders break the stack
+    const shoulder = new THREE.Mesh(new THREE.CylinderGeometry(0.95, 1.05, 0.2, 8), GUNMETAL);
+    shoulder.position.y = 1.55;
+    const tower = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.68, 0.8, 10), base);
+    tower.position.y = 1.98;
+    const towerBand = new THREE.Mesh(new THREE.CylinderGeometry(0.52, 0.52, 0.1, 10), team);
+    towerBand.position.y = 2.28;
     const pole = new THREE.Mesh(G.pole, GUNMETAL);
     pole.position.y = 2.6;
     pole.scale.y = 0.6;
     const dish = new THREE.Mesh(G.dish, team);
     dish.position.y = 3.0;
-    const pad = new THREE.Mesh(new THREE.CylinderGeometry(0.9, 0.9, 0.1, 16), GUNMETAL);
+    const pad = new THREE.Mesh(new THREE.CylinderGeometry(0.9, 0.9, 0.1, 20), GUNMETAL);
     pad.position.set(0.8, 0.95, 0.8);
+    const padRing = new THREE.Mesh(new THREE.TorusGeometry(0.6, 0.05, 8, 20), glowMat(color, 0.7));
+    padRing.rotation.x = Math.PI / 2;
+    padRing.position.set(0.8, 1.01, 0.8);
+    const antL = new THREE.Mesh(G.antenna, GUNMETAL);
+    antL.position.set(-1.1, 0.9, -1.1);
+    const ventA = new THREE.Mesh(G.vent, GUNMETAL);
+    ventA.position.set(-0.8, 0.95, 0.9);
     b1.castShadow = b2.castShadow = tower.castShadow = true;
-    built.add(b1, b2, tower, pole, dish, pad);
+    built.add(b1, trim, b2, shoulder, tower, towerBand, pole, dish, pad, padRing, antL, ventA);
     lampAt(1.25, 0.95, 1.25); lampAt(-1.25, 0.95, 1.25);
     lampAt(1.25, 0.95, -1.25); lampAt(-1.25, 0.95, -1.25);
     anim.dish = dish;
   } else if (e.type === "depot") {
+    // supply silo: squat dark base, a glowing status band, a domed team-color
+    // storage cap with rivets, and a vent stack.
     const b1 = new THREE.Mesh(new THREE.BoxGeometry(1.7, 0.55, 1.7), base);
     b1.position.y = 0.28;
     const band = new THREE.Mesh(new THREE.BoxGeometry(1.74, 0.12, 1.74), glow);
     band.position.y = 0.58;
     const roof = new THREE.Mesh(new THREE.BoxGeometry(1.4, 0.3, 1.4), team);
     roof.position.y = 0.8;
-    const vent = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.2, 0.3, 8), GUNMETAL);
-    vent.position.set(0.4, 1.05, 0.4);
+    // low storage dome caps the depot (rounder read)
+    const dome = new THREE.Mesh(new THREE.SphereGeometry(0.62, 14, 8, 0, Math.PI * 2, 0, Math.PI / 2), team);
+    dome.scale.y = 0.6;
+    dome.position.y = 0.94;
+    const vent = new THREE.Mesh(G.vent, GUNMETAL);
+    vent.position.set(0.42, 1.05, 0.42);
+    // corner rivets / bumpers for scale
+    for (const [rx, rz] of [[0.72, 0.72], [-0.72, 0.72], [0.72, -0.72], [-0.72, -0.72]]) {
+      const r = new THREE.Mesh(G.lamp, GUNMETAL);
+      r.scale.setScalar(1.4);
+      r.position.set(rx, 0.28, rz);
+      built.add(r);
+    }
     b1.castShadow = roof.castShadow = true;
-    built.add(b1, band, roof, vent);
+    built.add(b1, band, roof, dome, vent);
     anim.band = band;
   } else if (e.type === "refinery") {
-    // industrial dome capping the geyser + two side pipes + intake ring
-    const dome = new THREE.Mesh(new THREE.SphereGeometry(0.85, 14, 10, 0, Math.PI * 2, 0, Math.PI / 2), base);
-    dome.position.y = 0.05;
-    dome.scale.y = 0.85;
-    const collar = new THREE.Mesh(new THREE.CylinderGeometry(0.55, 0.7, 0.3, 12), team);
-    collar.position.y = 0.55;
-    // green emissive intake ring (pulses while harvesting)
+    // gas extractor sitting ON the geyser: a squat industrial base skirt, a
+    // capping dome, a glowing green intake ring, side extraction pipes with
+    // tanks, and a short exhaust stack.
+    const skirt = new THREE.Mesh(new THREE.CylinderGeometry(0.9, 1.0, 0.24, 14), base);
+    skirt.position.y = 0.12;
+    const dome = new THREE.Mesh(new THREE.SphereGeometry(0.82, 16, 10, 0, Math.PI * 2, 0, Math.PI / 2), base);
+    dome.position.y = 0.2;
+    dome.scale.y = 0.8;
+    const collar = new THREE.Mesh(new THREE.CylinderGeometry(0.55, 0.7, 0.3, 14), team);
+    collar.position.y = 0.62;
+    // green emissive intake ring (pulses while harvesting) over the throat
     const intakeMat = glowMat(0x7cd94f, 0.9);
-    const intake = new THREE.Mesh(new THREE.TorusGeometry(0.42, 0.08, 8, 18), intakeMat);
+    const intake = new THREE.Mesh(new THREE.TorusGeometry(0.42, 0.08, 10, 22), intakeMat);
     intake.rotation.x = Math.PI / 2;
-    intake.position.y = 0.72;
-    const pipeGeo = new THREE.CylinderGeometry(0.14, 0.14, 0.7, 8);
+    intake.position.y = 0.78;
+    // extraction pipes flowing into side storage tanks
+    const pipeGeo = new THREE.CylinderGeometry(0.14, 0.14, 0.72, 10);
     const pipeL = new THREE.Mesh(pipeGeo, GUNMETAL);
-    pipeL.position.set(0.75, 0.35, 0.2); pipeL.rotation.z = 0.3;
+    pipeL.position.set(0.75, 0.4, 0.2); pipeL.rotation.z = 0.3;
     const pipeR = pipeL.clone();
-    pipeR.position.set(-0.75, 0.35, -0.2); pipeR.rotation.z = -0.3;
-    const capL = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.18, 0.14, 8), team);
-    capL.position.set(0.82, 0.7, 0.2);
-    const capR = capL.clone();
-    capR.position.set(-0.82, 0.7, -0.2);
+    pipeR.position.set(-0.75, 0.4, -0.2); pipeR.rotation.z = -0.3;
+    const tankL = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.22, 0.5, 12), team);
+    tankL.position.set(0.92, 0.55, 0.2);
+    const tankCapL = new THREE.Mesh(new THREE.SphereGeometry(0.22, 12, 6, 0, Math.PI * 2, 0, Math.PI / 2), GUNMETAL);
+    tankCapL.position.set(0.92, 0.8, 0.2);
+    const tankR = tankL.clone(); tankR.position.set(-0.92, 0.55, -0.2);
+    const tankCapR = tankCapL.clone(); tankCapR.position.set(-0.92, 0.8, -0.2);
+    const stack = new THREE.Mesh(G.vent, GUNMETAL);
+    stack.position.set(0.1, 0.95, -0.55);
     dome.castShadow = true;
-    built.add(dome, collar, intake, pipeL, pipeR, capL, capR);
-    lampAt(0.9, 0.1, 0.9); lampAt(-0.9, 0.1, -0.9);
+    built.add(skirt, dome, collar, intake, pipeL, pipeR, tankL, tankCapL, tankR, tankCapR, stack);
+    lampAt(0.95, 0.14, 0.95); lampAt(-0.95, 0.14, -0.95);
     anim.intake = intake; anim.intakeMat = intakeMat;
   } else if (e.type === "factory") {
     // wide heavy plant: stepped-roofline block, side ventilation stacks, huge
@@ -537,11 +735,19 @@ export function makeBuildingVisual(e, color, size) {
     const trim = new THREE.Mesh(new THREE.BoxGeometry(2.74, 0.12, 2.34), team);
     trim.position.y = 0.9;
     // side ventilation stacks (ribbed cylinders) on the flanks
-    const ventGeo = new THREE.CylinderGeometry(0.16, 0.18, 0.7, 8);
+    const ventGeo = new THREE.CylinderGeometry(0.16, 0.18, 0.7, 10);
     const ventL = new THREE.Mesh(ventGeo, GUNMETAL);
     ventL.position.set(1.15, 1.15, 0.55);
+    const ventCapL = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.16, 0.1, 10), TRIM);
+    ventCapL.position.set(1.15, 1.52, 0.55);
     const ventL2 = new THREE.Mesh(ventGeo, GUNMETAL);
     ventL2.position.set(1.15, 1.15, 0.05);
+    const ventCapL2 = ventCapL.clone(); ventCapL2.position.set(1.15, 1.52, 0.05);
+    // coolant pipe running along the flank (greeble)
+    const flankPipe = new THREE.Mesh(G.pipe, TRIM);
+    flankPipe.rotation.x = Math.PI / 2;
+    flankPipe.position.set(-1.36, 0.7, 0.1);
+    built.add(ventCapL, ventCapL2, flankPipe);
     // louvered side panel (team) for detail
     const louver = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.5, 1.4), team);
     louver.position.set(1.37, 0.55, -0.2);
@@ -571,11 +777,21 @@ export function makeBuildingVisual(e, color, size) {
     const edge = new THREE.Mesh(new THREE.TorusGeometry(1.56, 0.07, 8, 36), edgeMat);
     edge.rotation.x = Math.PI / 2;
     edge.position.y = 0.86;
-    const pylonGeo = new THREE.CylinderGeometry(0.14, 0.18, 0.75, 8);
+    const pylonGeo = new THREE.CylinderGeometry(0.14, 0.18, 0.75, 10);
     for (const [px, pz] of [[1.0, 1.0], [-1.0, 1.0], [1.0, -1.0], [-1.0, -1.0]]) {
       const py = new THREE.Mesh(pylonGeo, GUNMETAL);
       py.position.set(px, 0.37, pz);
-      built.add(py);
+      const foot = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.26, 0.12, 10), DARK);
+      foot.position.set(px, 0.06, pz);
+      built.add(py, foot);
+    }
+    // landing-pad marker lights ringing the deck (green guidance)
+    for (let i = 0; i < 8; i++) {
+      const a = (i / 8) * Math.PI * 2;
+      const mk = new THREE.Mesh(G.lamp, glowMat(0x7cd94f, 1.3));
+      mk.scale.setScalar(0.7);
+      mk.position.set(Math.cos(a) * 1.35, 0.87, Math.sin(a) * 1.35);
+      built.add(mk);
     }
     // central control nub + rotating radar beacon on a mast
     const nub = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.4, 0.5), team);
@@ -605,29 +821,44 @@ export function makeBuildingVisual(e, color, size) {
     // pod pivots on Y (yaw) toward the target; barrels recoil on -Z
     const pod = new THREE.Group();
     const podBox = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.34, 0.5), team);
-    const barrelGeo = new THREE.CylinderGeometry(0.06, 0.06, 0.75, 8).rotateX(Math.PI / 2).translate(0, 0, 0.38);
+    const podCheek = new THREE.Mesh(new THREE.CylinderGeometry(0.19, 0.19, 0.62, 10), team);
+    podCheek.rotation.z = Math.PI / 2;
+    podCheek.position.z = -0.02;               // rounded rear of the pod
+    // sensor eye between the barrels
+    const sensor = new THREE.Mesh(G.droneEye, glowMat(0xff5f4c, 1.6));
+    sensor.scale.set(1.4, 0.8, 1);
+    sensor.position.set(0, 0.06, 0.22);
+    const barrelGeo = new THREE.CylinderGeometry(0.06, 0.07, 0.75, 10).rotateX(Math.PI / 2).translate(0, 0, 0.38);
     const barrels = new THREE.Group();
     const bL = new THREE.Mesh(barrelGeo, GUNMETAL); bL.position.x = 0.16;
     const bR = new THREE.Mesh(barrelGeo, GUNMETAL); bR.position.x = -0.16;
     const tipL = new THREE.Mesh(G.tankMuzzle, glow); tipL.scale.setScalar(0.55); tipL.position.set(0.16, 0, 0.72);
     const tipR = tipL.clone(); tipR.position.x = -0.16;
     barrels.add(bL, bR, tipL, tipR);
-    pod.add(podBox, barrels);
+    pod.add(podBox, podCheek, sensor, barrels);
     pod.position.y = 1.0;
     built.add(skirt, column, band, pod);
     anim.pod = pod; anim.podBarrels = barrels; anim.barrelHome = 0;
-  } else { // barracks
+  } else { // barracks — infantry training block: dark hall, team roof cap, big
+    // lit bay door with a frame, a comms mast and a rooftop vent.
     const b1 = new THREE.Mesh(new THREE.BoxGeometry(2.5, 1.15, 2.1), base);
     b1.position.y = 0.58;
+    const trim = new THREE.Mesh(new THREE.BoxGeometry(2.54, 0.12, 2.14), team);
+    trim.position.y = 1.02;
     const roof = new THREE.Mesh(new THREE.BoxGeometry(2.6, 0.25, 2.3), team);
     roof.position.y = 1.28;
     roof.rotation.z = 0.06;
+    // recessed door surround (dark) + glowing bay door
+    const surround = new THREE.Mesh(new THREE.BoxGeometry(1.05, 1.0, 0.1), DARK);
+    surround.position.set(0, 0.5, 1.02);
     const door = new THREE.Mesh(new THREE.BoxGeometry(0.85, 0.8, 0.08), glow);
     door.position.set(0, 0.42, 1.06);
     const pole = new THREE.Mesh(G.pole, GUNMETAL);
     pole.position.set(-1.0, 1.9, -0.8);
+    const vent = new THREE.Mesh(G.vent, GUNMETAL);
+    vent.position.set(0.85, 1.5, -0.7);
     b1.castShadow = roof.castShadow = true;
-    built.add(b1, roof, door, pole);
+    built.add(b1, trim, roof, surround, door, pole, vent);
     lampAt(-1.0, 2.62, -0.8);
     anim.door = door;
   }

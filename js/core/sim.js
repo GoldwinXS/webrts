@@ -155,6 +155,21 @@ export class Sim {
   }
 
   nearestEntity(x, y, maxDist, pred) {
+    if (this._shCells && maxDist <= FP * 6) {
+      let best = null, bestD = maxDist * maxDist;
+      for (const e of this.shNeighbors(x, y)) {
+        if (!pred(e)) continue;
+        const d = dist2(x, y, e.x, e.y);
+        if (d < bestD) { bestD = d; best = e; }
+      }
+      for (const e of this.entities) {
+        if (e.unit) continue;
+        if (!pred(e)) continue;
+        const d = dist2(x, y, e.x, e.y);
+        if (d < bestD) { bestD = d; best = e; }
+      }
+      return best;
+    }
     let best = null, bestD = maxDist * maxDist;
     for (const e of this.entities) {
       if (!pred(e)) continue;
@@ -1131,38 +1146,84 @@ export class Sim {
     return false;
   }
 
-  // Push overlapping units apart. Pairwise in id order — deterministic.
-  separate() {
-    const es = this.entities;
-    for (let i = 0; i < es.length; i++) {
-      const a = es[i];
-      if (!a.unit) continue;
-      for (let j = i + 1; j < es.length; j++) {
-        const b = es[j];
-        if (!b.unit) continue;
-        // separation is layered: air pushes air, ground pushes ground, and the
-        // two never shove each other (a flyer can hover over a tank)
-        if (!!a.fly !== !!b.fly) continue;
-        const min = a.radius + b.radius;
-        const dx = a.x - b.x, dy = a.y - b.y;
-        if (Math.abs(dx) >= min || Math.abs(dy) >= min) continue;
-        const dsq = dx * dx + dy * dy;
-        if (dsq >= min * min) continue;
-        let px, py;
-        if (dsq === 0) { px = (a.id & 1) ? 8 : -8; py = (b.id & 1) ? 8 : -8; }
-        else {
-          const dd = isqrt(dsq);
-          const push = (min - dd) >> 1;
-          px = ((dx * push) / dd) | 0;
-          py = ((dy * push) / dd) | 0;
-        }
-        a.x = this.clampX(a.x + px); a.y = this.clampY(a.y + py);
-        b.x = this.clampX(b.x - px); b.y = this.clampY(b.y - py);
+  // ---------- spatial hash grid ----------
+  buildSpatialHash() {
+    const cs = 2;
+    this._shCs = cs;
+    const gw = Math.ceil(this.map.w / cs) + 1;
+    const gh = Math.ceil(this.map.h / cs) + 1;
+    this._shGw = gw;
+    this._shCells = new Array(gw * gh);
+    for (let i = 0; i < gw * gh; i++) this._shCells[i] = null;
+    for (const e of this.entities) {
+      if (!e.unit) continue;
+      const cx = (fpToTile(e.x) / cs) | 0;
+      const cy = (fpToTile(e.y) / cs) | 0;
+      const idx = cy * gw + cx;
+      if (!this._shCells[idx]) this._shCells[idx] = [];
+      this._shCells[idx].push(e);
+    }
+  }
+
+  shNeighbors(x, y) {
+    const cs = this._shCs, gw = this._shGw;
+    const cx = (fpToTile(x) / cs) | 0;
+    const cy = (fpToTile(y) / cs) | 0;
+    const out = [];
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        const ix = cx + dx, iy = cy + dy;
+        if (ix < 0 || iy < 0) continue;
+        const cell = this._shCells[iy * gw + ix];
+        if (cell) for (let k = 0; k < cell.length; k++) out.push(cell[k]);
       }
     }
-    // keep GROUND units off blocked tiles after pushes (flyers ignore terrain)
+    return out;
+  }
+
+  separate() {
+    this.buildSpatialHash();
+    const cs = this._shCs, gw = this._shGw;
+    const cells = this._shCells;
+    for (let ci = 0; ci < cells.length; ci++) {
+      const cell = cells[ci];
+      if (!cell) continue;
+      for (let ai = 0; ai < cell.length; ai++) {
+        const a = cell[ai];
+        const cx = (fpToTile(a.x) / cs) | 0;
+        const cy = (fpToTile(a.y) / cs) | 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            const ix = cx + dx, iy = cy + dy;
+            if (ix < 0 || iy < 0) continue;
+            const neighbors = cells[iy * gw + ix];
+            if (!neighbors) continue;
+            for (let bi = 0; bi < neighbors.length; bi++) {
+              const b = neighbors[bi];
+              if (b.id <= a.id) continue;
+              if (!!a.fly !== !!b.fly) continue;
+              const min = a.radius + b.radius;
+              const ddx = a.x - b.x, ddy = a.y - b.y;
+              if (Math.abs(ddx) >= min || Math.abs(ddy) >= min) continue;
+              const dsq = ddx * ddx + ddy * ddy;
+              if (dsq >= min * min) continue;
+              let px, py;
+              if (dsq === 0) { px = (a.id & 1) ? 8 : -8; py = (b.id & 1) ? 8 : -8; }
+              else {
+                const dd = isqrt(dsq);
+                const push = (min - dd) >> 1;
+                px = ((ddx * push) / dd) | 0;
+                py = ((ddy * push) / dd) | 0;
+              }
+              a.x = this.clampX(a.x + px); a.y = this.clampY(a.y + py);
+              b.x = this.clampX(b.x - px); b.y = this.clampY(b.y - py);
+            }
+          }
+        }
+      }
+    }
     const { w } = this.map;
-    for (const u of es) {
+    for (const u of this.entities) {
       if (!u.unit || u.fly) continue;
       if (this.blocked[fpToTile(u.y) * w + fpToTile(u.x)]) {
         const free = nearestFree(this.blocked, w, this.map.h, fpToTile(u.x), fpToTile(u.y));
@@ -1271,11 +1332,28 @@ export class Sim {
     h.mix(this.tick);
     h.mix(this.minerals[0]); h.mix(this.minerals[1]);
     h.mix(this.gas[0]); h.mix(this.gas[1]);
-    h.mix(this.upgrades[0]); h.mix(this.upgrades[1]);   // researched-upgrade masks
+    h.mix(this.upgrades[0]); h.mix(this.upgrades[1]);
     for (const e of this.entities) {
       h.mix(e.id); h.mix(e.x); h.mix(e.y); h.mix(e.hp | 0);
-      if (e.amount !== undefined) h.mix(e.amount | 0);   // resource depletion
-      if (e.unit) { h.mix(e.abilityCd | 0); h.mix(e.sieged | 0); } // ability sim state
+      if (e.amount !== undefined) h.mix(e.amount | 0);
+      if (e.unit) {
+        h.mix(e.abilityCd | 0); h.mix(e.sieged | 0);
+        h.mix(e.cooldown | 0); h.mix(e.carry | 0); h.mix(e.carryKind | 0);
+        h.mix(e.gatherTimer | 0);
+        h.mix(e.stimUntil | 0); h.mix(e.burnUntil | 0);
+        h.mix(e.transformUntil | 0); h.mix(e.leapUntil | 0);
+        h.mix(e.channelUntil | 0);
+        h.mix(e.order?.kind?.charCodeAt(0) || 0);
+        h.mix(e.order?.targetId || 0);
+      }
+      if (e.building) {
+        h.mix(e.done ? 1 : 0); h.mix(e.progress | 0);
+        h.mix(e.cooldown | 0); h.mix(e.queue.length);
+        h.mix(e.geyserId | 0);
+        const head = e.queue[0];
+        if (head) { h.mix(head.type?.charCodeAt(0) || 0); h.mix(head.remaining | 0); }
+        if (e.rally) { h.mix(e.rally.x); h.mix(e.rally.y); h.mix(e.rally.targetId || 0); }
+      }
     }
     return h.value();
   }

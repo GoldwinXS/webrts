@@ -101,6 +101,23 @@ export class Hud {
       this.toastInfo("Keybindings reset to defaults");
     });
 
+    // Graphics quality selector
+    this.$quality = document.getElementById("opt-quality");
+    const QKEY = "webrts-quality";
+    let qVal = "medium";
+    try { qVal = localStorage.getItem(QKEY) || "medium"; } catch {}
+    this.$quality.querySelectorAll(".seg-btn").forEach((b) =>
+      b.classList.toggle("is-active", b.dataset.val === qVal));
+    this.applyQuality(qVal);
+    this.$quality.addEventListener("click", (e) => {
+      const btn = e.target.closest(".seg-btn");
+      if (!btn) return;
+      this.$quality.querySelectorAll(".seg-btn").forEach((b) => b.classList.toggle("is-active", b === btn));
+      const v = btn.dataset.val;
+      try { localStorage.setItem(QKEY, v); } catch {}
+      this.applyQuality(v);
+    });
+
     // row currently capturing a key: { action, slotIndex? } or null
     this.listening = null;
 
@@ -151,6 +168,31 @@ export class Hud {
   closeSettings() {
     this.listening = null;
     this.$settings.classList.add("hidden");
+  }
+
+  applyQuality(level) {
+    const r = this.renderer;
+    if (!r) return;
+    if (level === "low") {
+      r.renderer.shadowMap.enabled = false;
+      if (r.sun) r.sun.castShadow = false;
+      if (r.bloom) r.bloom.strength = 0;
+      r.renderer.setPixelRatio(Math.min(devicePixelRatio, 1));
+    } else if (level === "high") {
+      r.renderer.shadowMap.enabled = true;
+      if (r.sun) r.sun.castShadow = true;
+      if (r.sun) r.sun.shadow.mapSize.set(4096, 4096);
+      if (r.bloom) r.bloom.strength = 0.5;
+      r.renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    } else {
+      r.renderer.shadowMap.enabled = true;
+      if (r.sun) r.sun.castShadow = true;
+      if (r.sun) r.sun.shadow.mapSize.set(2048, 2048);
+      if (r.bloom) r.bloom.strength = 0.35;
+      r.renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
+    }
+    r.renderer.setSize(innerWidth, innerHeight);
+    if (r.composer) r.composer.setSize(innerWidth, innerHeight);
   }
 
   // Rebindable actions and their display labels. cameraSlots is expanded into
@@ -759,10 +801,16 @@ export class Hud {
     const last = this.blips[this.blips.length - 1];
     if (last && Math.abs(last.x - tx) < 5 && Math.abs(last.y - ty) < 5) return;
     this.blips.push({ x: tx, y: ty, t: performance.now() });
-    // audible alarm only if the fight is off-screen
     const cam = this.renderer.camera;
     const d = Math.hypot(cam.tx - txFp / 256, cam.tz - tyFp / 256);
-    if (d > 16) this.audio.underAttack();
+    if (d > 16) {
+      this.audio.underAttack();
+      const now = performance.now();
+      if (!this._lastAttackAlert || now - this._lastAttackAlert > 5000) {
+        this._lastAttackAlert = now;
+        this.toastInfo("⚠ Under attack!", true);
+      }
+    }
   }
 
   minimapClick(e) {
@@ -801,9 +849,9 @@ export class Hud {
     setTimeout(() => el.remove(), 2200);
   }
 
-  toastInfo(msg) {
+  toastInfo(msg, warning) {
     const el = document.createElement("div");
-    el.className = "toast info";
+    el.className = "toast info" + (warning ? " toast-warn" : "");
     el.textContent = msg;
     this.$toasts.appendChild(el);
     setTimeout(() => el.remove(), 1600);

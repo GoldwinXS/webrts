@@ -150,6 +150,7 @@ function startGame(mode, seed, netConn, opts) {
   window.RTS = {
     game, sim: game.sim, renderer, input, hud, rebind,
     step(n = 1) { for (let i = 0; i < n; i++) game.tryStep(); },
+    saveReplay: () => game.exportReplay(),
   };
 
   showMapStatus(hud, game.sim, opts);
@@ -207,3 +208,6 @@ $("btn-join").addEventListener("click", async () => {
 });
 
 $("btn-again")?.addEventListener("click", () => location.reload());
+$("btn-replay")?.addEventListener("click", () => {
+  try { window.RTS?.saveReplay?.(); } catch (e) { console.error("Replay save failed:", e); }
+});

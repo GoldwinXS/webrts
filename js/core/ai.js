@@ -16,18 +16,36 @@ export class AI {
   update(sim) {
     if (sim.tick % 10 !== 0 || sim.winner >= 0) return [];
     const cmds = [];
-    const mine = sim.entities.filter((e) => e.owner === this.pid);
-    const workers = mine.filter((e) => e.type === "worker");
-    const army = mine.filter((e) => e.unit && e.type !== "worker");
-    const hqs = mine.filter((e) => e.type === "hq" && e.done);
-    const barracks = mine.filter((e) => e.type === "barracks");
+
+    // Single-pass entity bucketing (replaces 8+ filter() calls)
+    const workers = [], army = [], hqs = [], barracks = [], refineries = [];
+    const factories = [], starports = [], turrets = [], sites = [];
+    let enemyBuilding = null;
+    for (const e of sim.entities) {
+      if (e.owner === this.pid) {
+        if (e.unit) {
+          if (e.type === "worker") workers.push(e);
+          else army.push(e);
+        } else if (e.building) {
+          if (!e.done) { sites.push(e); continue; }
+          switch (e.type) {
+            case "hq": hqs.push(e); break;
+            case "barracks": barracks.push(e); break;
+            case "refinery": refineries.push(e); break;
+            case "factory": factories.push(e); break;
+            case "starport": starports.push(e); break;
+            case "turret": turrets.push(e); break;
+          }
+        }
+      } else if (e.building && e.owner >= 0 && e.owner !== this.pid && !enemyBuilding) {
+        enemyBuilding = e;
+      }
+    }
     const barracksDone = barracks.some((b) => b.done);
-    const refineries = mine.filter((e) => e.type === "refinery");
-    const factories = mine.filter((e) => e.type === "factory");
-    const sites = mine.filter((e) => e.building && !e.done);
     const s = sim.supplyOf(this.pid);
     if (!hqs.length) return cmds;
     const hq = hqs[0];
+    const own = this.pid;
 
     // 1. idle workers go mine
     for (const w of workers) {
@@ -70,7 +88,7 @@ export class AI {
         if (w) cmds.push({ t: "resume", ids: [w.id], targetId: site.id });
       }
     }
-    const doneRefineries = refineries.filter((r) => r.done);
+    const doneRefineries = refineries;
     if (doneRefineries.length) {
       const ref = doneRefineries[0];
       const onGas = workers.filter((w) =>
@@ -91,8 +109,22 @@ export class AI {
       this.tryBuild(sim, cmds, workers, "factory", hq);
     }
 
-    // 5. train army: mostly marines, some brutes. Guard every train on gas so
-    // a gas-poor AI never soft-locks trying to afford a unit it can't pay for.
+    // 4d. a starport once a factory is done (unlocks air units)
+    const starportComing = sites.some((b) => b.type === "starport");
+    const factoryDone = factories.some((f) => f.done);
+    if (factoryDone && starports.length === 0 && !starportComing &&
+        sim.canAfford(this.pid, BUILDINGS.starport.cost, BUILDINGS.starport.gasCost)) {
+      this.tryBuild(sim, cmds, workers, "starport", hq);
+    }
+
+    // 4e. build 1-2 turrets for base defense once a barracks is up
+    const turretComing = sites.some((b) => b.type === "turret");
+    if (barracksDone && turrets.length < 2 && !turretComing &&
+        sim.canAfford(this.pid, BUILDINGS.turret.cost)) {
+      this.tryBuild(sim, cmds, workers, "turret", hq);
+    }
+
+    // 5. train army: mostly marines, some brutes.
     for (const r of barracks) {
       if (!r.done || r.queue.length > 1) continue;
       const type = (sim.tick % 40 === 0) ? "brute" : "marine";
@@ -109,12 +141,17 @@ export class AI {
         cmds.push({ t: "train", buildingId: fac.id, unit: "tank" });
       }
     }
-    // (air units skipped for the AI for now — follow-up: build a starport and
-    // mix wraiths/banshees, and use turrets for base anti-air defense.)
+    // 5c. air units: mix wraiths and banshees from starports
+    for (const sp of starports) {
+      if (!sp.done || sp.queue.length > 0) continue;
+      const type = (sim.tick % 60 === 0) ? "banshee" : "wraith";
+      const d = UNITS[type];
+      if (sim.canAfford(this.pid, d.cost, d.gasCost || 0) && s.used + d.supply <= s.cap) {
+        cmds.push({ t: "train", buildingId: sp.id, unit: type });
+      }
+    }
 
-    // 5c. research: stims once a barracks + refinery are up; siegetech once a
-    // factory is done. Crude one-shot: queue on the first idle-enough building.
-    const own = this.pid;
+    // 5d. research: stims, siegetech, afterburners
     if (barracksDone && doneRefineries.length && !(sim.upgrades[own] & UPGRADE_BITS.stims) &&
         !sim.upgradeQueued(own, "stims")) {
       const bk = barracks.find((b) => b.done && b.queue.length < 2);
@@ -127,15 +164,19 @@ export class AI {
       const u = UPGRADES.siegetech;
       if (fac && sim.canAfford(own, u.cost, u.gasCost)) cmds.push({ t: "research", buildingId: fac.id, research: "siegetech" });
     }
+    if (starports.some((sp) => sp.done) && !(sim.upgrades[own] & UPGRADE_BITS.afterburners) &&
+        !sim.upgradeQueued(own, "afterburners")) {
+      const sp = starports.find((sp) => sp.done && sp.queue.length < 2);
+      const u = UPGRADES.afterburners;
+      if (sp && sim.canAfford(own, u.cost, u.gasCost)) cmds.push({ t: "research", buildingId: sp.id, research: "afterburners" });
+    }
 
-    // 5d. ability micro. Stim marines when the attack wave is within 8 tiles of
-    // an enemy building. Siege tanks when >=2 enemies are within 7 tiles.
+    // 5e. ability micro. Stim marines near enemy buildings.
     if (sim.upgrades[own] & UPGRADE_BITS.stims) {
-      const enemyB = sim.entities.find((e) => e.building && e.owner >= 0 && e.owner !== own);
       const marines = army.filter((u) => u.type === "marine" && u.abilityCd === 0 &&
         sim.tick >= (u.stimUntil || 0) && u.hp > 12);
-      if (enemyB && marines.length) {
-        const near = marines.filter((u) => dist2(u.x, u.y, enemyB.x, enemyB.y) <= (FP * 8) * (FP * 8));
+      if (enemyBuilding && marines.length) {
+        const near = marines.filter((u) => dist2(u.x, u.y, enemyBuilding.x, enemyBuilding.y) <= (FP * 8) * (FP * 8));
         if (near.length) cmds.push({ t: "ability", ids: near.map((u) => u.id), ability: "stim" });
       }
     }
@@ -162,17 +203,41 @@ export class AI {
       }
     }
 
-    // 6. defense: enemy near base -> everyone in the army responds
+    // 6. defense: enemy near base -> army responds; retreat if outnumbered
     const threat = sim.nearestEntity(hq.x, hq.y, FP * 12,
       (e) => e.owner >= 0 && e.owner !== this.pid && e.unit);
     if (threat && army.length) {
+      const enemyNear = sim.entities.filter((e) => e.owner >= 0 && e.owner !== own && e.unit &&
+        dist2(hq.x, hq.y, e.x, e.y) <= (FP * 15) * (FP * 15)).length;
+      if (enemyNear > army.length + 4) {
+        const allDef = [...army, ...workers.filter((w) => w.hp > 20)];
+        const rally = sim.map.starts[own];
+        cmds.push({ t: "move", ids: allDef.map((u) => u.id), x: tileToFp(rally.x), y: tileToFp(rally.y) });
+        return cmds;
+      }
       cmds.push({ t: "attackmove", ids: army.map((u) => u.id), x: threat.x, y: threat.y });
       return cmds;
     }
 
+    // 6b. marine kiting: back off from melee enemies after firing
+    if (sim.tick % 5 === 0) {
+      for (const m of army) {
+        if (m.type !== "marine" || m.cooldown <= 4) continue;
+        const e = sim.nearestEntity(m.x, m.y, FP * 2,
+          (e) => e.owner >= 0 && e.owner !== own && e.unit && !e.fly);
+        if (e && UNITS[e.type] && UNITS[e.type].range < FP) {
+          const dx = m.x - e.x, dy = m.y - e.y;
+          const dd = Math.max(1, Math.hypot(dx, dy));
+          cmds.push({ t: "move", ids: [m.id], x: m.x + ((dx / dd * FP * 1.5) | 0), y: m.y + ((dy / dd * FP * 1.5) | 0), q: 1 });
+        }
+      }
+    }
+
     // 7. attack waves, growing over time
     if (sim.tick >= this.nextWave && army.length >= this.waveSize) {
-      const target = this.enemyBase(sim);
+      const target = enemyBuilding
+        ? { x: enemyBuilding.x, y: enemyBuilding.y }
+        : this.enemyBase(sim);
       if (target) {
         cmds.push({ t: "attackmove", ids: army.map((u) => u.id), x: target.x, y: target.y });
         this.nextWave = sim.tick + 900;

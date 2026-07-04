@@ -8,6 +8,23 @@ const DIRS = [
   [1, 1, 14], [1, -1, 14], [-1, 1, 14], [-1, -1, 14],
 ];
 
+// Pooled A* buffers — reused across calls to avoid GC pressure.
+let _g = null, _parent = null, _closed = null, _heap = [];
+let _poolSize = 0;
+
+function ensurePool(size) {
+  if (_poolSize >= size) {
+    _g.fill(0x7fffffff, 0, size);
+    _parent.fill(-1, 0, size);
+    _closed.fill(0, 0, size);
+    return;
+  }
+  _g = new Int32Array(size).fill(0x7fffffff);
+  _parent = new Int32Array(size).fill(-1);
+  _closed = new Uint8Array(size);
+  _poolSize = size;
+}
+
 // blocked: Uint8Array(w*h), nonzero = impassable.
 export function findPath(blocked, w, h, sxFp, syFp, txFp, tyFp) {
   const sx = fpToTile(sxFp), sy = fpToTile(syFp);
@@ -23,14 +40,13 @@ export function findPath(blocked, w, h, sxFp, syFp, txFp, tyFp) {
   }
 
   const size = w * h;
-  const g = new Int32Array(size).fill(0x7fffffff);
-  const parent = new Int32Array(size).fill(-1);
-  const closed = new Uint8Array(size);
+  ensurePool(size);
+  const g = _g, parent = _parent, closed = _closed;
+  const heap = _heap; heap.length = 0;
   const start = sy * w + sx, goal = ty * w + tx;
   g[start] = 0;
 
   // Binary heap keyed by f = g + heuristic, tie-break by node index.
-  const heap = [];
   const push = (f, n) => {
     heap.push([f, n]);
     let i = heap.length - 1;

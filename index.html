@@ -161,6 +161,7 @@
     <div class="menu-box">
       <h1></h1>
       <button id="btn-again" class="menu-btn primary">Play Again</button>
+      <button id="btn-replay" class="menu-btn">Save Replay</button>
     </div>
   </div>
 
@@ -191,6 +192,18 @@
             <span>Sound</span>
             <button id="set-mute" class="toggle-btn" type="button">On</button>
           </div>
+        </section>
+        <section class="settings-section">
+          <div class="settings-label">Graphics Quality</div>
+          <div class="map-opt-row" style="margin-top:8px">
+            <span class="map-opt-label">Quality</span>
+            <div class="seg" id="opt-quality" role="group" aria-label="Graphics quality">
+              <button type="button" class="seg-btn" data-val="low">Low</button>
+              <button type="button" class="seg-btn is-active" data-val="medium">Medium</button>
+              <button type="button" class="seg-btn" data-val="high">High</button>
+            </div>
+          </div>
+          <div style="margin-top:6px;font-size:11px;color:var(--muted)">Low: no shadows/bloom. High: 4K shadows + full bloom.</div>
         </section>
         <section class="settings-section">
           <div class="settings-keyhead">

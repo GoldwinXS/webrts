@@ -31,6 +31,9 @@ export class Game {
     this.onEvents = null;    // renderer hook
     this.onStall = null;     // hud hook
 
+    // replay recording: store every command bundle with its tick
+    this.replay = { seed, opts: opts || {}, mode, ticks: [] };
+
     if (this.net) {
       // pre-seed the first DELAY ticks so both sides can start stepping
       for (let t = 0; t < DELAY; t++) {
@@ -104,6 +107,7 @@ export class Game {
         : [{ pid: 0, cmds: theirs }, { pid: 1, cmds: mine }];
       this.sim.step(bundle);
       this.buffers[0].delete(t); this.buffers[1].delete(t);
+      this.replay.ticks.push({ t, bundle });
     } else {
       // local play: apply immediately, AI acts as player 1
       const bundle = [
@@ -111,6 +115,7 @@ export class Game {
         { pid: 1, cmds: this.ai ? this.ai.update(this.sim) : [] },
       ];
       this.sim.step(bundle);
+      this.replay.ticks.push({ t, bundle });
     }
 
     if (this.sim.events.length) this.onEvents?.(this.sim.events);
@@ -126,5 +131,35 @@ export class Game {
       this.desynced = true;
       this.onDesync?.();
     }
+  }
+
+  exportReplay() {
+    const blob = new Blob([JSON.stringify(this.replay)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `webrts-replay-${Date.now()}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  static playback(replayData, onEvents) {
+    const sim = new Sim(replayData.seed, replayData.opts || {});
+    let idx = 0;
+    const ticks = replayData.ticks;
+    return {
+      sim,
+      step() {
+        if (idx >= ticks.length) return false;
+        const { t, bundle } = ticks[idx];
+        while (sim.tick < t) sim.step(null);
+        sim.step(bundle);
+        idx++;
+        if (sim.events.length && onEvents) onEvents(sim.events);
+        return idx < ticks.length;
+      },
+      get progress() { return idx / ticks.length; },
+      get done() { return idx >= ticks.length; },
+    };
   }
 }
