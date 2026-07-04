@@ -110,6 +110,7 @@ function prepShowcase(game) {
   sim.fog[0].fill(2);
   sim.fog[1].fill(2);
   game.ai = null;                 // nothing plays player 1
+  sim.noGameOver = true;          // player 1 has no buildings; don't declare a winner
   sim.minerals = [99999, 99999];  // so you can freely train from the gallery
   sim.gas = [99999, 99999];
 }

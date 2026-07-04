@@ -1317,7 +1317,7 @@ export class Sim {
   // ---------- end conditions & desync detection ----------
 
   checkGameOver() {
-    if (this.winner >= 0 || this.tick < 10) return;
+    if (this.noGameOver || this.winner >= 0 || this.tick < 10) return;
     const alive = [0, 0];
     for (const e of this.entities) {
       if (e.building && e.owner >= 0) alive[e.owner]++;
