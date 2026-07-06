@@ -1,6 +1,7 @@
 // DOM HUD: resource bar, selection panel, command card, minimap, toasts.
 import { FP, fpToTile } from "../core/fixed.js";
 import { UNITS, BUILDINGS, PLAYER_COLORS, MAX_QUEUE, ABILITIES, UPGRADES, UPGRADE_BITS } from "../core/data.js";
+import { THEMES } from "../core/map.js";
 import { KEYS, DEFAULTS, rebind, resetBinds } from "./keys.js";
 
 export class Hud {
@@ -28,6 +29,7 @@ export class Hud {
 
     this.minimap = document.getElementById("minimap");
     this.mmCtx = this.minimap.getContext("2d");
+    this.buildMinimapPalette();
     this.minimap.addEventListener("pointerdown", (e) => { if (e.button === 0) this.minimapClick(e); });
     this.minimap.addEventListener("pointermove", (e) => { if (e.buttons & 1) this.minimapClick(e); });
     this.minimap.addEventListener("contextmenu", (e) => {
@@ -743,21 +745,44 @@ export class Hud {
 
   // ---------- minimap ----------
 
+  // Theme-derived minimap palette (matches the bright battlefield instead of
+  // the old hardcoded near-black). Ground gets one tone per elevation level so
+  // height reads at a glance; explored-but-hidden is dimmed+cooled; unexplored
+  // is a soft haze derived from the theme fog (same language as the 3D view).
+  buildMinimapPalette() {
+    const th = THEMES[this.sim.map.theme || 0] || THEMES[0];
+    const mix = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+    const lift = (c, k) => c.map((v) => Math.min(255, v + (255 - v) * k));
+    const css = (c) => `rgb(${c[0] | 0},${c[1] | 0},${c[2] | 0})`;
+    // explored-but-hidden: dimmed 62% and pulled toward a cool slate
+    const dimmed = (c) => css(mix(c, [58, 72, 94], 0.42).map((v) => v * 0.9));
+    this.mmGround = [];                              // [lvl] -> [explored, visible]
+    for (let lvl = 0; lvl <= 3; lvl++) {
+      const tone = lift(mix(th.ground, th.groundHi, Math.min(1, lvl / 3)), lvl * 0.10);
+      this.mmGround.push([dimmed(tone), css(tone)]);
+    }
+    const rockC = [(th.rock >> 16) & 255, (th.rock >> 8) & 255, th.rock & 255];
+    this.mmRock = [dimmed(rockC), css(rockC)];
+    const fogC = [(th.fog >> 16) & 255, (th.fog >> 8) & 255, th.fog & 255];
+    this.mmUnexplored = css(fogC.map((v) => v * 0.82)); // soft haze, below visible-tone brightness
+  }
+
   drawMinimap() {
-    const { w, h, rock } = this.sim.map;
+    const { w, h, rock, height } = this.sim.map;
     const S = this.minimap.width / w;
     const ctx = this.mmCtx;
     const fog = this.sim.fog[this.pid];
-    ctx.fillStyle = "#06090d";
+    ctx.fillStyle = this.mmUnexplored;
     ctx.fillRect(0, 0, this.minimap.width, this.minimap.height);
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
         const i = y * w + x;
         const f = fog[i];
         if (f === 0) continue;
+        const vis = f === 2 ? 1 : 0;
         ctx.fillStyle = rock[i]
-          ? (f === 2 ? "#3d444d" : "#262b31")
-          : (f === 2 ? "#28402c" : "#182920");
+          ? this.mmRock[vis]
+          : this.mmGround[height ? Math.min(3, height[i]) : 0][vis];
         ctx.fillRect(x * S, y * S, S + 0.5, S + 0.5);
       }
     }
@@ -765,7 +790,7 @@ export class Hud {
       const tx = fpToTile(e.x), ty = fpToTile(e.y);
       const f = fog[ty * w + tx];
       if (e.type === "mineral") {
-        if (f >= 1) { ctx.fillStyle = "#4adfd2"; ctx.fillRect(tx * S, ty * S, S, S); }
+        if (f >= 1) { ctx.fillStyle = "#0e9c8d"; ctx.fillRect(tx * S, ty * S, S, S); }
         continue;
       }
       if (e.owner === this.pid || f === 2 || (e.building && (e.seenBy & (1 << this.pid)))) {
@@ -787,9 +812,9 @@ export class Hud {
       ctx.stroke();
     }
 
-    // camera target
+    // camera target (dark ink — white was invisible on the bright minimap)
     const cam = this.renderer.camera;
-    ctx.strokeStyle = "rgba(255,255,255,0.7)";
+    ctx.strokeStyle = "rgba(20,30,42,0.85)";
     ctx.lineWidth = 1;
     const vw = cam.dist * 0.9 * S, vh = cam.dist * 0.6 * S;
     ctx.strokeRect(cam.tx * S - vw / 2, cam.tz * S - vh / 2, vw, vh);

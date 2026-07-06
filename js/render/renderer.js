@@ -16,7 +16,7 @@ import { THEMES } from "../core/map.js";
 import { Effects } from "./fx.js";
 
 const W2 = (v) => v / FP;   // fp -> world units (1 tile = 1.0)
-const PX = 16;              // ground texture pixels per tile (56*16=896, fine)
+const PX = 32;              // ground texture pixels per tile (32px seamless tiles)
 const HSCALE = 1.2;         // world units of elevation per height level
 
 // clamp a 0..255 channel
@@ -25,6 +25,18 @@ const CH = (v) => (v < 0 ? 0 : v > 255 ? 255 : v | 0);
 const lift = (c, k) => [CH(c[0] + (255 - c[0]) * k), CH(c[1] + (255 - c[1]) * k), CH(c[2] + (255 - c[2]) * k)];
 const rgbStr = (c) => `rgb(${c[0] | 0},${c[1] | 0},${c[2] | 0})`;
 const hexToRgb = (h) => [(h >> 16) & 255, (h >> 8) & 255, h & 255];
+// Deterministic hash for pixel-art tile textures -- same input = same shade,
+// so the PXxPX pattern repeats identically on every tile (Minecraft-style).
+const pixHash = (x, y) => {
+  let h = (x * 0x9E3779B1 + y * 0x85EBCA6B) | 0;
+  h = (h ^ (h >>> 16)) | 0;
+  h = Math.imul(h, 0x9E3779B1) | 0;
+  return (h ^ (h >>> 15)) >>> 0;
+};
+// Proportional shade: k>0 lightens toward white, k<0 darkens by multiplying.
+const shade = (c, k) => k >= 0
+  ? lift(c, k)
+  : [CH(c[0] * (1 + k)), CH(c[1] * (1 + k)), CH(c[2] * (1 + k))];
 
 export class Renderer {
   constructor(canvas, sim, localPlayer) {
@@ -36,7 +48,7 @@ export class Renderer {
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.25;
+    this.renderer.toneMappingExposure = 1.1;   // brighter palette -> less exposure
 
     this.theme = THEMES[sim.map.theme || 0] || THEMES[0];
     this.scene = new THREE.Scene();
@@ -58,7 +70,7 @@ export class Renderer {
     this.buildGround();
     this.buildBarriers();
     this.buildDecos();
-    this.buildStars();
+    this.buildSky();      // bright daytime gradient dome (replaces deep-space stars)
     this.fx = new Effects(this.scene);
     this.fx.heightAt = (x, z) => this.heightAt(x, z);
 
@@ -88,8 +100,8 @@ export class Renderer {
   buildLights() {
     // Toon pass: raised ambient lifts shadow floors (softer, lighter shadows)
     // so the stepped gradient ramps read as clean bands, not muddy darkness.
-    this.scene.add(new THREE.AmbientLight(0x9fb0cf, 0.9));
-    const sun = new THREE.DirectionalLight(0xffe8c8, 1.7);   // warm key light
+    this.scene.add(new THREE.AmbientLight(0xd2e4f5, 1.05));  // bright sky ambient
+    const sun = new THREE.DirectionalLight(0xffefd2, 1.6);   // warm key light
     sun.position.set(this.sim.map.w * 0.3, 42, this.sim.map.h * 0.15);
     sun.castShadow = true;
     sun.shadow.mapSize.set(2048, 2048);
@@ -102,9 +114,34 @@ export class Renderer {
     sun.target.position.set(this.sim.map.w / 2, 0, this.sim.map.h / 2);
     this.scene.add(sun, sun.target);
     this.sun = sun;
-    const fill = new THREE.DirectionalLight(0x5a6da0, 0.6);  // cool sky fill
+    const fill = new THREE.DirectionalLight(0x9fb6d8, 0.55); // soft sky fill
     fill.position.set(-25, 28, -32);
     this.scene.add(fill);
+  }
+
+  // Soft daytime sky: a big inverted gradient dome (zenith sky color -> horizon
+  // fog color) so the horizon blends seamlessly into the Fog-faded terrain.
+  // Replaces the old deep-space starfield to match the bright Chibi Sci-Fi look.
+  buildSky() {
+    const R = 165;
+    const geo = new THREE.SphereGeometry(R, 24, 16);
+    const horizon = new THREE.Color(this.theme.fog);
+    const zenith = new THREE.Color(this.theme.sky).lerp(new THREE.Color(0xffffff), 0.10);
+    const pos = geo.attributes.position;
+    const col = new Float32Array(pos.count * 3);
+    const c = new THREE.Color();
+    for (let i = 0; i < pos.count; i++) {
+      const t = Math.max(0, Math.min(1, (pos.getY(i) / R + 0.12) / 0.85));
+      c.copy(horizon).lerp(zenith, t);
+      col[i * 3] = c.r; col[i * 3 + 1] = c.g; col[i * 3 + 2] = c.b;
+    }
+    geo.setAttribute("color", new THREE.BufferAttribute(col, 3));
+    const dome = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+      vertexColors: true, side: THREE.BackSide, fog: false, depthWrite: false,
+    }));
+    dome.position.set(this.sim.map.w / 2, 0, this.sim.map.h / 2);
+    dome.frustumCulled = false;
+    this.scene.add(dome);
   }
 
   // ---------- terrain ----------
@@ -212,6 +249,11 @@ export class Renderer {
     this.groundTex = new THREE.CanvasTexture(this.groundCanvas);
     this.groundTex.colorSpace = THREE.SRGBColorSpace;
     this.groundTex.anisotropy = this.renderer.capabilities.getMaxAnisotropy();
+    // Crisp pixel-art look: nearest sampling so the 32px tiles stay blocky
+    // instead of being blurred by bilinear filtering (anisotropy preserved).
+    this.groundTex.magFilter = THREE.NearestFilter;
+    this.groundTex.minFilter = THREE.NearestFilter;
+    this.groundTex.generateMipmaps = false;
     this.paintFog();
 
     // displaced grid: one quad per tile (w*h), vertices at tile corners so the
@@ -240,6 +282,221 @@ export class Renderer {
     mesh.receiveShadow = true;
     this.scene.add(mesh);
     this.lastFogPaint = -1;
+  }
+
+  // Minecraft-style SEAMLESS tileable ground texture: a PXxPX pixel-art canvas
+  // with deterministic per-pixel shade variation + theme-specific accents.
+  // Every write wraps its coordinates modulo PX (via `set` below) so the left/
+  // right and top/bottom edges match perfectly -> no visible seams when tiled.
+  makeGroundTile(th, tone, detailSeed = 0) {
+    const c = document.createElement("canvas");
+    c.width = PX; c.height = PX;
+    const tctx = c.getContext("2d");
+    tctx.imageSmoothingEnabled = false;
+    // detailSeed selects a DIFFERENT slice of the (still periodic) noise field
+    // so content variants differ in their interior speckle/tuft layout, not
+    // just orientation. The seed only shifts WHICH cells get shaded via a
+    // constant offset added to the hash input; since the offset is constant
+    // (not position-dependent), the field stays periodic at PX -> seamless.
+    // A per-seed constant offset (in whole CELLs) also slides tuft positions.
+    const sd = (detailSeed | 0);
+    const noiseAt = (cx, cy) => pixHash(cx + sd * 101, cy + sd * 53) % 100;
+    // wrapped 1px write: any x/y is folded back into [0,PX) so features that
+    // spill off an edge reappear on the opposite edge -> seamless tiling.
+    const set = (x, y, css) => {
+      tctx.fillStyle = css;
+      tctx.fillRect(((x % PX) + PX) % PX, ((y % PX) + PX) % PX, 1, 1);
+    };
+
+    // Base fill
+    tctx.fillStyle = rgbStr(tone);
+    tctx.fillRect(0, 0, PX, PX);
+
+    // Per-pixel shade variation. pixHash is sampled on WRAPPED coordinates so
+    // the noise field itself tiles: hash(0,y) == the pixel that neighbors
+    // hash(PX-1,y) across the seam. (pixHash already only depends on x,y, and
+    // x/y stay in [0,PX) here, so the field is inherently periodic at PX.)
+    // Softer amplitudes than before: the brightest tier read as sparkly
+    // out-of-place specks, so the highlights are pulled in and thinned out.
+    const dark = rgbStr(shade(tone, -0.10));
+    const darker = rgbStr(shade(tone, -0.18));
+    const light = rgbStr(lift(tone, 0.07));
+    const lighter = rgbStr(lift(tone, 0.11));
+    // "Simple but detailed": paint the noise in coarse CELL blocks instead of
+    // per-pixel. A CELL x CELL fill reads as a calm soft patch rather than TV
+    // static, and holds up when the camera zooms out. Coverage is also lower
+    // (~14% of cells shaded vs ~24% of pixels before), so the surface stays
+    // clean. The cell grid divides PX evenly (32 / 2 = 16), so wrapping is
+    // preserved and the field still tiles seamlessly.
+    const CELL = 2;
+    const fillCell = (cx, cy, css) => {
+      for (let dy = 0; dy < CELL; dy++)
+        for (let dx = 0; dx < CELL; dx++) set(cx + dx, cy + dy, css);
+    };
+    for (let cy = 0; cy < PX; cy += CELL) {
+      for (let cx = 0; cx < PX; cx += CELL) {
+        const v = noiseAt(cx, cy);
+        if (v < 8) fillCell(cx, cy, dark);
+        else if (v < 12) fillCell(cx, cy, light);
+        else if (v < 14) fillCell(cx, cy, darker);
+        else if (v < 15) fillCell(cx, cy, lighter);
+      }
+    }
+
+    // Theme-specific pixel-art accents at fixed positions. Positions scaled up
+    // for the 32px tile; ALL writes go through `set` so multi-pixel features
+    // wrap cleanly across edges instead of being clipped.
+    const name = th.name;
+    if (name === "verdant") {
+      // Grass blade tufts: a few tiny vertical dashes. Thinned from 7 to 3 and
+      // reduced to 2px verticals — the old plus-shaped clusters were the
+      // strongest directional feature, so their rotated copies lined up into
+      // visible diagonal streaks when zoomed out. Fewer, smaller, lower-
+      // contrast tufts read as gentle life without a repeating rhythm.
+      const tufts = [[9, 13], [22, 8], [15, 25]];
+      const blade = rgbStr(lift(tone, 0.09));
+      // Slide tufts by a per-seed offset so content variants place them
+      // differently; `set` wraps, so shifted tufts stay seamless.
+      const ox = (sd * 7) | 0, oy = (sd * 11) | 0;
+      for (const [tx, ty] of tufts) {
+        set(tx + ox, ty + oy, blade);
+        set(tx + ox, ty + oy - 1, blade);
+      }
+      // (Daisies removed: the pure-white/gold pixels read as out-of-place
+      // specks against the grass. Grass tufts alone give enough life.)
+    } else if (name === "ashen") {
+      // Dirt specks and a small diagonal crack
+      const specks = [[8, 6], [14, 16], [22, 10], [26, 24], [4, 20], [18, 28], [30, 18], [2, 4]];
+      const speck = rgbStr(shade(tone, -0.25));
+      for (const [sx, sy] of specks) set(sx, sy, speck);
+      const crackCss = rgbStr(shade(tone, -0.40));
+      const crack = [[10, 8], [11, 8], [12, 9], [13, 9], [14, 10], [15, 11]];
+      for (const [cx, cy] of crack) set(cx, cy, crackCss);
+    } else if (name === "frozen") {
+      // Ice sparkle crosses
+      const sparkles = [[6, 8], [18, 14], [26, 24], [12, 28], [30, 6], [3, 20]];
+      const arm = rgbStr(lift(tone, 0.18));
+      for (const [sx, sy] of sparkles) {
+        set(sx, sy, "#e8f4ff");
+        set(sx - 1, sy, arm);
+        set(sx + 1, sy, arm);
+        set(sx, sy - 1, arm);
+        set(sx, sy + 1, arm);
+      }
+    }
+    return c;
+  }
+
+  // Build a set of seamless VARIANTS of a base tile so adjacent world tiles
+  // aren't pixel-identical. Each variant = the base tone shifted by a small
+  // brightness offset, re-rendered seamless, then drawn onto a fresh 32x32
+  // canvas through one of 4 orientation transforms (identity, 90deg rotate,
+  // mirror-X, 180deg rotate). Because the base is seamless, every rotation/
+  // mirror of it is also seamless.
+  makeTileVariants(th, tone) {
+    // (brightnessOffset, transformIndex) pairs — 4 variants per level.
+    // NOTE: all brightness offsets are 0. Per-tile brightness shifts made
+    // adjacent tiles differ by a flat tonal step, producing hard seams at tile
+    // boundaries (the "visible squares"). Orientation variety alone (identity /
+    // rotate 90 / mirror-X / rotate 180) breaks up repetition WITHOUT any
+    // tone jump, so tiles blend seamlessly.
+    // 8 orientation variants (the full dihedral group of the square): the 4
+    // rotations plus their mirrors. More distinct orientations means any given
+    // base tile's repeat is pushed much further apart on screen, so the eye
+    // can't lock onto a directional rhythm when zoomed out. All brightness
+    // offsets stay 0 (per-tile tone steps caused the old "visible squares").
+    // Two axes of variety, combined multiplicatively for a large effective
+    // pool from a small bitmap set:
+    //   * CONTENT variant (detailSeed): a handful of distinct interior detail
+    //     layouts (different speckle + tuft positions), each still seamless.
+    //   * ORIENTATION: the 8 dihedral transforms of the square.
+    // CONTENT * ORIENTATION = 4 * 8 = 32 distinct seamless tiles per level.
+    // Neighboring world tiles now differ in interior detail, not just rotation,
+    // so the repeating rhythm visible at high camera elevation is broken up
+    // while staying cheap (32 cached bitmaps per level, generated once).
+    const CONTENT_VARIANTS = 4;
+    const ORIENTATIONS = 8;
+    const variants = [];
+    for (let content = 0; content < CONTENT_VARIANTS; content++) {
+      // detailSeed 0 keeps the original layout; 1..N are alternates.
+      const base = this.makeGroundTile(th, tone, content);
+      for (let xf = 0; xf < ORIENTATIONS; xf++) {
+      const out = document.createElement("canvas");
+      out.width = PX; out.height = PX;
+      const octx = out.getContext("2d");
+      octx.imageSmoothingEnabled = false;
+      octx.save();
+      switch (xf) {
+        case 1: // rotate 90
+          octx.translate(PX, 0); octx.rotate(Math.PI / 2); break;
+        case 2: // rotate 180
+          octx.translate(PX, PX); octx.rotate(Math.PI); break;
+        case 3: // rotate 270
+          octx.translate(0, PX); octx.rotate(-Math.PI / 2); break;
+        case 4: // mirror-X
+          octx.translate(PX, 0); octx.scale(-1, 1); break;
+        case 5: // mirror-X then rotate 90
+          octx.translate(PX, 0); octx.rotate(Math.PI / 2);
+          octx.translate(PX, 0); octx.scale(-1, 1); break;
+        case 6: // mirror-Y (mirror-X + rotate 180)
+          octx.translate(0, PX); octx.scale(1, -1); break;
+        case 7: // mirror-X then rotate 270
+          octx.translate(0, PX); octx.rotate(-Math.PI / 2);
+          octx.translate(PX, 0); octx.scale(-1, 1); break;
+        default: break; // identity
+      }
+      octx.drawImage(base, 0, 0);
+      octx.restore();
+      variants.push(out);
+      }
+    }
+    return variants;
+  }
+
+  // Deterministic 2D blue-noise index field over the w*h tile grid using a
+  // Mitchell best-candidate ranking: repeatedly place the candidate (from a
+  // seeded batch) that is farthest from all already-placed points, then assign
+  // each placed point a rank; each grid cell's rank modulo N picks its variant.
+  // Result: variant choices are evenly spread with no clumping / obvious rows.
+  buildBlueNoise(w, h, seed) {
+    const n = w * h;
+    const idx = new Int32Array(n).fill(-1);   // placement order (rank) per cell
+    const px = [], py = [];                    // placed coordinates
+    const rng = makeRng((seed ^ 0x81b2e2b3) >>> 0);
+    const rnd = () => rng() / 0xffffffff;
+    // toroidal distance so the pattern also tiles across map edges
+    const dist2 = (ax, ay, bx, by) => {
+      let dx = Math.abs(ax - bx); if (dx > w / 2) dx = w - dx;
+      let dy = Math.abs(ay - by); if (dy > h / 2) dy = h - dy;
+      return dx * dx + dy * dy;
+    };
+    for (let placed = 0; placed < n; placed++) {
+      // candidate pool grows with the count of placed points (Mitchell)
+      const cand = Math.min(20, 1 + placed);
+      let bestX = 0, bestY = 0, bestD = -1;
+      for (let k = 0; k < cand; k++) {
+        const cx = (rnd() * w) | 0, cy = (rnd() * h) | 0;
+        if (idx[cy * w + cx] >= 0) continue;   // cell already taken
+        // distance to nearest placed point (large if none placed yet)
+        let nd = Infinity;
+        for (let i = 0; i < px.length; i++) {
+          const d = dist2(cx, cy, px[i], py[i]);
+          if (d < nd) nd = d;
+        }
+        if (nd > bestD) { bestD = nd; bestX = cx; bestY = cy; }
+      }
+      // if the sampled candidates all landed on taken cells, scan for a free one
+      if (bestD < 0 || idx[bestY * w + bestX] >= 0) {
+        let found = false;
+        for (let i = 0; i < n && !found; i++) {
+          if (idx[i] < 0) { bestX = i % w; bestY = (i / w) | 0; found = true; }
+        }
+        if (!found) break;
+      }
+      idx[bestY * w + bestX] = placed;
+      px.push(bestX); py.push(bestY);
+    }
+    return idx;   // rank per cell; caller does rank % variantCount
   }
 
   // Hand-painted stylized terrain: ZERO per-pixel noise. One saturated base
@@ -296,141 +553,31 @@ export class Renderer {
       const b = base[2] + (hiTone[2] - base[2]) * t;
       return lift([r, g, b], lvl * 0.10);
     };
-    const patch = th.patch;
 
-    // ---- 1. flat fill: one saturated tone per tile by its elevation --------
+
+    // ---- 1. Minecraft-style SEAMLESS tileable ground texture + variants ----
+    // Per elevation level, pre-render a small set of seamless variant tiles
+    // (subtle brightness + rotation/mirror). A deterministic blue-noise field
+    // picks which variant each world tile stamps, so the grid of identical
+    // tiles is broken up evenly with no clumping and no hard seams.
+    const variantCache = [];
+    for (let lvl = 0; lvl <= 3; lvl++)
+      variantCache[lvl] = this.makeTileVariants(th, toneFor(lvl));
+    const variantCount = variantCache[0].length;   // 32 (4 content x 8 orientations)
+    const blueNoise = this.buildBlueNoise(w, h, this.sim.seed);
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
-        const lvl = lvlAt(x, y);
-        ctx.fillStyle = rgbStr(toneFor(lvl));
-        ctx.fillRect(x * PX, y * PX, PX, PX);
+        const lvl = Math.max(0, Math.min(3, lvlAt(x, y)));
+        const vi = ((blueNoise[y * w + x] % variantCount) + variantCount) % variantCount;
+        ctx.drawImage(variantCache[lvl][vi], x * PX, y * PX);
       }
     }
 
-    // ---- 2. soft organic color blobs (2-3 sibling-tone stamps per region) --
-    // Deterministic, low-contrast, blurred — hand-painted life, not noise.
-    const rng = makeRng(this.sim.seed ^ 0x5eed);
-    const rnd = () => rng() / 0xffffffff;
-    ctx.save();
-    ctx.globalAlpha = 0.28;
-    const blobs = 30 + (rng() % 14);
-    for (let i = 0; i < blobs; i++) {
-      const bx = rnd() * w, by = rnd() * h;
-      const lvl = lvlAt(bx | 0, by | 0);
-      // sibling tone: a lifted or patch-shifted version of the level tone
-      const sib = rnd() > 0.5
-        ? lift(toneFor(lvl), 0.12)
-        : [toneFor(lvl)[0] + patch[0] * 0.6, toneFor(lvl)[1] + patch[1] * 0.6, toneFor(lvl)[2] + patch[2] * 0.6].map(CH);
-      const r = (2.5 + rnd() * 3.5) * PX;
-      const grad = ctx.createRadialGradient(bx * PX, by * PX, 0, bx * PX, by * PX, r);
-      grad.addColorStop(0, rgbStr(sib));
-      grad.addColorStop(1, rgbStr(sib).replace("rgb", "rgba").replace(")", ",0)"));
-      ctx.fillStyle = grad;
-      ctx.beginPath();
-      ctx.arc(bx * PX, by * PX, r, 0, Math.PI * 2);
-      ctx.fill();
-    }
-    ctx.restore();
-
-    // ---- 2b. ground texture detail (organic noise patches) ----
+    // ---- 2b. cliff/ramp overlays (texRnd used for cliff rock) ----
     ctx.save();
     const texRng = makeRng(this.sim.seed ^ 0x7e57);
     const texRnd = () => texRng() / 0xffffffff;
     const tName = th.name;
-    // Organic color patches: large soft circles for natural variation
-    const patchColors = tName === "verdant"
-      ? [[95, 130, 65], [70, 105, 50], [110, 145, 80]]
-      : tName === "ashen"
-      ? [[120, 95, 70], [95, 75, 55], [140, 115, 85]]
-      : [[170, 195, 220], [140, 170, 200], [200, 220, 240]];
-    for (let round = 0; round < 3; round++) {
-      ctx.fillStyle = "rgb(" + patchColors[round][0] + "," + patchColors[round][1] + "," + patchColors[round][2] + ")";
-      ctx.globalAlpha = 0.05 + round * 0.02;
-      const patchCount = Math.floor(w * h * 0.25);
-      for (let i = 0; i < patchCount; i++) {
-        const x = texRnd() * w * PX, y = texRnd() * h * PX;
-        const r = 10 + texRnd() * 25;
-        ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
-      }
-    }
-    // Subtle surface detail
-    if (tName === "verdant") {
-      // 1. Draw stylized grass clumps/tufts
-      ctx.strokeStyle = rgbStr(lift(th.ground, 0.18));
-      ctx.lineWidth = 1.2;
-      ctx.globalAlpha = 0.25;
-      const clumpCount = Math.floor(w * h * 0.4);
-      for (let i = 0; i < clumpCount; i++) {
-        const x = texRnd() * w * PX, y = texRnd() * h * PX;
-        // Draw a cute 3-blade tuft/clump of grass
-        const hScale = 1.0 + texRnd() * 0.5;
-        // Central blade
-        ctx.beginPath();
-        ctx.moveTo(x, y);
-        ctx.quadraticCurveTo(x, y - 4 * hScale, x - 1, y - 5 * hScale);
-        ctx.stroke();
-        // Left blade curving left
-        ctx.beginPath();
-        ctx.moveTo(x, y);
-        ctx.quadraticCurveTo(x - 2, y - 3 * hScale, x - 4, y - 3.5 * hScale);
-        ctx.stroke();
-        // Right blade curving right
-        ctx.beginPath();
-        ctx.moveTo(x, y);
-        ctx.quadraticCurveTo(x + 2, y - 3 * hScale, x + 4, y - 3.5 * hScale);
-        ctx.stroke();
-      }
-
-      // 2. Draw tiny scattered clovers
-      ctx.fillStyle = rgbStr(lift(th.ground, -0.15)); // slightly darker green for depth
-      ctx.globalAlpha = 0.35;
-      const cloverCount = Math.floor(w * h * 0.15);
-      for (let i = 0; i < cloverCount; i++) {
-        const cx = texRnd() * w * PX, cy = texRnd() * h * PX;
-        const leafR = 1.0 + texRnd() * 0.5;
-        // 3 leaves
-        ctx.beginPath(); ctx.arc(cx - 0.8, cy - 0.5, leafR, 0, Math.PI * 2); ctx.fill();
-        ctx.beginPath(); ctx.arc(cx + 0.8, cy - 0.5, leafR, 0, Math.PI * 2); ctx.fill();
-        ctx.beginPath(); ctx.arc(cx, cy + 0.8, leafR, 0, Math.PI * 2); ctx.fill();
-      }
-
-      // 3. Draw tiny scattered white daisies
-      ctx.globalAlpha = 0.7;
-      const flowerCount = Math.floor(w * h * 0.08);
-      for (let i = 0; i < flowerCount; i++) {
-        const fx = texRnd() * w * PX, fy = texRnd() * h * PX;
-        const petalR = 0.8;
-        // Draw 4 tiny white petals
-        ctx.fillStyle = "#ffffff";
-        ctx.beginPath(); ctx.arc(fx - 0.8, fy, petalR, 0, Math.PI * 2); ctx.fill();
-        ctx.beginPath(); ctx.arc(fx + 0.8, fy, petalR, 0, Math.PI * 2); ctx.fill();
-        ctx.beginPath(); ctx.arc(fx, fy - 0.8, petalR, 0, Math.PI * 2); ctx.fill();
-        ctx.beginPath(); ctx.arc(fx, fy + 0.8, petalR, 0, Math.PI * 2); ctx.fill();
-        // Draw yellow center
-        ctx.fillStyle = "#ffd700";
-        ctx.beginPath(); ctx.arc(fx, fy, 0.6, 0, Math.PI * 2); ctx.fill();
-      }
-    } else if (tName === "ashen") {
-      ctx.strokeStyle = rgbStr([th.ground[0]*0.4, th.ground[1]*0.4, th.ground[2]*0.4].map(CH));
-      ctx.lineWidth = 0.8;
-      const crackCount = Math.floor(w * h * 0.2);
-      for (let i = 0; i < crackCount; i++) {
-        const x = texRnd() * w * PX, y = texRnd() * h * PX;
-        const len = 6 + texRnd() * 14, ang = texRnd() * Math.PI;
-        ctx.beginPath(); ctx.moveTo(x, y);
-        ctx.lineTo(x + Math.cos(ang) * len, y + Math.sin(ang) * len); ctx.stroke();
-      }
-    } else if (tName === "frozen") {
-      ctx.strokeStyle = rgbStr(lift(th.groundHi, 0.25));
-      ctx.lineWidth = 0.6;
-      const crystalCount = Math.floor(w * h * 0.2);
-      for (let i = 0; i < crystalCount; i++) {
-        const x = texRnd() * w * PX, y = texRnd() * h * PX;
-        const len = 4 + texRnd() * 6, ang = texRnd() * Math.PI;
-        ctx.beginPath(); ctx.moveTo(x, y);
-        ctx.lineTo(x + Math.cos(ang) * len, y + Math.sin(ang) * len); ctx.stroke();
-      }
-    }
     // Ramp tiles: smooth gradient blend
     if (rampTiles) {
       ctx.globalAlpha = 0.12;
@@ -564,7 +711,9 @@ export class Renderer {
       for (let x = 0; x < w; x++) {
         const f = fog[y * w + x];
         if (f === 2) continue;
-        ctx.fillStyle = f === 1 ? "rgba(4,6,10,0.55)" : "rgba(3,4,8,0.9)";
+        // Bright look: unexplored reads as a soft cloudy haze (not a black void);
+        // explored-but-out-of-sight gets a gentle cool dim instead of near-black.
+        ctx.fillStyle = f === 1 ? "rgba(92,108,132,0.34)" : "rgba(210,222,238,0.88)";
         ctx.fillRect(x * PX, y * PX, PX, PX);
       }
     }

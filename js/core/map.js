@@ -25,27 +25,32 @@ import { MAP_W, MAP_H } from "./data.js";
 
 // Visual themes. Shared with the renderer (palette, decoration tint, fog tint).
 // Colors are plain integers (0xRRGGBB); the renderer owns their interpretation.
+// "Chibi Sci-Fi" palette: bright, candy-saturated biomes under airy daytime
+// skies. Internal names ("verdant"/"ashen"/"frozen") are UNCHANGED — barrier
+// growth + terrain painting branch on these strings — only the colors moved to
+// the new sunny identity. sky/fog are now light so distant terrain fades into a
+// soft horizon instead of the old near-black void.
 export const THEMES = [
   {
-    name: "verdant",
-    ground: [40, 68, 42], groundHi: [58, 90, 58], patch: [18, 13, 0],
-    rock: 0x555e6b, cliff: 0x3a4048, cliffTop: [70, 78, 66],
-    fog: 0x070a10, sky: 0x070a10,
-    deco: [0x74d68a, 0x9fe6b0, 0x4f9e63], // flora greens
+    name: "verdant",                                  // Meadow
+    ground: [104, 178, 104], groundHi: [158, 214, 142], patch: [24, 20, 6],
+    rock: 0x9aa2ad, cliff: 0x74808f, cliffTop: [176, 182, 168],
+    fog: 0xcfe9ff, sky: 0xb6def7,
+    deco: [0x8ce89c, 0xbdf5c6, 0x5cc273], // fresh flora greens
   },
   {
-    name: "ashen",
-    ground: [58, 44, 34], groundHi: [86, 62, 40], patch: [30, 10, 0],
-    rock: 0x5c4a3a, cliff: 0x40342a, cliffTop: [92, 66, 44],
-    fog: 0x140b08, sky: 0x140b08,
-    deco: [0xff8a3c, 0xffb066, 0xd15a24], // embers / hot rock
+    name: "ashen",                                    // Sunbaked canyon
+    ground: [206, 130, 84], groundHi: [234, 178, 118], patch: [40, 22, 10],
+    rock: 0xc08256, cliff: 0x9a6340, cliffTop: [224, 164, 112],
+    fog: 0xffe2c2, sky: 0xffd0a6,
+    deco: [0xffb066, 0xffd08a, 0xe07a3c], // warm blooms / hot rock
   },
   {
-    name: "frozen",
-    ground: [58, 74, 92], groundHi: [92, 112, 132], patch: [10, 18, 30],
-    rock: 0x6a7686, cliff: 0x4a5666, cliffTop: [120, 140, 160],
-    fog: 0x0a1018, sky: 0x0a1018,
-    deco: [0x9fd8ff, 0xcaeaff, 0x6fa8d8], // ice shards
+    name: "frozen",                                   // Glacier
+    ground: [176, 208, 232], groundHi: [216, 236, 250], patch: [30, 42, 58],
+    rock: 0xa6b6c8, cliff: 0x8494a8, cliffTop: [206, 224, 240],
+    fog: 0xeaf6ff, sky: 0xd6efff,
+    deco: [0x9fe0ff, 0xd4f2ff, 0x77c4ee], // ice shards
   },
 ];
 
@@ -215,8 +220,13 @@ function buildCandidate(seed, opts) {
   };
   const addDeco = (x, y, kind) => {
     if (!inb(x, y)) return;
-    decos.push({ x, y, kind });
+    // Never place a deco on a ramp tile. Callers already check the primary
+    // tile, but the symmetric mirror tile was previously pushed unchecked and
+    // could land on the partner base's ramp — guard BOTH tiles here at source.
+    if (rampTiles[idx(x, y)]) return;
     const [px, py] = partner(x, y);
+    if (rampTiles[idx(px, py)]) return;
+    decos.push({ x, y, kind });
     decos.push({ x: px, y: py, kind });
   };
 
@@ -383,6 +393,19 @@ function buildCandidate(seed, opts) {
   const geyserTiles = [];
   const placeGeyser = (tx, ty, ix, iy) => {
     if (!inb(tx, ty) || !inb(tx + ix, ty + iy)) return false;
+    // Edge margin guard: keep 2x2 geyser at least 3 tiles from each border so
+    // geysers never appear in corners or hard against the map edge. Nudge the
+    // entire footprint inward if it violates the margin, then re-check inb.
+    const GMARGIN = 3;
+    const gMinX = Math.min(tx, tx + ix), gMaxX = Math.max(tx, tx + ix);
+    const gMinY = Math.min(ty, ty + iy), gMaxY = Math.max(ty, ty + iy);
+    let gdx = 0, gdy = 0;
+    if (gMinX < GMARGIN) gdx = GMARGIN - gMinX;
+    if (gMaxX >= W - GMARGIN) gdx = -(gMaxX - (W - 1 - GMARGIN));
+    if (gMinY < GMARGIN) gdy = GMARGIN - gMinY;
+    if (gMaxY >= H - GMARGIN) gdy = -(gMaxY - (H - 1 - GMARGIN));
+    tx += gdx; ty += gdy;
+    if (!inb(tx, ty) || !inb(tx + ix, ty + iy)) return false;
     const lvl = height[idx(tx, ty)];
     const xs = [tx, tx + ix], ys = [ty, ty + iy];
     for (const gx of xs)
@@ -428,6 +451,7 @@ function buildCandidate(seed, opts) {
   const pushPatch = (tx, ty, base, cluster) => {
     if (!inb(tx, ty)) return;
     if (nearGeyser(tx, ty)) return;
+    if (rampTiles[idx(tx, ty)]) return;              // never on a ramp
     const d2 = tdist2(tx, ty, base.x, base.y);
     if (d2 < 4 * 4 || d2 > 7 * 7) return;            // 4..7 tile band (inside plateau)
     if (rock[idx(tx, ty)] && height[idx(tx, ty)]) return; // don't punch cliffs
@@ -526,13 +550,13 @@ function buildCandidate(seed, opts) {
 
   // ---- 10. line-of-sight blockers -------------------------------------------
   if (opts.losBlockers) {
-    placeLosBlockers(rng, setLos, addDeco, rock, height, losBlock, W, H,
+    placeLosBlockers(rng, setLos, addDeco, rock, height, losBlock, rampTiles, W, H,
       starts, expansions, geyserTiles, c0, plateauR, natR, partner);
   }
 
   // ---- 11. decorations (non-blocking, sparse near bases/lanes) --------------
   const decoDensity = rng() % 3;
-  scatterDecos(rng, addDeco, rock, height, losBlock, barrierKind, W, H, starts, expansions, decoDensity);
+  scatterDecos(rng, addDeco, rock, height, losBlock, barrierKind, rampTiles, W, H, starts, expansions, decoDensity);
 
   const [natPx, natPy] = partner(nat0.x, nat0.y);
   const naturals = [{ x: nat0.x, y: nat0.y }, { x: natPx, y: natPy }];
@@ -556,6 +580,52 @@ function buildCandidate(seed, opts) {
         const edge = (x < s.x - r || x > s.x + r || y < s.y - r || y > s.y + r);
         if (edge && inb(x, y)) { setHeight(x, y, lvl); setRock(x, y, 1); }
       }
+    // ---- organic edge jitter (medium strength) ----
+    // Parameter-derived seed so no rng advance; fold coords for symmetry.
+    const jSeed = ((s.x * 374761393 + s.y * 668265263 + r * 295075153 + lvl * 1276523) | 0) >>> 0;
+    for (let y = s.y - r - 1; y <= s.y + r + 1; y++)
+      for (let x = s.x - r - 1; x <= s.x + r + 1; x++) {
+        const dx = x - s.x, dy = y - s.y;
+        const dist = Math.max(Math.abs(dx), Math.abs(dy));
+        if (dist !== r + 1) continue;          // ring tiles only
+        if (!inb(x, y)) continue;
+        if (!rock[idx(x, y)]) continue;         // already passable (ramp corridor)
+        // Fold to canonical half — same hash for both symmetric partners.
+        let sx = x, sy = y;
+        if (mode === "rotate") { sx = Math.min(x, W - 1 - x); sy = Math.min(y, H - 1 - y); }
+        else if (reflectAxis === 0) { sx = Math.min(x, W - 1 - x); }
+        else { sy = Math.min(y, H - 1 - y); }
+        const h = (((sx + 500) * 374761393 + (sy + 500) * 668265263 + jSeed) | 0) >>> 0;
+        const roll = h % 100;
+        // Dominant-axis outward normal for protrusions.
+        const ax = Math.abs(dx) >= Math.abs(dy) ? Math.sign(dx) : 0;
+        const ay = Math.abs(dy) > Math.abs(dx) ? Math.sign(dy) : 0;
+        if (roll < 14) {
+          // outward protrusion: extend cliff face one tile outward
+          const px = x + (ax || Math.sign(dx)), py = y + (ay || Math.sign(dy));
+          if (inb(px, py) && !rock[idx(px, py)] && !rampTiles[idx(px, py)]) {
+            setHeight(px, py, lvl); setRock(px, py, 1);
+          }
+        } else if (roll < 28) {
+          // inward erosion: open ring tile (only safe for single-level step)
+          if (lvl === 1) { setRock(x, y, 0); }
+          else {
+            // For lvl>=2, check if any outward 4-neighbour is passable at lvl-1.
+            for (const [sdx, sdy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+              const nx2 = x + sdx, ny2 = y + sdy;
+              if (!inb(nx2, ny2) || rock[idx(nx2, ny2)]) continue;
+              if (height[idx(nx2, ny2)] === lvl - 1) { setRock(x, y, 0); break; }
+            }
+          }
+        } else if (roll < 35) {
+          // corner softening: at corner-adjacent positions, step down or open
+          const cornerish = Math.abs(dx) >= r - 1 && Math.abs(dy) >= r - 1;
+          if (cornerish) {
+            if (lvl === 1) { setRock(x, y, 0); }
+            else if (lvl >= 2) { setHeight(x, y, lvl - 1); /* keep rock=1 — stepped corner */ }
+          }
+        }
+      }
   }
 
   // A standalone decorative mesa: level `lvl` top, cliff-ringed, NO ramp (it is
@@ -576,6 +646,52 @@ function buildCandidate(seed, opts) {
         const edge = (x < s.x - r || x > s.x + r || y < s.y - r || y > s.y + r);
         if (edge && inb(x, y)) { setHeight(x, y, lvl); setRock(x, y, 1); }
       }
+    // ---- organic edge jitter (medium strength, mesa-safe: NO inward erosion) ----
+    // Mesas sit at lvl=3 on lowland; opening a cliff face would skip 3 levels.
+    // Only outward protrusions + corner height-lowering are safe.
+    {
+      const jSeed = ((s.x * 374761393 + s.y * 668265263 + r * 295075153 + lvl * 1276523 + 0x1e5a) | 0) >>> 0;
+      for (let y = s.y - r - 1; y <= s.y + r + 1; y++)
+        for (let x = s.x - r - 1; x <= s.x + r + 1; x++) {
+          const dx = x - s.x, dy = y - s.y;
+          const dist = Math.max(Math.abs(dx), Math.abs(dy));
+          if (dist !== r + 1) continue;
+          if (!inb(x, y)) continue;
+          if (!rock[idx(x, y)]) continue;
+          // Skip near ramp tiles (mesas are placed away from ramps, but be safe).
+          if (rampTiles[idx(x, y)]) continue;
+          // Symmetric hash.
+          let sx = x, sy = y;
+          if (mode === "rotate") { sx = Math.min(x, W - 1 - x); sy = Math.min(y, H - 1 - y); }
+          else if (reflectAxis === 0) { sx = Math.min(x, W - 1 - x); }
+          else { sy = Math.min(y, H - 1 - y); }
+          const h = (((sx + 500) * 374761393 + (sy + 500) * 668265263 + jSeed) | 0) >>> 0;
+          const roll = h % 100;
+          const ax = Math.abs(dx) >= Math.abs(dy) ? Math.sign(dx) : 0;
+          const ay = Math.abs(dy) > Math.abs(dx) ? Math.sign(dy) : 0;
+          if (roll < 14) {
+            // outward protrusion — always safe, just extends the cliff one tile
+            const px = x + (ax || Math.sign(dx)), py = y + (ay || Math.sign(dy));
+            if (inb(px, py) && !rock[idx(px, py)] && !rampTiles[idx(px, py)]) {
+              // Also check the protrusion won't bury a resource.
+              let hitsRes = false;
+              for (const m of minerals) if (((m.x / 256) | 0) === px && ((m.y / 256) | 0) === py) { hitsRes = true; break; }
+              if (!hitsRes) for (const g of geyserTiles) if (g.x === px && g.y === py) { hitsRes = true; break; }
+              if (!hitsRes) { setHeight(px, py, lvl); setRock(px, py, 1); }
+            }
+          } else if (roll < 30) {
+            // corner softening: lower height on corner-adjacent cliff faces
+            const cornerish = Math.abs(dx) >= r - 1 && Math.abs(dy) >= r - 1;
+            if (cornerish && lvl >= 2) {
+              // Step the corner down by one level (still impassable cliff).
+              setHeight(x, y, lvl - 1);
+              // For lvl==2 corners, opening at lvl-1 (=1) may be safe if outside is 0.
+              // But we stay conservative: keep rock=1, just lower the height.
+            }
+          }
+          // NO inward erosion branch — never open a mesa cliff face to lowland.
+        }
+    }
   }
 
   // Carve a `width`-wide STEPPED ramp through the cliff ring on the side facing
@@ -693,6 +809,72 @@ function buildCandidate(seed, opts) {
         if (lvl > 0) { setHeight(x, y, lvl); setRock(x, y, 1); }   // cliff face
         else { setHeight(x, y, 0); setBarrier(x, y, 4); }           // outcrop wall
       }
+    // ---- organic edge jitter (medium strength) — only on cliff-face rings (lvl>0) ----
+    if (lvl > 0) {
+      const jSeed = ((s.x * 374761393 + s.y * 668265263 + r * 295075153 + lvl * 1276523 + 0x0ff1) | 0) >>> 0;
+      for (let y = s.y - r - 1; y <= s.y + r + 1; y++)
+        for (let x = s.x - r - 1; x <= s.x + r + 1; x++) {
+          const dx = x - s.x, dy = y - s.y;
+          const dist = Math.max(Math.abs(dx), Math.abs(dy));
+          if (dist !== r + 1) continue;
+          if (!inb(x, y)) continue;
+          if (!rock[idx(x, y)]) continue;         // already passable (gap / ramp)
+          // In-gap check (mirrors the gap test above).
+          let inGap;
+          if (Math.abs(dir.dx) >= Math.abs(dir.dy)) {
+            inGap = Math.sign(x - s.x) === dir.dx && Math.abs(y - s.y) <= half;
+          } else {
+            inGap = Math.sign(y - s.y) === dir.dy && Math.abs(x - s.x) <= half;
+          }
+          if (inGap) continue;
+          // Skip tiles 4-adjacent to the gap so the corridor stays crisp.
+          let nearGap = false;
+          for (const [sdx, sdy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+            let ng;
+            const nx = x + sdx, ny = y + sdy;
+            if (Math.abs(dir.dx) >= Math.abs(dir.dy)) {
+              ng = Math.sign(nx - s.x) === dir.dx && Math.abs(ny - s.y) <= half;
+            } else {
+              ng = Math.sign(ny - s.y) === dir.dy && Math.abs(nx - s.x) <= half;
+            }
+            if (ng) { nearGap = true; break; }
+          }
+          if (nearGap) continue;
+          // Symmetric hash.
+          let sx = x, sy = y;
+          if (mode === "rotate") { sx = Math.min(x, W - 1 - x); sy = Math.min(y, H - 1 - y); }
+          else if (reflectAxis === 0) { sx = Math.min(x, W - 1 - x); }
+          else { sy = Math.min(y, H - 1 - y); }
+          const h = (((sx + 500) * 374761393 + (sy + 500) * 668265263 + jSeed) | 0) >>> 0;
+          const roll = h % 100;
+          const ax = Math.abs(dx) >= Math.abs(dy) ? Math.sign(dx) : 0;
+          const ay = Math.abs(dy) > Math.abs(dx) ? Math.sign(dy) : 0;
+          if (roll < 14) {
+            // outward protrusion
+            const px = x + (ax || Math.sign(dx)), py = y + (ay || Math.sign(dy));
+            if (inb(px, py) && !rock[idx(px, py)] && !rampTiles[idx(px, py)]) {
+              setHeight(px, py, lvl); setRock(px, py, 1);
+            }
+          } else if (roll < 28) {
+            // inward erosion: only for lvl==1; for lvl>=2 check neighbour
+            if (lvl === 1) { setRock(x, y, 0); }
+            else {
+              for (const [sdx, sdy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+                const nx2 = x + sdx, ny2 = y + sdy;
+                if (!inb(nx2, ny2) || rock[idx(nx2, ny2)]) continue;
+                if (height[idx(nx2, ny2)] === lvl - 1) { setRock(x, y, 0); break; }
+              }
+            }
+          } else if (roll < 35) {
+            // corner softening
+            const cornerish = Math.abs(dx) >= r - 1 && Math.abs(dy) >= r - 1;
+            if (cornerish) {
+              if (lvl === 1) { setRock(x, y, 0); }
+              else if (lvl >= 2) { setHeight(x, y, lvl - 1); }
+            }
+          }
+        }
+    }
   }
 
   // Raise a central high-ground ISLAND (a square plateau centred on the map),
@@ -777,6 +959,37 @@ function buildCandidate(seed, opts) {
           setRock(x, y, 0);                            // lowland skirt
         }
       }
+
+    // ---- edge jitter: organically open some staircase cliff faces to soften
+    //      the perfectly-Chebyshev look. Only tiles on the stair bands (NOT the
+    //      top plateau, NOT the lowland skirt, NOT ramp gaps or any tile 4-
+    //      adjacent to a ramp gap) are eligible. The level bands step one level
+    //      at a time so opening a cliff face never creates a level skip.
+    //      Magnitude: ~1 tile of boundary wobble, deterministic per position. ----
+    const jitterSeed = (r() ^ 0xbe1f) | 0;
+    for (let dy = -outer; dy <= outer; dy++)
+      for (let dx = -outer; dx <= outer; dx++) {
+        const x = cx + dx, y = cy + dy;
+        if (!inb(x, y)) continue;
+        if (!rock[idx(x, y)]) continue;              // already passable (ramp or top)
+        const step = outDist(dx, dy);
+        if (step < 1) continue;                      // not a stair tile
+        const lvl = Math.max(0, bandLvl - step);
+        if (lvl <= 0) continue;                      // lowland skirt (not a cliff face)
+        // Never touch ramp corridors or tiles beside them (keep ramps crisp).
+        if (inGap(dx, dy)) continue;
+        let nearGap = false;
+        for (const [sx, sy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          if (inGap(dx + sx, dy + sy)) { nearGap = true; break; }
+        }
+        if (nearGap) continue;
+        // Deterministic per-tile jitter: ~25 % of cliff faces become passable.
+        const h = (((dx + 500) * 374761393 + (dy + 500) * 668265263 + jitterSeed) | 0) >>> 0;
+        if ((h % 100) < 25) {
+          setRock(x, y, 0);
+        }
+      }
+
     return gaps;
   }
 
@@ -983,7 +1196,7 @@ function growBarriers(rng, palette, ctx) {
 // Place 2-4 symmetric passable shrub patches (3-6 tiles each) near lanes /
 // expansion approaches, never inside main/natural mining areas. Writes losBlock
 // (via setLos) and one deco kind 3 per tile.
-function placeLosBlockers(rng, setLos, addDeco, rock, height, losBlock, W, H,
+function placeLosBlockers(rng, setLos, addDeco, rock, height, losBlock, rampTiles, W, H,
   starts, expansions, geyserTiles, c0, plateauR, natR, partner) {
   const idx = (x, y) => y * W + x;
   const onAxis = (x, y) => { const [px, py] = partner(x, y); return px === x && py === y; };
@@ -1012,6 +1225,7 @@ function placeLosBlockers(rng, setLos, addDeco, rock, height, losBlock, W, H,
       const py = ay + (rng() % 3) - 1;
       if (px < 2 || py < 2 || px >= W - 2 || py >= H - 2) continue;
       if (rock[idx(px, py)]) continue;                // must be passable
+      if (rampTiles[idx(px, py)]) continue;           // never on a ramp
       if (height[idx(px, py)] >= 2) continue;         // not on high mesa
       if (nearMineOrBase(px, py)) continue;
       if (losBlock[idx(px, py)]) continue;
@@ -1055,7 +1269,7 @@ function rotateOffset(a, b, dx, dy) {
   return [a * sx, b * sy];
 }
 
-function scatterDecos(rng, addDeco, rock, height, losBlock, barrierKind, W, H, starts, expansions, density) {
+function scatterDecos(rng, addDeco, rock, height, losBlock, barrierKind, rampTiles, W, H, starts, expansions, density) {
   const idx = (x, y) => y * W + x;
   const nearBaseOrLane = (x, y) => {
     for (const s of starts) if (Math.abs(x - s.x) + Math.abs(y - s.y) < 6) return true;
@@ -1069,6 +1283,7 @@ function scatterDecos(rng, addDeco, rock, height, losBlock, barrierKind, W, H, s
     const y = 2 + (rng() % ((H >> 1) - 2));
     if (rock[idx(x, y)]) continue;                    // no props on cliffs/rock/barriers
     if (barrierKind[idx(x, y)]) continue;             // never inside a barrier
+    if (rampTiles[idx(x, y)]) continue;               // never on a ramp
     if (height[idx(x, y)] >= 2) continue;             // not on high mesas
     if (losBlock[idx(x, y)]) continue;                // shrubs own their tiles
     if (nearBaseOrLane(x, y)) continue;

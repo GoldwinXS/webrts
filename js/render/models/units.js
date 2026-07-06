@@ -256,16 +256,16 @@ registerUnit("tank", {
 
     const barrelGroup = new THREE.Group();
     barrelGroup.add(part(G.tankBarrel2, DARK).mesh);
-    barrelGroup.add(part(G.tankBarrel, GUNMETAL).pos(0, 0, 0.44).mesh);
-    barrelGroup.add(part(G.tankMuzzle, GUNMETAL).pos(0, 0, 1.02).mesh);
-    barrelGroup.add(part(G.tankMuzzle, glow).pos(0, 0, 1.02).scl(0.6).mesh);
-    barrelGroup.position.set(0, 0, 0.28);
+    barrelGroup.add(part(G.tankBarrel, GUNMETAL).pos(0, 0, 0.34).mesh);
+    barrelGroup.add(part(G.tankMuzzle, GUNMETAL).pos(0, 0, 0.92).mesh);
+    barrelGroup.add(part(G.tankMuzzle, glow).pos(0, 0, 0.92).scl(0.6).mesh);
+    barrelGroup.position.set(0, 0, 0.48);
     turret.add(barrelGroup);
     turret.position.set(0, 0.62, 0);
     m.addGroup(turret, "turret");
 
     m.liftToGround();
-    m.setAnim({ kind: "tank", turret, barrelGroup, barrelHome: 0.28, recoil: 0 });
+    m.setAnim({ kind: "tank", turret, barrelGroup, barrelHome: 0.48, recoil: 0 });
     return m.build();
   },
 

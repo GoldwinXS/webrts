@@ -6,6 +6,12 @@
       "runtimeExecutable": "python",
       "runtimeArgs": ["serve.py", "1338"],
       "port": 1338
+    },
+    {
+      "name": "webrts-preview",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["serve.py", "1339"],
+      "port": 1339
     }
   ]
 }

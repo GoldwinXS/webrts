@@ -25,6 +25,37 @@ function cyl(rTop, rBot, h, seg, mat, x, y, z) {
   return m;
 }
 
+// Helper: a thin emissive strip (window/vent glow) that reads with bloom.
+function strip(w, h, d, mat, x, y, z) {
+  const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+  m.position.set(x, y, z);
+  return m;
+}
+
+// Helper: a chamfered/beveled box built from a base + slightly inset cap so
+// silhouettes read less like plain cubes. Returns a Group.
+function beveledBlock(w, h, d, mat, bevel = 0.12) {
+  const grp = new THREE.Group();
+  const base = box(w, h - bevel, d, mat, 0, 0, 0);
+  const cap = box(w - bevel * 1.6, bevel, d - bevel * 1.6, mat, 0, h / 2 - bevel / 2, 0);
+  grp.add(base, cap);
+  return grp;
+}
+
+// Helper: run a row of small panel/rivet detail boxes along an edge.
+function panelRow(n, spacing, mat, x0, y, z, sx, sy, sz, axis = "x") {
+  const grp = new THREE.Group();
+  for (let i = 0; i < n; i++) {
+    const off = (i - (n - 1) / 2) * spacing;
+    const p = box(sx, sy, sz, mat,
+      x0 + (axis === "x" ? off : 0),
+      y,
+      z + (axis === "z" ? off : 0));
+    grp.add(p);
+  }
+  return grp;
+}
+
 // ===========================================================================
 // HQ — command center: broad base, mid storey, control tower, radar dish
 // ===========================================================================
@@ -32,24 +63,58 @@ registerBuilding("hq", {
   build(e, color, size) {
     const team = teamMat(color, 0.08);
     const glow = glowMat(color);
+    const win = glowMat(0x8fd6ff, 0.9);   // cool interior light
     const built = new THREE.Group();
     const anim = { kind: "hq", lamps: [] };
 
-    const b1 = box(2.7, 0.9, 2.7, BUILDING_BASE, 0, 0.45, 0); b1.castShadow = true;
-    const trim = box(2.74, 0.14, 2.74, team, 0, 0.86, 0);
-    const b2 = box(2.0, 0.6, 2.0, team, 0, 1.2, 0); b2.castShadow = true;
-    const tower = cyl(0.5, 0.68, 0.8, 10, BUILDING_BASE, 0, 1.98, 0); tower.castShadow = true;
-    const towerBand = cyl(0.52, 0.52, 0.1, 10, team, 0, 2.28, 0);
-    const pole = new THREE.Mesh(G.pole, GUNMETAL); pole.position.y = 2.6; pole.scale.y = 0.6;
-    const dish = new THREE.Mesh(G.dish, team); dish.position.y = 3.0;
-    const antL = new THREE.Mesh(G.antenna, GUNMETAL); antL.position.set(-1.1, 0.9, -1.1);
-    const ventA = new THREE.Mesh(G.vent, GUNMETAL); ventA.position.set(-0.8, 0.95, 0.9);
+    // Broad footing skirt + beveled main hull for a heavier, readable base
+    const skirt = cyl(1.5, 1.6, 0.22, 32, DARK, 0, 0.11, 0); skirt.castShadow = true;
+    const hull = cyl(1.3, 1.4, 0.9, 32, BUILDING_BASE, 0, 0.67, 0); hull.castShadow = true;
+    // Corner buttresses break the boxy silhouette - REMOVED FOR ROUND DESIGN
+    // for (const [cx, cz] of [[1.28,1.28],[-1.28,1.28],[1.28,-1.28],[-1.28,-1.28]]) {
+    //   const but = box(0.34, 1.02, 0.34, GUNMETAL, cx, 0.51, cz); but.castShadow = true;
+    //   built.add(but);
+    // }
+    // Glowing window bands on each face
+    const windowRing = new THREE.Mesh(new THREE.TorusGeometry(1.35, 0.04, 8, 48), win);
+    windowRing.rotation.x = Math.PI / 2;
+    windowRing.position.y = 0.6;
+    // Player-color trim ring around the roofline
+    const trim = cyl(1.38, 1.38, 0.16, 32, team, 0, 1.05, 0);
+    const trimInset = cyl(1.25, 1.25, 0.06, 32, glow, 0, 1.15, 0);
+    // Mid storey (control deck) with paneling
+    const b2 = cyl(1.2, 1.25, 0.62, 32, team, 0, 1.42, 0); b2.castShadow = true;
+    for (let i = 0; i < 4; i++) {
+      const a = (i / 4) * Math.PI * 2;
+      const panel = box(0.5, 0.3, 0.2, GUNMETAL, Math.cos(a) * 1.1, 1.42, Math.sin(a) * 1.1);
+      built.add(panel);
+    }
+    for (let i = 0; i < 12; i++) {
+        const a = (i / 12) * Math.PI * 2;
+        const rib = box(0.1, 0.9, 0.1, GUNMETAL, Math.cos(a) * 1.35, 0.67, Math.sin(a) * 1.35);
+        built.add(rib);
+    }
+    // Control tower with banded collar
+    const tower = cyl(0.5, 0.7, 0.86, 12, BUILDING_BASE, 0, 2.13, 0); tower.castShadow = true;
+    const towerBand = cyl(0.53, 0.53, 0.12, 12, team, 0, 2.46, 0);
+    const towerGlow = cyl(0.46, 0.46, 0.08, 12, win, 0, 2.2, 0);
+    const cap = cyl(0.34, 0.5, 0.2, 12, GUNMETAL, 0, 2.66, 0);
+    // Mast + rotating radar dish on top
+    const pole = new THREE.Mesh(G.pole, GUNMETAL); pole.position.y = 2.9; pole.scale.y = 0.55;
+    const dish = new THREE.Mesh(G.dish, team); dish.position.y = 3.25;
+    const dishTip = new THREE.Mesh(G.lamp, glowMat(0xff5f4c, 1.8)); dishTip.position.set(0.26, 3.25, 0);
+    dish.add(dishTip); dishTip.position.set(0.26, 0, 0);
+    // Rooftop greebles: antenna + vents
+    const antL = new THREE.Mesh(G.antenna, GUNMETAL); antL.position.set(-1.05, 1.7, -1.05);
+    const ventA = new THREE.Mesh(G.vent, GUNMETAL); ventA.position.set(-0.8, 1.75, 0.9);
+    const ventB = new THREE.Mesh(G.vent, GUNMETAL); ventB.position.set(0.85, 1.75, -0.85);
 
-    built.add(b1, trim, b2, tower, towerBand, pole, dish, antL, ventA);
-    addLamp(built, anim, 1.25, 0.95, 1.25, color);
-    addLamp(built, anim, -1.25, 0.95, 1.25, color);
-    addLamp(built, anim, 1.25, 0.95, -1.25, color);
-    addLamp(built, anim, -1.25, 0.95, -1.25, color);
+    built.add(skirt, hull, windowRing, trim, trimInset, b2,
+              tower, towerBand, towerGlow, cap, pole, dish, antL, ventA, ventB);
+    addLamp(built, anim, 1.3, 1.12, 1.3, color);
+    addLamp(built, anim, -1.3, 1.12, 1.3, color);
+    addLamp(built, anim, 1.3, 1.12, -1.3, color);
+    addLamp(built, anim, -1.3, 1.12, -1.3, color);
     anim.dish = dish;
 
     built.userData.anim = anim;
@@ -69,22 +134,40 @@ registerBuilding("depot", {
   build(e, color, size) {
     const team = teamMat(color, 0.08);
     const glow = glowMat(color);
+    const gauge = glowMat(0x7cd94f, 0.9);   // fill-level gauge glow
     const built = new THREE.Group();
     const anim = { kind: "depot", lamps: [] };
 
-    const b1 = box(1.7, 0.55, 1.7, BUILDING_BASE, 0, 0.28, 0); b1.castShadow = true;
-    const band = box(1.74, 0.12, 1.74, glow, 0, 0.58, 0);
-    const roof = box(1.4, 0.3, 1.4, team, 0, 0.8, 0); roof.castShadow = true;
-    const dome = new THREE.Mesh(new THREE.SphereGeometry(0.62, 14, 8, 0, Math.PI*2, 0, Math.PI/2), team);
-    dome.scale.y = 0.6; dome.position.y = 0.94;
-    const vent = new THREE.Mesh(G.vent, GUNMETAL); vent.position.set(0.42, 1.05, 0.42);
+    // Low armored plinth with a player-color band
+    const b1 = beveledBlock(1.7, 0.5, 1.7, BUILDING_BASE, 0.14); b1.position.y = 0.27;
+    b1.children.forEach(c => c.castShadow = true);
+    const band = box(1.76, 0.12, 1.76, glow, 0, 0.56, 0);
+    const deck = box(1.5, 0.14, 1.5, GUNMETAL, 0, 0.68, 0); deck.castShadow = true;
+
+    // Twin fuel/supply silos side by side — distinctive readable silhouette
+    const silos = [];
+    for (const sx of [-0.42, 0.42]) {
+      const tank = cyl(0.36, 0.4, 0.7, 16, team, sx, 1.1, 0); tank.castShadow = true;
+      const capT = new THREE.Mesh(new THREE.SphereGeometry(0.36, 16, 8, 0, Math.PI*2, 0, Math.PI/2), GUNMETAL);
+      capT.position.set(sx, 1.44, 0); capT.scale.y = 0.55;
+      const ribA = cyl(0.38, 0.38, 0.05, 16, GUNMETAL, sx, 1.0, 0);
+      const ribB = cyl(0.38, 0.38, 0.05, 16, GUNMETAL, sx, 1.24, 0);
+      // vertical fill gauge running up the front of each silo
+      const g = strip(0.05, 0.5, 0.06, gauge, sx, 1.1, 0.38);
+      silos.push(tank, capT, ribA, ribB, g);
+    }
+    // Cross catwalk + pipe tying the silos together
+    const bridge = box(0.9, 0.08, 0.24, GUNMETAL, 0, 1.32, 0);
+    const pipe = new THREE.Mesh(G.pipe, TRIM); pipe.rotation.z = Math.PI / 2;
+    pipe.scale.set(1, 1.3, 1); pipe.position.set(0, 0.9, -0.34);
+    const vent = new THREE.Mesh(G.vent, GUNMETAL); vent.position.set(0, 1.55, 0); vent.scale.setScalar(0.7);
 
     for (const [rx, rz] of [[0.72,0.72],[-0.72,0.72],[0.72,-0.72],[-0.72,-0.72]]) {
       const r = new THREE.Mesh(G.lamp, GUNMETAL); r.scale.setScalar(1.4);
-      r.position.set(rx, 0.28, rz); built.add(r);
+      r.position.set(rx, 0.27, rz); built.add(r);
     }
-    built.add(b1, band, roof, dome, vent);
-    anim.band = band;
+    built.add(b1, band, deck, ...silos, bridge, pipe, vent);
+    anim.band = band; anim.gaugeMat = gauge;
 
     built.userData.anim = anim;
     built.userData.mats = [team];
@@ -93,6 +176,7 @@ registerBuilding("depot", {
 
   animate(g, e, t, move, a) {
     if (a.band) a.band.material.emissiveIntensity = 1.1 + Math.sin(t * 2 + e.id) * 0.5;
+    if (a.gaugeMat) a.gaugeMat.emissiveIntensity = 0.8 + Math.sin(t * 1.5 + e.id) * 0.35;
   },
 });
 
@@ -316,19 +400,39 @@ registerBuilding("barracks", {
   build(e, color, size) {
     const team = teamMat(color, 0.08);
     const glow = glowMat(color);
+    const win = glowMat(0xffb14c, 0.7);   // warm barracks interior
     const built = new THREE.Group();
     const anim = { kind: "barracks", lamps: [] };
 
-    const b1 = box(2.5, 1.15, 2.1, BUILDING_BASE, 0, 0.58, 0); b1.castShadow = true;
-    const trim = box(2.54, 0.12, 2.14, team, 0, 1.02, 0);
-    const roof = box(2.6, 0.25, 2.3, team, 0, 1.28, 0); roof.rotation.z = 0.06; roof.castShadow = true;
-    const surround = box(1.05, 1.0, 0.1, DARK, 0, 0.5, 1.02);
-    const door = box(0.85, 0.8, 0.08, glow, 0, 0.42, 1.06);
-    const pole = new THREE.Mesh(G.pole, GUNMETAL); pole.position.set(-1.0, 1.9, -0.8);
-    const vent = new THREE.Mesh(G.vent, GUNMETAL); vent.position.set(0.85, 1.5, -0.7);
+    // Main drill hall — beveled block on an armored footing
+    const skirt = box(2.62, 0.16, 2.22, DARK, 0, 0.08, 0); skirt.castShadow = true;
+    const b1 = beveledBlock(2.5, 1.08, 2.1, BUILDING_BASE, 0.18); b1.position.y = 0.62;
+    b1.children.forEach(c => c.castShadow = true);
+    // Ribbed armor pilasters along the long side + row of small windows
+    const ribs = panelRow(4, 0.6, GUNMETAL, 0, 0.62, -1.06, 0.16, 0.9, 0.06, "x");
+    const winRow = panelRow(4, 0.55, win, 0, 0.85, 1.06, 0.28, 0.14, 0.05, "x");
+    // Player-color trim + slightly overhanging roof with a raised spine
+    const trim = box(2.56, 0.14, 2.16, team, 0, 1.12, 0);
+    const roof = box(2.62, 0.22, 2.32, GUNMETAL, 0, 1.28, 0); roof.castShadow = true;
+    const spine = box(1.4, 0.16, 2.0, team, 0, 1.45, 0); spine.castShadow = true;
+    const spineGlow = strip(1.2, 0.06, 0.2, glow, 0, 1.54, 0);
+    // Recessed reinforced bay door with a glowing frame + threshold light
+    const surround = box(1.1, 1.02, 0.12, DARK, 0, 0.55, 1.02);
+    const doorFrame = box(1.0, 0.92, 0.06, team, 0, 0.5, 1.07);
+    const door = box(0.82, 0.78, 0.08, glow, 0, 0.44, 1.1);
+    const threshold = strip(0.9, 0.05, 0.14, glow, 0, 0.06, 1.18);
+    // Side annex + comms gear
+    const annex = box(0.5, 0.6, 1.2, BUILDING_BASE, 1.36, 0.4, -0.3); annex.castShadow = true;
+    const pole = new THREE.Mesh(G.pole, GUNMETAL); pole.position.set(-1.05, 1.95, -0.85);
+    const dish = new THREE.Mesh(G.dish, team); dish.position.set(-1.05, 2.55, -0.85); dish.rotation.z = 0.5;
+    const vent = new THREE.Mesh(G.vent, GUNMETAL); vent.position.set(0.9, 1.55, -0.75);
+    const vent2 = new THREE.Mesh(G.vent, GUNMETAL); vent2.position.set(0.5, 1.55, -0.75); vent2.scale.setScalar(0.8);
 
-    built.add(b1, trim, roof, surround, door, pole, vent);
-    addLamp(built, anim, -1.0, 2.62, -0.8, color);
+    built.add(skirt, b1, ribs, winRow, trim, roof, spine, spineGlow,
+              surround, doorFrame, door, threshold, annex, pole, dish, vent, vent2);
+    addLamp(built, anim, -1.05, 2.65, -0.85, color);
+    addLamp(built, anim, 1.28, 1.2, 1.0, color);
+    addLamp(built, anim, -1.28, 1.2, 1.0, color);
     anim.door = door;
 
     built.userData.anim = anim;
