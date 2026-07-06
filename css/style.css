@@ -641,10 +641,13 @@ kbd {
   border-radius: 7px;
 }
 
-/* command card — glass tiles */
+/* command card — glass tiles, keyboard-shaped: 5 cols x 3 rows mirroring
+   QWERT / ASDFG / ZXCVB. Buttons are explicitly placed at their physical
+   key's cell (hud.js GRID_POS), so screen position == finger position. */
 #cmd-card {
   display: grid;
-  grid-template-columns: repeat(3, 76px);
+  grid-template-columns: repeat(5, 64px);
+  grid-template-rows: repeat(3, minmax(58px, auto));
   gap: 6px;
   pointer-events: auto;
 }

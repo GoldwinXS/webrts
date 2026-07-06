@@ -294,7 +294,7 @@ export class Hud {
 
     const kc = (k) => `<kbd>${k}</kbd>`;
     const fixed = [
-      ["Command-card grid", `${kc("Q")}${kc("W")}${kc("E")}${kc("A")}${kc("S")}${kc("D")}${kc("F")}`],
+      ["Command-card grid", `${kc("Q")}${kc("W")}${kc("E")}${kc("R")}${kc("T")} ${kc("A")}${kc("S")}${kc("D")}${kc("F")} ${kc("Z")}${kc("X")}${kc("C")}`],
       ["Cycle subgroup", kc("Tab")],
       ["Queue orders", kc("Shift")],
       ["Set control group", `${kc("Ctrl")}+${kc("1-9")}`],
@@ -495,7 +495,8 @@ export class Hud {
     const slots = [];
     if (this.activeType === "worker") {
       const order = ["depot", "barracks", "refinery", "hq", "factory", "starport", "turret"];
-      const keys = ["q", "w", "e", "r", "t", "g", "v"];
+      // builds fill the top row, overflowing onto z/x (a/s/d/f stay combat)
+      const keys = ["q", "w", "e", "r", "t", "z", "x"];
       order.forEach((b, i) => {
         const d = BUILDINGS[b];
         if (!d) return;
@@ -542,12 +543,21 @@ export class Hud {
       slots.push({ key: "f", cmd: "patrol", label: "Patrol", sub: "all units" });
     }
 
+    // Physical key -> card grid cell (row, col). The card is keyboard-shaped:
+    // a button always renders at the position of the key that triggers it.
+    const GRID_POS = {
+      q: [1, 1], w: [1, 2], e: [1, 3], r: [1, 4], t: [1, 5],
+      a: [2, 1], s: [2, 2], d: [2, 3], f: [2, 4], g: [2, 5],
+      z: [3, 1], x: [3, 2], c: [3, 3], v: [3, 4], b: [3, 5],
+    };
     this.hotkeys = {};
     let card = "";
     for (const s of slots) {
       this.hotkeys[s.key] = s.cmd;
       const cls = [s.cls, s.disabled ? "cooldown" : ""].filter(Boolean).join(" ");
-      card += `<button data-cmd="${s.cmd}"${cls ? ` class="${cls}"` : ""}><kbd>${s.key.toUpperCase()}</kbd><span>${s.label}</span><small>${s.sub}</small></button>`;
+      const pos = GRID_POS[s.key];
+      const at = pos ? ` style="grid-row:${pos[0]};grid-column:${pos[1]}"` : "";
+      card += `<button data-cmd="${s.cmd}"${cls ? ` class="${cls}"` : ""}${at}><kbd>${s.key.toUpperCase()}</kbd><span>${s.label}</span><small>${s.sub}</small></button>`;
     }
     this.$cmdCard.innerHTML = card;
     for (const b of this.$cmdCard.querySelectorAll("button")) {
@@ -861,7 +871,7 @@ export class Hud {
       this.game.issue({ t: "move", ids, x: fx, y: fy, q: e.shiftKey ? 1 : 0 });
       this.audio.ack();
     }
-    this.renderer.orderPing(wx, wy, "#7cff6b");
+    this.renderer.orderPing(wx, wy, "#1c7d3f");
   }
 
   // ---------- feedback ----------

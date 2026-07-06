@@ -74,7 +74,9 @@ export class Renderer {
     this.fx = new Effects(this.scene);
     this.fx.heightAt = (x, z) => this.heightAt(x, z);
 
-    this.ringMat = new THREE.MeshBasicMaterial({ color: 0x7cff6b, side: THREE.DoubleSide, transparent: true, opacity: 0.9, depthWrite: false });
+    // Selection: white reads on every bright biome (the old 0x7cff6b green was
+    // near-isoluminant with verdant grass). Order feedback uses DEEP ink tones.
+    this.ringMat = new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide, transparent: true, opacity: 0.9, depthWrite: false });
     this.barBgMat = new THREE.MeshBasicMaterial({ color: 0x10141a });
     this.buildRallyPool();
     this.buildQueuePaths();
@@ -711,9 +713,10 @@ export class Renderer {
       for (let x = 0; x < w; x++) {
         const f = fog[y * w + x];
         if (f === 2) continue;
-        // Bright look: unexplored reads as a soft cloudy haze (not a black void);
-        // explored-but-out-of-sight gets a gentle cool dim instead of near-black.
-        ctx.fillStyle = f === 1 ? "rgba(92,108,132,0.34)" : "rgba(210,222,238,0.88)";
+        // Bright look, salience-ordered: VISIBLE terrain stays the most vivid
+        // thing on screen. Unexplored is a mid-tone slate haze (obscured but not
+        // glaring); explored-but-out-of-sight is a clear cool dim between the two.
+        ctx.fillStyle = f === 1 ? "rgba(52,66,88,0.38)" : "rgba(148,168,190,0.72)";
         ctx.fillRect(x * PX, y * PX, PX, PX);
       }
     }
@@ -931,40 +934,13 @@ export class Renderer {
     this.scene.add(inst);
   }
 
-  buildStars() {
-    const n = 700;
-    const pos = new Float32Array(n * 3);
-    const col = new Float32Array(n * 3);
-    const cx = this.sim.map.w / 2, cz = this.sim.map.h / 2;
-    for (let i = 0; i < n; i++) {
-      const a = Math.random() * Math.PI * 2;
-      const alt = Math.random() * Math.PI * 0.42 + 0.06;
-      const r = 130;
-      pos[i * 3] = cx + Math.cos(a) * Math.cos(alt) * r;
-      pos[i * 3 + 1] = Math.sin(alt) * r;
-      pos[i * 3 + 2] = cz + Math.sin(a) * Math.cos(alt) * r;
-      const b = 0.35 + Math.random() * 0.65;
-      const warm = Math.random() > 0.8;
-      col[i * 3] = b; col[i * 3 + 1] = b * (warm ? 0.85 : 0.95); col[i * 3 + 2] = b * (warm ? 0.7 : 1.1);
-    }
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
-    geo.setAttribute("color", new THREE.BufferAttribute(col, 3));
-    const stars = new THREE.Points(geo, new THREE.PointsMaterial({
-      size: 0.8, vertexColors: true, sizeAttenuation: false,
-      transparent: true, opacity: 0.85, depthWrite: false, fog: false,
-    }));
-    stars.frustumCulled = false;
-    this.scene.add(stars);
-  }
-
   // one dashed rally line (building center -> rally point)
   makeRallyLine() {
     const geo = new THREE.BufferGeometry().setFromPoints([
       new THREE.Vector3(), new THREE.Vector3(),
     ]);
     const mat = new THREE.LineDashedMaterial({
-      color: 0x7cff6b, dashSize: 0.45, gapSize: 0.3,
+      color: 0x1c7d3f, dashSize: 0.45, gapSize: 0.3,
       transparent: true, opacity: 0.65,
       depthWrite: false, depthTest: false,   // UI overlay: never hide under terrain
     });
@@ -1037,13 +1013,14 @@ export class Renderer {
     const cap = this.queueMaxSegments;
     let seg = 0;
 
+    // Deep ink tones: the old pastel-bright lines washed out on bright terrain.
     const KIND_COLORS = {
-      move: [0.49, 1.0, 0.42],
-      attackmove: [1.0, 0.37, 0.30],
-      attack: [1.0, 0.37, 0.30],
-      patrol: [0.42, 0.72, 1.0],
-      gather: [0.39, 0.91, 0.86],
-      build: [1.0, 0.70, 0.28],
+      move: [0.11, 0.49, 0.25],
+      attackmove: [0.85, 0.23, 0.17],
+      attack: [0.85, 0.23, 0.17],
+      patrol: [0.14, 0.34, 0.70],
+      gather: [0.05, 0.56, 0.51],
+      build: [0.70, 0.42, 0.07],
     };
 
     // follow the terrain: each endpoint sits at ground height + a small lift
@@ -1106,7 +1083,7 @@ export class Renderer {
       pts.needsUpdate = true;
       line.computeLineDistances();
       const onMineral = b.rally.targetId && sim.byId.get(b.rally.targetId)?.type === "mineral";
-      line.material.color.setHex(onMineral ? 0x63e8db : 0x7cff6b);
+      line.material.color.setHex(onMineral ? 0x0e8f83 : 0x1c7d3f);
 
       flag.visible = true;
       flag.position.set(rx, this.heightAt(rx, rz), rz);
@@ -1146,7 +1123,7 @@ export class Renderer {
     const geo = new THREE.PlaneGeometry(0.9, 0.9);
     for (let i = 0; i < 81; i++) {
       const mat = new THREE.MeshBasicMaterial({
-        color: 0x7cff6b, transparent: true, opacity: 0.16,
+        color: 0x2e9e57, transparent: true, opacity: 0.3,   // deep green: readable fill on bright ground
         depthWrite: false, side: THREE.DoubleSide,
       });
       const q = new THREE.Mesh(geo, mat);
@@ -1208,7 +1185,7 @@ export class Renderer {
             if (near) ok = false;
           }
         }
-        q.material.color.setHex(0x7cff6b);
+        q.material.color.setHex(0x2e9e57);
         q.visible = ok;
       }
     }
@@ -1227,12 +1204,12 @@ export class Renderer {
         if (o.phase === "return") {
           const depot = sim.nearestEntity(e.x, e.y, 60 * FP, (b) =>
             b.building && b.done && b.owner === e.owner && BUILDINGS[b.type].deposit);
-          if (depot) targets.set(depot.id, 0x63e8db);
-        } else if (sim.byId.has(o.targetId)) targets.set(o.targetId, 0x63e8db);
+          if (depot) targets.set(depot.id, 0x0e8f83);
+        } else if (sim.byId.has(o.targetId)) targets.set(o.targetId, 0x0e8f83);
       } else if (o.kind === "build" && sim.byId.has(o.targetId)) {
-        targets.set(o.targetId, 0xffb347);
+        targets.set(o.targetId, 0xb36a12);
       } else if (o.kind === "attack" && sim.byId.has(o.targetId)) {
-        targets.set(o.targetId, 0xff5f4c);
+        targets.set(o.targetId, 0xe04432);
       }
       if (targets.size >= this.targetRings.length) break;
     }
@@ -1294,7 +1271,7 @@ export class Renderer {
     const g = new THREE.Group();
     const pole = new THREE.Mesh(SHARED.pole, new THREE.MeshBasicMaterial({ color: 0xcccccc }));
     pole.position.y = 0.7;
-    const flag = new THREE.Mesh(SHARED.flag, new THREE.MeshBasicMaterial({ color: 0x7cff6b }));
+    const flag = new THREE.Mesh(SHARED.flag, new THREE.MeshBasicMaterial({ color: 0x1c7d3f }));
     flag.position.set(0.17, 1.25, 0);
     g.add(pole, flag);
     g.visible = false;
@@ -1657,7 +1634,7 @@ export class Renderer {
           break;
         }
         case "complete":
-          if (ev.owner === this.localPlayer) this.fx.shockRing(W2(ev.x), W2(ev.y), 0x7cff6b, 2.2, 0.6);
+          if (ev.owner === this.localPlayer) this.fx.shockRing(W2(ev.x), W2(ev.y), 0x1c7d3f, 2.2, 0.6);
           break;
         case "trained":
           break; // spawn poof handled on mesh creation

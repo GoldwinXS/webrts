@@ -145,11 +145,5 @@ export const ABILITIES = {
   },
 };
 
-export const HOTKEYS = {
-  worker: "q", marine: "q", brute: "w", tank: "q", wraith: "q", banshee: "w",
-  depot: "z", barracks: "x", hq: "c",
-  refinery: "v", factory: "b", starport: "n", turret: "m",
-};
-
 export const PLAYER_COLORS = ["#4cc2ff", "#ff5f4c"];
 export const MAX_QUEUE = 5;
