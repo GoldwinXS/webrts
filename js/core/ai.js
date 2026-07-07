@@ -78,15 +78,20 @@ export class AI {
         sim.canAfford(this.pid, BUILDINGS.refinery.cost)) {
       this.tryBuildRefinery(sim, cmds, workers);
     }
-    // keep any half-built refinery progressing: if no worker is currently
-    // constructing it, send one (workers get stolen back to mining otherwise).
+    // Keep EVERY half-built structure progressing. A worker's build order can be
+    // cleared (path failure, or the worker gets stolen back to mining), which
+    // orphans the site — and because an orphaned site still counts as
+    // "<type>Coming", it permanently blocks that whole build branch AND makes the
+    // AI bank minerals it can't spend. So: any site with no live builder gets an
+    // idle/mining worker sent to resume it. (Was refinery-only; now all types.)
+    const adopted = new Set();
     for (const site of sites) {
-      if (site.type !== "refinery") continue;
       const hasBuilder = workers.some((w) => w.order.kind === "build" && w.order.targetId === site.id);
-      if (!hasBuilder) {
-        const w = workers.find((x) => x.order.kind === "gather" || x.order.kind === "idle");
-        if (w) cmds.push({ t: "resume", ids: [w.id], targetId: site.id });
-      }
+      if (hasBuilder) continue;
+      const w = workers.find((x) => !adopted.has(x.id) &&
+        (x.order.kind === "idle" ||
+         (x.order.kind === "gather" && x.order.resource !== "gas")));
+      if (w) { adopted.add(w.id); cmds.push({ t: "resume", ids: [w.id], targetId: site.id }); }
     }
     const doneRefineries = refineries;
     if (doneRefineries.length) {
