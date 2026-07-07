@@ -494,7 +494,7 @@ export class Input {
     const { tx, ty } = this.ghostTile || {};
     const worker = this.mySelectedWorkers()[0];
     if (!worker) { this.hud.toast("Select a worker first"); this.audio.error(); return; }
-    if (!this.sim.canAfford(this.pid, d.cost)) { this.hud.toast("Not enough minerals"); this.audio.error(); return; }
+    if (!this.sim.canAfford(this.pid, d.cost)) { this.hud.toast("Not enough scrap"); this.audio.error(); return; }
     if (!this.sim.canPlace(this.placing, tx, ty)) { this.hud.toast("Can't build there"); this.audio.error(); return; }
     this.game.issue({ t: "build", workerId: worker.id, building: this.placing, tx, ty });
     this.audio.place();

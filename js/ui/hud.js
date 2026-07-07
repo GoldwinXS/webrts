@@ -649,7 +649,7 @@ export class Hud {
       }
       if (b && !this.sim.canAfford(this.pid, b.cost, b.gasCost || 0)) {
         this.audio.error();
-        return this.toast(b.gasCost && this.sim.gas[this.pid] < b.gasCost ? "Not enough gas" : "Not enough minerals");
+        return this.toast(b.gasCost && this.sim.gas[this.pid] < b.gasCost ? "Not enough oil" : "Not enough scrap");
       }
       this.input?.startPlacing(cmd.slice(6));
     }
@@ -673,7 +673,7 @@ export class Hud {
       const s = this.sim.supplyOf(this.pid);
       if (!this.sim.canAfford(this.pid, d.cost, d.gasCost || 0)) {
         this.audio.error();
-        return this.toast(d.gasCost && this.sim.gas[this.pid] < d.gasCost ? "Not enough gas" : "Not enough minerals");
+        return this.toast(d.gasCost && this.sim.gas[this.pid] < d.gasCost ? "Not enough oil" : "Not enough scrap");
       }
       // supply is claimed when production starts, so queuing is allowed —
       // just warn that the queue will stall until a depot finishes
@@ -706,7 +706,7 @@ export class Hud {
     if (this.sim.upgradeQueued(this.pid, upg)) { this.audio.error(); return this.toast("Already researching"); }
     if (!this.sim.canAfford(this.pid, up.cost, up.gasCost || 0)) {
       this.audio.error();
-      return this.toast(up.gasCost && this.sim.gas[this.pid] < up.gasCost ? "Not enough gas" : "Not enough minerals");
+      return this.toast(up.gasCost && this.sim.gas[this.pid] < up.gasCost ? "Not enough oil" : "Not enough scrap");
     }
     // pick the selected building of the matching type with the shortest queue
     const b = this.mineOfType(up.building).filter((e) => e.building && e.done && e.queue.length < MAX_QUEUE)

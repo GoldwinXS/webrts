@@ -27,7 +27,7 @@ export const GAS_DEPLETED = 2;       // gas yielded once a geyser hits 0
 
 export const UNITS = {
   worker: {
-    name: "Bolt", cost: 50, gasCost: 0, supply: 1, hp: 45, speed: 68,
+    name: "Bearing", cost: 50, gasCost: 0, supply: 1, hp: 45, speed: 68,
     dmg: 4, dmgAir: 0, range: (FP * 0.7) | 0, acquire: 0, cooldown: 10,
     sight: 7, buildTime: 80, radius: (FP * 0.34) | 0,
   },

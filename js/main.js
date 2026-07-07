@@ -157,8 +157,8 @@ function buildShowcase(game, renderer) {
   // a resource pair to inspect
   sim.addEntity({ type: "mineral", owner: -1, x: tileToFp(cx - 3), y: tileToFp(cz + 5), hp: 0, maxHp: 0, amount: 1500, radius: (FP * 0.4) | 0 });
   sim.addEntity({ type: "geyser", owner: -1, x: tileToFp(cx + 3), y: tileToFp(cz + 5), hp: 0, maxHp: 0, amount: 2500, radius: (FP * 0.45) | 0, geyser: true });
-  label("Minerals", cx - 3, cz + 5, 1.6, "#8fe3d8");
-  label("Gas", cx + 3, cz + 5, 1.6, "#a7e87c");
+  label("Scrap", cx - 3, cz + 5, 1.6, "#8fe3d8");
+  label("Oil", cx + 3, cz + 5, 1.6, "#a7e87c");
 
   // frame the camera on the whole collection
   const cam = renderer.camera;
