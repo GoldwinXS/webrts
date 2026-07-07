@@ -318,12 +318,25 @@ export class Renderer {
     // the noise field itself tiles: hash(0,y) == the pixel that neighbors
     // hash(PX-1,y) across the seam. (pixHash already only depends on x,y, and
     // x/y stay in [0,PX) here, so the field is inherently periodic at PX.)
-    // Softer amplitudes than before: the brightest tier read as sparkly
-    // out-of-place specks, so the highlights are pulled in and thinned out.
-    const dark = rgbStr(shade(tone, -0.10));
-    const darker = rgbStr(shade(tone, -0.18));
-    const light = rgbStr(lift(tone, 0.07));
-    const lighter = rgbStr(lift(tone, 0.11));
+    // Hand-painted color logic for the bright palette: flat darkening reads as
+    // DIRT on sunny tones, so shadow cells are hue-shifted toward a saturated
+    // per-biome shadow color (deep meadow green / terracotta / periwinkle) and
+    // highlight cells toward a per-biome sunlight color. Saturated shadows are
+    // what makes gouache/toy dioramas feel alive; gray shadows make mud.
+    const mixC = (a, b, k) => [CH(a[0] + (b[0] - a[0]) * k), CH(a[1] + (b[1] - a[1]) * k), CH(a[2] + (b[2] - a[2]) * k)];
+    const name = th.name;
+    const shadowHue = name === "verdant" ? [46, 120, 70]      // deep meadow green
+                    : name === "ashen"   ? [168, 88, 52]      // terracotta
+                    :                      [120, 160, 214];   // periwinkle ice-shadow
+    const sunHue    = name === "verdant" ? [214, 240, 170]    // warm chartreuse sun
+                    : name === "ashen"   ? [255, 218, 152]    // late-afternoon sand
+                    :                      [235, 248, 255];   // cool snow-light
+    // Amplitudes gentler than the old dark-palette pass (bright bases need
+    // less push to read), with the hue mixes doing the expressive work.
+    const dark = rgbStr(mixC(shade(tone, -0.07), shadowHue, 0.18));
+    const darker = rgbStr(mixC(shade(tone, -0.13), shadowHue, 0.26));
+    const light = rgbStr(mixC(lift(tone, 0.05), sunHue, 0.12));
+    const lighter = rgbStr(mixC(lift(tone, 0.08), sunHue, 0.18));
     // "Simple but detailed": paint the noise in coarse CELL blocks instead of
     // per-pixel. A CELL x CELL fill reads as a calm soft patch rather than TV
     // static, and holds up when the camera zooms out. Coverage is also lower
@@ -347,44 +360,74 @@ export class Renderer {
 
     // Theme-specific pixel-art accents at fixed positions. Positions scaled up
     // for the 32px tile; ALL writes go through `set` so multi-pixel features
-    // wrap cleanly across edges instead of being clipped.
-    const name = th.name;
+    // wrap cleanly across edges instead of being clipped. Every accent slides
+    // by a per-seed CELL-agnostic offset so content variants differ; `set`
+    // wraps, so shifted features stay seamless.
     if (name === "verdant") {
-      // Grass blade tufts: a few tiny vertical dashes. Thinned from 7 to 3 and
-      // reduced to 2px verticals — the old plus-shaped clusters were the
-      // strongest directional feature, so their rotated copies lined up into
-      // visible diagonal streaks when zoomed out. Fewer, smaller, lower-
-      // contrast tufts read as gentle life without a repeating rhythm.
+      // Grass blade tufts: short 2px verticals in a livelier meadow green
+      // (color says "grass", brightness alone said "glint") plus one shadow
+      // pixel at the foot so each blade sits IN the lawn instead of ON it.
       const tufts = [[9, 13], [22, 8], [15, 25]];
-      const blade = rgbStr(lift(tone, 0.09));
-      // Slide tufts by a per-seed offset so content variants place them
-      // differently; `set` wraps, so shifted tufts stay seamless.
+      const blade = rgbStr(mixC(lift(tone, 0.08), [150, 224, 120], 0.45));
+      const root = rgbStr(mixC(shade(tone, -0.10), shadowHue, 0.30));
       const ox = (sd * 7) | 0, oy = (sd * 11) | 0;
       for (const [tx, ty] of tufts) {
         set(tx + ox, ty + oy, blade);
         set(tx + ox, ty + oy - 1, blade);
+        set(tx + ox + 1, ty + oy, root);
       }
-      // (Daisies removed: the pure-white/gold pixels read as out-of-place
-      // specks against the grass. Grass tufts alone give enough life.)
+      // Tiny meadow blooms on HALF the content variants only — charm, not
+      // confetti. A 2px petal pair (soft pink or butter yellow, both blended
+      // 25% toward the grass so nothing reads as a stray white speck at RTS
+      // zoom), a warm heart pixel, and a leaf pixel tying it to the ground.
+      if (sd % 2 === 1) {
+        const petal = (sd & 2) ? mixC([255, 190, 205], tone, 0.25)   // clover pink
+                               : mixC([255, 224, 150], tone, 0.25);  // buttercup
+        const petalCss = rgbStr(petal);
+        const heart = rgbStr(mixC(petal, [226, 148, 92], 0.40));
+        const leaf = rgbStr(mixC(shade(tone, -0.12), shadowHue, 0.30));
+        const fx = 5 + ((sd * 13) % 20), fy = 4 + ((sd * 17) % 20);
+        set(fx, fy, petalCss); set(fx + 1, fy, petalCss);
+        set(fx, fy + 1, heart);
+        set(fx + 1, fy + 1, leaf);
+      }
     } else if (name === "ashen") {
-      // Dirt specks and a small diagonal crack
-      const specks = [[8, 6], [14, 16], [22, 10], [26, 24], [4, 20], [18, 28], [30, 18], [2, 4]];
-      const speck = rgbStr(shade(tone, -0.25));
-      for (const [sx, sy] of specks) set(sx, sy, speck);
-      const crackCss = rgbStr(shade(tone, -0.40));
-      const crack = [[10, 8], [11, 8], [12, 9], [13, 9], [14, 10], [15, 11]];
-      for (const [cx, cy] of crack) set(cx, cy, crackCss);
-    } else if (name === "frozen") {
-      // Ice sparkle crosses
-      const sparkles = [[6, 8], [18, 14], [26, 24], [12, 28], [30, 6], [3, 20]];
-      const arm = rgbStr(lift(tone, 0.18));
-      for (const [sx, sy] of sparkles) {
-        set(sx, sy, "#e8f4ff");
-        set(sx - 1, sy, arm);
-        set(sx + 1, sy, arm);
-        set(sx, sy - 1, arm);
-        set(sx, sy + 1, arm);
+      // Sunlit pebbles: 2x2 stones with a light sandy cap over a warm umber
+      // underside — the two-tone pair reads as a lit pebble casting shade
+      // (painted desert), where the old lone dark specks read as dirt flecks.
+      const pebbles = [[8, 6], [22, 12], [5, 21], [18, 27]];
+      const cap = rgbStr(mixC(lift(tone, 0.13), sunHue, 0.25));
+      const under = rgbStr(mixC(shade(tone, -0.16), shadowHue, 0.35));
+      const ox = (sd * 5) | 0, oy = (sd * 9) | 0;
+      for (const [sx, sy] of pebbles) {
+        set(sx + ox, sy + oy, cap); set(sx + ox + 1, sy + oy, cap);
+        set(sx + ox, sy + oy + 1, under); set(sx + ox + 1, sy + oy + 1, under);
       }
+      // One hairline crack in gentle warm umber — sunbaked clay shrinkage,
+      // not scorched-earth fissure (old -0.40 black-brown was ember gloom).
+      const crackCss = rgbStr(mixC(shade(tone, -0.20), [132, 72, 46], 0.40));
+      const crack = [[11, 9], [12, 9], [13, 10], [14, 10], [15, 11]];
+      for (const [cx, cy] of crack) set(cx + ox, cy + oy, crackCss);
+    } else if (name === "frozen") {
+      // Gentle sparkle diamonds: pastel cores LIFTED FROM THE LOCAL TONE
+      // (never a fixed near-white — that glared on the bright base) with
+      // softer arms, thinned 6 -> 4 so the ice shimmers instead of glinting.
+      const sparkles = [[7, 9], [19, 15], [26, 25], [12, 28]];
+      const core = rgbStr(mixC(lift(tone, 0.15), sunHue, 0.30));
+      const arm = rgbStr(lift(tone, 0.08));
+      const ox = (sd * 7) | 0, oy = (sd * 11) | 0;
+      for (const [sx, sy] of sparkles) {
+        set(sx + ox, sy + oy, core);
+        set(sx + ox - 1, sy + oy, arm);
+        set(sx + ox + 1, sy + oy, arm);
+        set(sx + ox, sy + oy - 1, arm);
+        set(sx + ox, sy + oy + 1, arm);
+      }
+      // A short meltwater vein: deeper pastel blue diagonal that gives the
+      // glacier soft depth without reading as a crack in the toy.
+      const vein = rgbStr(mixC(shade(tone, -0.09), [110, 156, 214], 0.35));
+      const veinPts = [[3, 18], [4, 19], [5, 19], [6, 20]];
+      for (const [vx, vy] of veinPts) set(vx + ox, vy + oy, vein);
     }
     return c;
   }
@@ -575,42 +618,26 @@ export class Renderer {
       }
     }
 
-    // ---- 2b. cliff/ramp overlays (texRnd used for cliff rock) ----
-    ctx.save();
+    // ---- 2b. shared overlay helpers ----
+    // (The old translucent cliff-speckle pass here was entirely painted over
+    // by the opaque cliff fill in section 5, and the old ramp pre-gradient by
+    // section 6's opaque ramp tiles — so the visible rock-chip detail now
+    // lives inside section 5 where it actually shows.)
     const texRng = makeRng(this.sim.seed ^ 0x7e57);
     const texRnd = () => texRng() / 0xffffffff;
     const tName = th.name;
-    // Ramp tiles: smooth gradient blend
-    if (rampTiles) {
-      ctx.globalAlpha = 0.12;
-      const grad = ctx.createLinearGradient(0, 0, 0, PX);
-      grad.addColorStop(0, rgbStr(lift(th.ground, 0.12)));
-      grad.addColorStop(1, rgbStr([th.ground[0]*0.7, th.ground[1]*0.7, th.ground[2]*0.7].map(CH)));
-      ctx.fillStyle = grad;
-      for (let y = 0; y < h; y++)
-        for (let x = 0; x < w; x++) {
-          if (!rampTiles[y * w + x]) continue;
-          ctx.fillRect(x * PX, y * PX, PX, PX);
-        }
-    }
-    // Cliff face: rock-like irregular shapes
-    ctx.globalAlpha = 0.08;
-    ctx.fillStyle = tName === "verdant" ? "rgb(85,75,60)" : tName === "ashen" ? "rgb(70,55,45)" : "rgb(90,100,115)";
-    for (let y = 0; y < h; y++)
-      for (let x = 0; x < w; x++) {
-        if (!isCliffFace(x, y)) continue;
-        for (let i = 0; i < 2; i++) {
-          ctx.fillRect(x * PX + texRnd() * PX, y * PX + texRnd() * PX,
-            2 + texRnd() * 4, 1 + texRnd() * 3);
-        }
-      }
-    ctx.restore();
+    const mixT = (a, b, k) => [CH(a[0] + (b[0] - a[0]) * k), CH(a[1] + (b[1] - a[1]) * k), CH(a[2] + (b[2] - a[2]) * k)];
 
-    // ---- 3. losBlock tiles: slightly darker + denser ------------------------
+    // ---- 3. losBlock tiles: sit in saturated biome shade ---------------------
+    // Flat black over the bright palette read as scorched dirt. A saturated
+    // per-biome shadow tint reads as "ground shaded by dense foliage" while
+    // staying clearly darker than open ground so the gameplay cue survives.
     if (losBlock) {
       ctx.save();
-      ctx.globalAlpha = 0.22;
-      ctx.fillStyle = "rgb(0,0,0)";
+      ctx.globalAlpha = 0.26;
+      ctx.fillStyle = tName === "verdant" ? "rgb(26,74,44)"
+                     : tName === "ashen"  ? "rgb(122,56,30)"
+                     :                      "rgb(54,92,140)";
       for (let y = 0; y < h; y++)
         for (let x = 0; x < w; x++)
           if (losBlock[y * w + x]) ctx.fillRect(x * PX, y * PX, PX, PX);
@@ -620,7 +647,12 @@ export class Renderer {
     // ---- 4. crisp dark outline along cliff edges + around barrier blobs -----
     // Draw a 2-3 texel dark band on the ground-side of every cliff face, and a
     // border around flat-ground barrier tiles so stands/outcrops read as blobs.
-    const outline = "rgba(12,14,18,0.62)";
+    // Toon outlines stay DARK (that is the look), but hue-tied to the biome —
+    // deep forest green / burnt umber / deep slate blue — the way a painter
+    // inks with a dark cousin of the local color instead of neutral black.
+    const outline = tName === "verdant" ? "rgba(28,52,34,0.60)"
+                  : tName === "ashen"   ? "rgba(94,44,24,0.62)"
+                  :                       "rgba(40,60,92,0.60)";
     const OW = Math.max(2, (PX / 6) | 0);             // outline band width
     ctx.fillStyle = outline;
     for (let y = 0; y < h; y++) {
@@ -642,14 +674,22 @@ export class Renderer {
       }
     }
 
-    // ---- 5. cliff FACE fill: rocky cliff tone with directional highlights --
-    // Paint cliff-face tiles with the theme cliffTop tone (rocky), darker than
-    // the plateau top for depth. Highlights on every side facing higher ground
-    // so the cliff lip reads naturally regardless of orientation.
+    // ---- 5. cliff FACE fill: warm painted rock derived from cliffTop --------
+    // The face is a deeper, slightly MORE SATURATED cousin of the plateau top:
+    // multiplied down less than before (0.66/0.84 vs the old 0.58/0.78 — the
+    // bright palette needs less push to read as a wall) and hue-shifted toward
+    // a per-biome rock-shadow color so cliffs read as sunlit painted rock, not
+    // gray gloom. Chunky two-step bevel + full cliffTop lip = toy-block cliff.
     const cliffTone = th.cliffTop;
-    const cliffDark = [cliffTone[0] * 0.58, cliffTone[1] * 0.58, cliffTone[2] * 0.58].map(CH);
-    const cliffMid = [cliffTone[0] * 0.78, cliffTone[1] * 0.78, cliffTone[2] * 0.78].map(CH);
+    const rockShadowHue = tName === "verdant" ? [96, 104, 78]     // mossy olive
+                        : tName === "ashen"   ? [172, 96, 58]     // canyon red
+                        :                       [126, 152, 190];  // glacial blue
+    const cliffDark = mixT([cliffTone[0] * 0.66, cliffTone[1] * 0.66, cliffTone[2] * 0.66].map(CH), rockShadowHue, 0.30);
+    const cliffMid = mixT([cliffTone[0] * 0.84, cliffTone[1] * 0.84, cliffTone[2] * 0.84].map(CH), rockShadowHue, 0.18);
+    const chipDark = rgbStr(mixT(cliffDark, rockShadowHue, 0.45));
+    const chipLight = rgbStr(lift(cliffMid, 0.10));
     const lipW = Math.max(2, (OW / 2) | 0);
+    const chipSpan = PX - 2 * OW - 6;               // keep chips inside the bevel
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
         if (!isCliffFace(x, y)) continue;
@@ -659,6 +699,18 @@ export class Renderer {
         ctx.fillRect(px + OW, py + OW, PX - 2 * OW, PX - 2 * OW);
         ctx.fillStyle = rgbStr(cliffMid);
         ctx.fillRect(px + OW + 1, py + OW + 1, PX - 2 * OW - 2, PX - 2 * OW - 2);
+        // deterministic rock chips (texRnd): two shadow dabs + one sun glint
+        // per face so cliffs aren't flat slabs — drawn inside the inset so the
+        // outline and lip stay crisp. Integer coords keep the pixel-art edge.
+        ctx.fillStyle = chipDark;
+        for (let i = 0; i < 2; i++)
+          ctx.fillRect(px + OW + 2 + ((texRnd() * chipSpan) | 0),
+                       py + OW + 2 + ((texRnd() * chipSpan) | 0),
+                       2 + ((texRnd() * 3) | 0), 1 + ((texRnd() * 2) | 0));
+        ctx.fillStyle = chipLight;
+        ctx.fillRect(px + OW + 2 + ((texRnd() * chipSpan) | 0),
+                     py + OW + 2 + ((texRnd() * chipSpan) | 0),
+                     2 + ((texRnd() * 2) | 0), 1);
         ctx.fillStyle = rgbStr(cliffTone);
         if (lvlAt(x, y - 1) >= l) ctx.fillRect(px, py, PX, lipW);
         if (lvlAt(x, y + 1) >= l) ctx.fillRect(px, py + PX - lipW, PX, lipW);
@@ -672,7 +724,14 @@ export class Renderer {
       }
     }
 
-    // ---- 6. ramps: smooth level blend + subtle worn path --------------------
+    // ---- 6. ramps: seamless mid-tone pixel tile + carved walkway ------------
+    // Each ramp tile is stamped with a SEAMLESS pixel-art tile rendered at the
+    // halfway tone between its two levels (cached per lo->hi pair, a handful
+    // of extra bitmaps at most) so ramps keep the same hand-painted grain as
+    // the ground instead of dropping to a flat smooth fill. Over that: a soft
+    // sunlit path band plus two deterministic tread notches across the travel
+    // axis, so ramps read as friendly carved walkways in the toy diorama.
+    const rampTileCache = {};
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
         if (!isRamp(x, y)) continue;
@@ -684,19 +743,38 @@ export class Renderer {
         if (lvlAt(x, y + 1) > rampHi) rampHi = lvlAt(x, y + 1);
         if (lvlAt(x - 1, y) > rampHi) rampHi = lvlAt(x - 1, y);
         if (lvlAt(x + 1, y) > rampHi) rampHi = lvlAt(x + 1, y);
-        const loT = toneFor(l);
-        const hiT = toneFor(rampHi);
-        const mid = [(loT[0] + hiT[0]) * 0.5, (loT[1] + hiT[1]) * 0.5, (loT[2] + hiT[2]) * 0.5];
-        ctx.fillStyle = rgbStr(mid);
-        ctx.fillRect(px, py, PX, PX);
-        const horiz = (isRamp(x - 1, y) || isRamp(x + 1, y));
-        ctx.fillStyle = "rgba(255,245,210,0.10)";
-        if (horiz) {
-          ctx.fillRect(px, py + (PX * 0.35) | 0, PX, (PX * 0.3) | 0);
-        } else {
-          ctx.fillRect(px + (PX * 0.35) | 0, py, (PX * 0.3) | 0, PX);
+        const key = l * 4 + rampHi;
+        let rTile = rampTileCache[key];
+        if (!rTile) {
+          const loT = toneFor(l);
+          const hiT = toneFor(rampHi);
+          const mid = [(loT[0] + hiT[0]) * 0.5, (loT[1] + hiT[1]) * 0.5, (loT[2] + hiT[2]) * 0.5].map(CH);
+          rTile = rampTileCache[key] = this.makeGroundTile(th, mid, 0);
         }
-        ctx.fillStyle = "rgba(20,16,10,0.22)";
+        ctx.drawImage(rTile, px, py);
+        const horiz = (isRamp(x - 1, y) || isRamp(x + 1, y));
+        // sunlit worn path down the middle of the travel axis
+        ctx.fillStyle = "rgba(255,244,205,0.13)";
+        if (horiz) {
+          ctx.fillRect(px, py + (PX * 0.34) | 0, PX, (PX * 0.32) | 0);
+        } else {
+          ctx.fillRect(px + (PX * 0.34) | 0, py, (PX * 0.32) | 0, PX);
+        }
+        // two carved tread notches per tile, deterministically placed (pixHash
+        // of the tile coords), perpendicular to travel — gentle "steps"
+        ctx.fillStyle = "rgba(70,52,34,0.16)";
+        const n1 = 5 + (pixHash(x, y) % 9);
+        const n2 = 19 + (pixHash(x + 7, y + 3) % 9);
+        if (horiz) {
+          ctx.fillRect(px + n1, py + ((PX * 0.36) | 0), 1, (PX * 0.28) | 0);
+          ctx.fillRect(px + n2, py + ((PX * 0.36) | 0), 1, (PX * 0.28) | 0);
+        } else {
+          ctx.fillRect(px + ((PX * 0.36) | 0), py + n1, (PX * 0.28) | 0, 1);
+          ctx.fillRect(px + ((PX * 0.36) | 0), py + n2, (PX * 0.28) | 0, 1);
+        }
+        // warm rail lines on the ramp's flanks (was near-black; umber keeps
+        // the crisp edge but stays in the sunny key)
+        ctx.fillStyle = "rgba(58,42,28,0.22)";
         if (horiz) { ctx.fillRect(px, py, PX, 1); ctx.fillRect(px, py + PX - 1, PX, 1); }
         else { ctx.fillRect(px, py, 1, PX); ctx.fillRect(px + PX - 1, py, 1, PX); }
       }

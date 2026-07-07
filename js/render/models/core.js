@@ -37,7 +37,37 @@ export function propToon(opts = {}) {
 // model? Add new geometry keys here if needed, or use inline geometry for
 // one-off shapes.
 // ---------------------------------------------------------------------------
+// Gear/cog outline: alternating inner/outer radii make blocky teeth, with a
+// round hole punched through the middle. THE signature Cog-faction emblem —
+// stamped on chests, doors, silos, wheel hubs, and spinning over the HQ.
+function makeCogGeo(r = 0.3, teeth = 8, depth = 0.1) {
+  const shape = new THREE.Shape();
+  const inner = r * 0.76;
+  const n = teeth * 4;
+  for (let i = 0; i <= n; i++) {
+    const seg = i % 4;
+    const a = (i / n) * Math.PI * 2;
+    const rad = seg === 0 || seg === 3 ? inner : r;
+    const x = Math.cos(a) * rad, y = Math.sin(a) * rad;
+    if (i === 0) shape.moveTo(x, y); else shape.lineTo(x, y);
+  }
+  const hole = new THREE.Path();
+  hole.absarc(0, 0, r * 0.3, 0, Math.PI * 2, true);
+  shape.holes.push(hole);
+  const geo = new THREE.ExtrudeGeometry(shape, { depth, bevelEnabled: false });
+  geo.translate(0, 0, -depth / 2);
+  return geo;
+}
+
 const G = {
+  // --- Cog family shared parts (used across every unit AND building) ---
+  cog: makeCogGeo(0.3, 8, 0.1),                       // gear emblem / spinner
+  rivet: new THREE.SphereGeometry(0.04, 6, 5),        // stud detail (+ rosy cheeks)
+  dome: new THREE.SphereGeometry(0.5, 20, 14),        // every head/cabin/roof
+  domeVisor: new THREE.SphereGeometry(0.53, 20, 8,    // curved team-glow visor band
+    Math.PI / 2 - 0.85, 1.7, Math.PI * 0.36, Math.PI * 0.22),
+  tread: new THREE.CapsuleGeometry(0.16, 0.75, 4, 10).rotateX(Math.PI / 2), // pill tread
+  stripe: new THREE.TorusGeometry(0.5, 0.045, 8, 28), // team stripe ring
   // worker drone
   dronePod: new THREE.SphereGeometry(0.3, 18, 14),
   droneBelly: new THREE.SphereGeometry(0.22, 14, 10),
@@ -142,14 +172,36 @@ export const SHARED = G;
 export { G };
 
 // ---------------------------------------------------------------------------
-// Shared materials. Brightened toon palette — cute, not militaristic.
+// Shared materials — THE COGS palette. Industrious tin-toy robots: warm cream
+// enamel shells, tin/gunmetal machinery, copper cog badges + rivets, dark
+// rubber treads. Team color is applied ONLY as an accent (visors, stripes,
+// bobble antenna tips) via teamMat/glowMat — never the whole body.
 // ---------------------------------------------------------------------------
-export const DARK     = new THREE.MeshToonMaterial({ color: 0x4a5266, gradientMap: toonGradient() });
-export const GUNMETAL = new THREE.MeshToonMaterial({ color: 0x5e6878, gradientMap: toonGradient() });
+export const CREAM    = new THREE.MeshToonMaterial({ color: 0xf3e9d4, gradientMap: toonGradient() }); // enamel shell
+export const TIN      = new THREE.MeshToonMaterial({ color: 0xaeb4ba, gradientMap: toonGradient() }); // light metal
+export const COPPER   = new THREE.MeshToonMaterial({ color: 0xc9853f, gradientMap: toonGradient() }); // cogs, bands, rivets
+export const DARK     = new THREE.MeshToonMaterial({ color: 0x525a66, gradientMap: toonGradient() }); // joints, sockets
+export const GUNMETAL = new THREE.MeshToonMaterial({ color: 0x6d7580, gradientMap: toonGradient() }); // machinery
 export const TRIM     = new THREE.MeshToonMaterial({ color: 0x9aa4b0, gradientMap: toonGradient() });
-export const RUBBER   = new THREE.MeshToonMaterial({ color: 0x3a3e48, gradientMap: toonGradient() });
+export const RUBBER   = new THREE.MeshToonMaterial({ color: 0x3c4048, gradientMap: toonGradient() }); // treads, grips
 export const SCAFFOLD = new THREE.MeshToonMaterial({ color: 0xd4a85a, gradientMap: toonGradient() });
-export const BUILDING_BASE = new THREE.MeshToonMaterial({ color: 0x5a6680, gradientMap: toonGradient() });
+export const BUILDING_BASE = new THREE.MeshToonMaterial({ color: 0xd9cfb6, gradientMap: toonGradient() }); // civic cream
+
+// Family constants: every Cog engine/thruster glows warm amber, every
+// infantry face gets rosy cheeks. Shared everywhere so the faction reads as
+// one civilization.
+export const AMBER = 0xffb457;
+export const CHEEK = new THREE.MeshBasicMaterial({ color: 0xff9db0 });
+
+// Per-instance cream shell: same enamel as CREAM but with a warm emissive
+// channel so the renderer's damage flash (userData.mats) lights the body up.
+// One instance per unit/building, shared across all its cream parts.
+export function shellMat() {
+  return new THREE.MeshToonMaterial({
+    color: 0xf3e9d4, gradientMap: toonGradient(),
+    emissive: 0xffdfc0, emissiveIntensity: 0.1,
+  });
+}
 
 // Team-colored material factory (one per unit/building instance)
 export function teamMat(color, emissiveIntensity = 0.15) {
