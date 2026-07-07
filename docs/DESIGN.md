@@ -115,3 +115,74 @@ Keep full integer determinism (both lockstep clients regenerate identically).
   (units, buildings, AI, balance).
 - **Phase 4 — The Prism.** Implement, cross-faction balance, full upgrade/ability
   icon set, polish.
+
+## 7. Faction architecture (all three)
+
+The sim was single-faction (the Cogs). Faction support is additive:
+- Every UNITS/BUILDINGS/ABILITIES/UPGRADES entry carries `faction: "cogs"|"ooze"|
+  "prism"`. Type keys stay globally unique, so the sim's spawn/combat/tech code
+  is UNCHANGED — it still looks up by type key.
+- A `FACTIONS` map declares each faction's `start` building, `worker` type, and
+  worker `build` list (what the worker can construct — replaces the hardcoded
+  order array in hud.js). Also display `name` and `blurb`.
+- `sim.factions[pid]` (from `opts.factions`, default `["cogs","cogs"]`) picks the
+  start building + workers per player. A faction picker feeds it via the menu +
+  the net start message; determinism unaffected (static per game).
+- Command card, AI build order, and tooltips read the player's faction.
+
+## 8. Faction: The Ooze (full spec — Phase 3)
+
+Translucent gooey aliens. Acid greens / bruised purples, wobbly translucent
+shells, spore puffs. **Cheap, numerous, self-healing, morph-based.** Names: goo /
+critter / body-horror-cute, one or two syllables (Nip, Spit, Maw, Mote…).
+
+### Signature mechanics
+1. **Regeneration** — every Ooze unit regenerates HP when it hasn't taken damage
+   for ~3s (`regenDelay`), at a slow base rate, DOUBLED while standing on Goo.
+2. **Goo field** — a `Uint8Array(w*h)` creep grid. The Nucleus and Goo Vents
+   ooze Goo outward (radius grows over time to a cap). **Ooze buildings may only
+   be placed on Goo** (except the first Nucleus + Vents). Ooze ground units on
+   Goo get +regen and +~20% move speed; off Goo they're slower (fragile when
+   caught in the open). Rendered as a translucent creep overlay that darkens the
+   ground and grows organically. Deterministic (integer radius per tick).
+3. **Morph** — production and tech are morphs, not "trained from a factory":
+   - Buildings rise by **consuming a Mote** (the worker melts into the site;
+     no worker babysitting — it becomes the building over `buildTime`).
+   - **Nip → Maw**: a Nip can morph into a heavy Maw for extra cost + time.
+   - **Sluice burrow**: toggle to a stationary acid-mortar (the siege role).
+4. **Broods** — the Den morphs Nips **two at a time** per cycle (swarm feel).
+
+### Roster (stats tuned vs the Cogs; costs in Scrap / Oil, supply, ticks)
+| key | name | role | cost | hp | dmg (air) | range | spd | sup | notes |
+|---|---|---|---|---|---|---|---|---|---|
+| mote | **Mote** | worker | 50 | 40 | 3 | melee | 66 | 1 | melts into buildings |
+| nip | **Nip** | swarm melee | 40 | 40 | 5 | melee | 74 | 1 | morphs 2/cycle; →Maw |
+| spit | **Spit** | ranged + AA | 65 | 45 | 5 (7) | 4.2 | 60 | 1 | the anti-air answer |
+| maw | **Maw** | heavy melee | 40 (morph) | 160 | 17 | melee | 52 | 3 | morph from a Nip |
+| sluice | **Sluice** | siege | 150 / 50 | 130 | 20→ burrow AoE | 1→7 | 42 | 3 | burrow = anchor role |
+| wisp | **Wisp** | flyer | 110 / 50 | 90 | 8 (8) | 4 | 78 | 2 | hits ground + air |
+
+### Buildings (all require Goo except Nucleus/Vent)
+| key | name | ~cost | role |
+|---|---|---|---|
+| nucleus | **Nucleus** | 400 | start; morphs Motes; drop-off; oozes Goo |
+| pod | **Pod** | 100 | +8 supply |
+| vent | **Goo Vent** | 75 | spreads Goo to claim expansion ground |
+| den | **Den** | 150 | morphs Nips (×2) + Spits; Carapace/Adrenal upgrades |
+| sump | **Sump** | 75 | on Oil (refinery) |
+| warren | **Warren** | 150 / 100 | morphs Maws + Sluices; needs Den |
+| roost | **Roost** | 150 / 125 | morphs Wisps; needs Warren |
+| barb | **Barb** | 100 | static defense (ground+air); needs Den |
+
+### Abilities / upgrades
+- **Sluice: Burrow** (toggle; anchor-role siege, minRange, splash) — via *Burrow Tech* (Warren).
+- **Maw: Engulf** (short lunge + splash — the Ooze "leap").
+- **Wisp: Spore Cloud** (targeted AoE slow/damage).
+- Upgrades: **Carapace** (+hp, retro), **Adrenal** (attack-rate), **Burrow Tech**,
+  **Membrane** (Wisp speed).
+
+### Counters / identity vs Cogs
+Ooze wins by numbers + sustain + map control (Goo). It's fragile per-unit and
+weak off-Goo, so the Cogs' ranged/siege (Zapper/Thumper) punish it in the open,
+while Ooze regeneration + broods grind out attrition and its cheap swarm floods
+undefended flanks. Anti-air is Spit + Wisp; siege is the burrowed Sluice.

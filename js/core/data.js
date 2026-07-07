@@ -27,7 +27,7 @@ export const GAS_DEPLETED = 2;       // gas yielded once a geyser hits 0
 
 export const UNITS = {
   worker: {
-    name: "Bearing", cost: 50, gasCost: 0, supply: 1, hp: 45, speed: 68,
+    name: "Bearing", isWorker: true, cost: 50, gasCost: 0, supply: 1, hp: 45, speed: 68,
     dmg: 4, dmgAir: 0, range: (FP * 0.7) | 0, acquire: 0, cooldown: 10,
     sight: 7, buildTime: 80, radius: (FP * 0.34) | 0,
   },
@@ -147,3 +147,102 @@ export const ABILITIES = {
 
 export const PLAYER_COLORS = ["#4cc2ff", "#ff5f4c"];
 export const MAX_QUEUE = 5;
+
+// ===========================================================================
+// THE OOZE (Phase 3) — see docs/DESIGN.md S8. Same flat registries, unique type
+// keys, tagged faction:"ooze". Increment A: functional combat faction (goo /
+// regen / morph / broods / burrow are layered on in a later increment). Type
+// keys never collide with Cog keys, so the sim's spawn/combat/tech code is
+// unchanged — it still looks up UNITS[type] / BUILDINGS[type].
+// ===========================================================================
+Object.assign(UNITS, {
+  mote: {
+    name: "Mote", faction: "ooze", isWorker: true, cost: 50, gasCost: 0, supply: 1, hp: 40, speed: 66,
+    dmg: 3, dmgAir: 0, range: (FP * 0.7) | 0, acquire: 0, cooldown: 10,
+    sight: 7, buildTime: 80, radius: (FP * 0.34) | 0,
+  },
+  nip: {
+    name: "Nip", faction: "ooze", cost: 40, gasCost: 0, supply: 1, hp: 40, speed: 74,
+    dmg: 5, dmgAir: 0, range: (FP * 0.9) | 0, acquire: (FP * 6) | 0, cooldown: 8,
+    sight: 7, buildTime: 80, radius: (FP * 0.36) | 0,
+  },
+  spit: {
+    name: "Spit", faction: "ooze", cost: 65, gasCost: 0, supply: 1, hp: 45, speed: 60,
+    dmg: 5, dmgAir: 7, range: (FP * 4.2) | 0, acquire: (FP * 7) | 0, cooldown: 10,
+    sight: 8, buildTime: 110, radius: (FP * 0.36) | 0,
+  },
+  maw: {
+    name: "Maw", faction: "ooze", cost: 100, gasCost: 25, supply: 3, hp: 160, speed: 52,
+    dmg: 17, dmgAir: 0, range: (FP * 0.9) | 0, acquire: (FP * 6) | 0, cooldown: 12,
+    sight: 7, buildTime: 160, radius: (FP * 0.5) | 0,
+  },
+  // Increment A: ranged siege-ish unit. Increment B adds the Burrow toggle
+  // (stationary acid-mortar with minRange + splash, the true anchor role).
+  sluice: {
+    name: "Sluice", faction: "ooze", cost: 150, gasCost: 50, supply: 3, hp: 130, speed: 42,
+    dmg: 18, dmgAir: 0, range: (FP * 5.5) | 0, acquire: (FP * 8) | 0, cooldown: 16,
+    sight: 8, buildTime: 220, radius: (FP * 0.55) | 0,
+  },
+  wisp: {
+    name: "Wisp", faction: "ooze", cost: 110, gasCost: 50, supply: 2, hp: 90, speed: 78,
+    dmg: 8, dmgAir: 8, range: (FP * 4) | 0, acquire: (FP * 8) | 0, cooldown: 11,
+    sight: 9, buildTime: 170, radius: (FP * 0.4) | 0, fly: true,
+  },
+});
+Object.assign(BUILDINGS, {
+  nucleus: {
+    name: "Nucleus", faction: "ooze", cost: 400, gasCost: 0, hp: 1100, size: 3, supply: 10,
+    buildTime: 500, sight: 9, trains: ["mote"], deposit: true,
+  },
+  pod: {
+    name: "Pod", faction: "ooze", cost: 100, gasCost: 0, hp: 450, size: 2, supply: 8,
+    buildTime: 180, sight: 6, trains: [],
+  },
+  vent: {   // spreads Goo in a later increment; for now just a cheap outpost
+    name: "Goo Vent", faction: "ooze", cost: 75, gasCost: 0, hp: 350, size: 2, supply: 0,
+    buildTime: 160, sight: 6, trains: [],
+  },
+  den: {
+    name: "Den", faction: "ooze", cost: 150, gasCost: 0, hp: 750, size: 3, supply: 0,
+    buildTime: 300, sight: 7, trains: ["nip", "spit"],
+  },
+  sump: {
+    name: "Sump", faction: "ooze", cost: 75, gasCost: 0, hp: 400, size: 2, supply: 0,
+    buildTime: 180, sight: 4, trains: [], deposit: false, onGeyser: true,
+  },
+  warren: {
+    name: "Warren", faction: "ooze", cost: 150, gasCost: 100, hp: 900, size: 3, supply: 0,
+    buildTime: 350, sight: 7, trains: ["maw", "sluice"], requires: "den",
+  },
+  roost: {
+    name: "Roost", faction: "ooze", cost: 150, gasCost: 125, hp: 850, size: 3, supply: 0,
+    buildTime: 350, sight: 7, trains: ["wisp"], requires: "warren",
+  },
+  barb: {
+    name: "Barb", faction: "ooze", cost: 100, gasCost: 0, hp: 350, size: 2, supply: 0,
+    buildTime: 200, sight: 7, trains: [], requires: "den",
+    armed: true, dmg: 8, dmgAir: 16, range: (FP * 5.5) | 0, cooldown: 9,
+  },
+});
+
+// ---------- factions ----------
+// Per-faction metadata: the start building, the worker type, and the worker's
+// build list (what it can construct — replaces the old hardcoded order array in
+// hud.js). Order maps to command-card grid keys, so keep it deliberate.
+export const FACTIONS = {
+  cogs: {
+    name: "The Cogs", blurb: "Industrious robots. Build, repair, out-tech.",
+    worker: "worker", start: "hq",
+    build: ["depot", "barracks", "refinery", "hq", "factory", "starport", "turret"],
+  },
+  ooze: {
+    name: "The Ooze", blurb: "Gooey swarm. Cheap, self-healing, morphing.",
+    worker: "mote", start: "nucleus",
+    build: ["pod", "den", "vent", "sump", "warren", "roost", "barb", "nucleus"],
+  },
+};
+
+// Tag every entry that didn't declare a faction as a Cog (keeps the sim able to
+// answer "what faction is this type?" without touching each Cog definition).
+for (const reg of [UNITS, BUILDINGS, ABILITIES, UPGRADES])
+  for (const k in reg) if (!reg[k].faction) reg[k].faction = "cogs";

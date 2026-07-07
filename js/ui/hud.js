@@ -1,6 +1,6 @@
 // DOM HUD: resource bar, selection panel, command card, minimap, toasts.
 import { FP, fpToTile } from "../core/fixed.js";
-import { UNITS, BUILDINGS, PLAYER_COLORS, MAX_QUEUE, ABILITIES, UPGRADES, UPGRADE_BITS } from "../core/data.js";
+import { UNITS, BUILDINGS, FACTIONS, PLAYER_COLORS, MAX_QUEUE, ABILITIES, UPGRADES, UPGRADE_BITS } from "../core/data.js";
 import { THEMES } from "../core/map.js";
 import { KEYS, DEFAULTS, rebind, resetBinds } from "./keys.js";
 
@@ -431,7 +431,7 @@ export class Hud {
 
     // idle-worker button: visible only when someone is slacking
     const idle = this.sim.entities.filter((e) =>
-      e.owner === this.pid && e.type === "worker" && e.order.kind === "idle").length;
+      e.owner === this.pid && UNITS[e.type]?.isWorker && e.order.kind === "idle").length;
     this.$idle.classList.toggle("hidden", idle === 0);
     if (idle > 0) this.$idle.querySelector("b").textContent = idle;
 
@@ -540,10 +540,12 @@ export class Hud {
     this.cardSig = sig;
 
     const slots = [];
-    if (this.activeType === "worker") {
-      const order = ["depot", "barracks", "refinery", "hq", "factory", "starport", "turret"];
-      // builds fill the top row, overflowing onto z/x (a/s/d/f stay combat)
-      const keys = ["q", "w", "e", "r", "t", "z", "x"];
+    if (UNITS[this.activeType]?.isWorker) {
+      // the player's faction decides what its worker can build
+      const fac = FACTIONS[this.sim.factions ? this.sim.factions[this.pid] : "cogs"] || FACTIONS.cogs;
+      const order = fac.build;
+      // builds fill the top row, overflowing onto z/x/c (a/s/d/f stay combat)
+      const keys = ["q", "w", "e", "r", "t", "z", "x", "c"];
       order.forEach((b, i) => {
         const d = BUILDINGS[b];
         if (!d) return;

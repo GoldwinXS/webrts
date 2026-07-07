@@ -218,14 +218,14 @@ export class Input {
       if (buildings.length && g) {
         // gather-rally when the target is a resource or our own refinery
         const gatherTarget = target && (target.type === "mineral" || target.type === "geyser" ||
-          (target.type === "refinery" && target.owner === this.pid && target.done));
+          (BUILDINGS[target.type]?.onGeyser && target.owner === this.pid && target.done));
         // snap the flag onto whatever entity was clicked (resource or unit)
         const rx = target ? target.x : g.x;
         const ry = target ? target.y : g.y;
         for (const b of buildings) {
           this.game.issue({ t: "rally", buildingId: b.id, x: rx, y: ry, targetId: gatherTarget ? target.id : 0 });
         }
-        const gas = target && (target.type === "geyser" || target.type === "refinery");
+        const gas = target && (target.type === "geyser" || BUILDINGS[target.type]?.onGeyser);
         this.renderer.orderPing(rx / FP, ry / FP, gatherTarget ? (gas ? "#3a8f2c" : "#0e8f83") : "#0b3d20");
         this.audio.rally();
         this.hud.toastInfo(gatherTarget
@@ -235,8 +235,8 @@ export class Input {
       return;
     }
 
-    // own finished refinery: workers harvest gas from it
-    if (target && target.type === "refinery" && target.owner === this.pid && target.done) {
+    // own finished refinery/sump: workers harvest gas from it
+    if (target && BUILDINGS[target.type]?.onGeyser && target.owner === this.pid && target.done) {
       const wids = this.mySelectedWorkers().map((w) => w.id);
       if (wids.length) {
         this.game.issue({ t: "gather", ids: wids, targetId: target.id, q });
@@ -435,7 +435,7 @@ export class Input {
   // F2: every combat unit (workers stay on the line)
   selectArmy() {
     const army = this.sim.entities.filter((e) =>
-      e.owner === this.pid && e.unit && e.type !== "worker");
+      e.owner === this.pid && e.unit && !UNITS[e.type]?.isWorker);
     if (!army.length) { this.hud.toastInfo("No army units"); return; }
     this.selection.clear();
     army.forEach((u) => this.selection.add(u.id));
@@ -551,7 +551,7 @@ export class Input {
   // cycle through idle workers, centering the camera on each
   selectIdleWorker() {
     const idle = this.sim.entities.filter((e) =>
-      e.owner === this.pid && e.type === "worker" && e.order.kind === "idle");
+      e.owner === this.pid && UNITS[e.type]?.isWorker && e.order.kind === "idle");
     if (!idle.length) { this.hud.toastInfo("No idle workers"); return; }
     const w = idle[this.idleCycle % idle.length];
     this.idleCycle++;
@@ -570,7 +570,7 @@ export class Input {
       .filter((e) => e && e.owner === this.pid);
   }
   mySelectedUnitIds() { return this.mySelected().filter((e) => e.unit).map((e) => e.id); }
-  mySelectedWorkers() { return this.mySelected().filter((e) => e.type === "worker"); }
+  mySelectedWorkers() { return this.mySelected().filter((e) => UNITS[e.type]?.isWorker); }
 
   // called every frame for camera pan
   update(dt) {

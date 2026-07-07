@@ -3,11 +3,18 @@
 // never writes it; players interact exclusively through commands, which is
 // what makes lockstep multiplayer possible.
 import { FP, HALF, tileToFp, fpToTile, isqrt, dist, dist2, makeHash } from "./fixed.js";
-import { UNITS, BUILDINGS, START_MINERALS, START_GAS, CARRY_AMOUNT, GATHER_TICKS, PATCH_AMOUNT, MAX_QUEUE,
+import { UNITS, BUILDINGS, FACTIONS, START_MINERALS, START_GAS, CARRY_AMOUNT, GATHER_TICKS, PATCH_AMOUNT, MAX_QUEUE,
   GAS_CARRY, GAS_GATHER_TICKS, GAS_AMOUNT, GAS_DEPLETED, HQ_RESOURCE_CLEARANCE,
   UPGRADES, UPGRADE_BITS, ABILITIES, PLATING_HP, SERVOS_SPEED_NUM, SERVOS_SPEED_DEN } from "./data.js";
 import { generateMap } from "./map.js";
 import { findPath, nearestFree } from "./path.js";
+
+// Is this unit type a worker (gathers + builds)? Flagged per-faction in data.js
+// so the Cog Bearing and the Ooze Mote both count without hardcoding type names.
+const isWorker = (t) => !!(UNITS[t] && UNITS[t].isWorker);
+// Is this building type a gas harvester (Cog Refinery / Ooze Sump)? Both sit on
+// a geyser (onGeyser) and let workers harvest Oil.
+const isGasBuilding = (t) => !!(BUILDINGS[t] && BUILDINGS[t].onGeyser);
 
 export class Sim {
   constructor(seed, opts) {
@@ -40,11 +47,15 @@ export class Sim {
     for (const g of (this.map.geysers || [])) {
       this.addEntity({ type: "geyser", owner: -1, x: g.x, y: g.y, hp: 0, maxHp: 0, amount: GAS_AMOUNT, radius: (FP * 0.45) | 0, geyser: true });
     }
+    // Per-player faction (default both Cogs). Picks each player's start building
+    // + worker type; static per game, so it doesn't enter the per-tick checksum.
+    this.factions = (opts && opts.factions) || ["cogs", "cogs"];
     for (let pid = 0; pid < 2; pid++) {
+      const fac = FACTIONS[this.factions[pid]] || FACTIONS.cogs;
       const s = this.map.starts[pid];
-      this.spawnBuilding(pid, "hq", s.x - 1, s.y - 1, true);
+      this.spawnBuilding(pid, fac.start, s.x - 1, s.y - 1, true);
       for (let i = 0; i < 5; i++) {
-        const u = this.spawnUnit(pid, "worker", tileToFp(s.x + 2 + (i % 3)), tileToFp(s.y + 2 + ((i / 3) | 0)));
+        const u = this.spawnUnit(pid, fac.worker, tileToFp(s.x + 2 + (i % 3)), tileToFp(s.y + 2 + ((i / 3) | 0)));
         this.autoGather(u);
       }
     }
@@ -245,7 +256,7 @@ export class Sim {
 
   refineryOnGeyser(geyserId) {
     for (const e of this.entities) {
-      if (e.type === "refinery" && e.geyserId === geyserId) return true;
+      if (isGasBuilding(e.type) && e.geyserId === geyserId) return true;
     }
     return false;
   }
@@ -330,11 +341,11 @@ export class Sim {
         // minerals: any patch. gas: an OWN finished refinery.
         let resource;
         if (patch.type === "mineral") resource = "minerals";
-        else if (patch.type === "refinery" && patch.owner === pid && patch.done) resource = "gas";
+        else if (isGasBuilding(patch.type) && patch.owner === pid && patch.done) resource = "gas";
         else break;
         for (const id of c.ids) {
           const e = own(id);
-          if (e && e.type === "worker") {
+          if (e && isWorker(e.type)) {
             this.setOrder(e, { kind: "gather", targetId: c.targetId, phase: "to", resource }, c.q);
           }
         }
@@ -343,7 +354,8 @@ export class Sim {
       case "build": {
         const worker = own(c.workerId);
         const d = BUILDINGS[c.building];
-        if (!worker || worker.type !== "worker" || !d) break;
+        if (!worker || !isWorker(worker.type) || !d) break;
+        if (d.faction !== this.factions[pid]) break;   // can only build your faction
         if (!this.canAfford(pid, d.cost, d.gasCost || 0)) break;
         // tech prerequisite: must own a FINISHED building of the required type
         if (d.requires && !this.hasBuilding(pid, d.requires)) break;
@@ -367,7 +379,7 @@ export class Sim {
         if (!site || !site.building || site.owner !== pid || site.done) break;
         for (const id of c.ids) {
           const e = own(id);
-          if (e && e.type === "worker") this.setOrder(e, { kind: "build", targetId: site.id }, c.q);
+          if (e && isWorker(e.type)) this.setOrder(e, { kind: "build", targetId: site.id }, c.q);
         }
         break;
       }
@@ -844,20 +856,20 @@ export class Sim {
         // send the fresh unit to the rally point (workers rally onto minerals)
         if (b.rally) {
           const target = b.rally.targetId ? this.byId.get(b.rally.targetId) : null;
-          if (u.type === "worker" && target?.type === "mineral") {
+          if (isWorker(u.type) && target?.type === "mineral") {
             // rally onto minerals: balance across the line, not one patch
             const patch = this.pickPatch(target, FP * 6) || (target.amount > 0 ? target : null);
             if (patch) u.order = { kind: "gather", targetId: patch.id, phase: "to", resource: "minerals" };
-          } else if (u.type === "worker" && target && (target.type === "refinery" || target.type === "geyser")) {
-            // rally onto gas: send workers to a finished refinery on that spot
-            const ref = target.type === "refinery" ? target
-              : this.entities.find((e) => e.type === "refinery" && e.done && e.geyserId === target.id);
+          } else if (isWorker(u.type) && target && (isGasBuilding(target.type) || target.type === "geyser")) {
+            // rally onto gas: send workers to a finished refinery/sump on that spot
+            const ref = isGasBuilding(target.type) ? target
+              : this.entities.find((e) => isGasBuilding(e.type) && e.done && e.geyserId === target.id);
             if (ref && ref.done) u.order = { kind: "gather", targetId: ref.id, phase: "to", resource: "gas" };
             else u.order = { kind: "move", x: b.rally.x, y: b.rally.y };
           } else {
             u.order = { kind: "move", x: b.rally.x, y: b.rally.y };
           }
-        } else if (item.type === "worker") {
+        } else if (isWorker(item.type)) {
           this.autoGather(u);
         }
       }
@@ -872,8 +884,8 @@ export class Sim {
     if (o.phase === "to") {
       const node = this.byId.get(o.targetId);
       if (gas) {
-        // refinery destroyed: give up (worker can't re-target a geyser itself)
-        if (!node || node.type !== "refinery" || !node.done) { this.popNext(u); return; }
+        // refinery/sump destroyed: give up (worker can't re-target a geyser itself)
+        if (!node || !isGasBuilding(node.type) || !node.done) { this.popNext(u); return; }
       } else if (!node || node.amount <= 0) {
         const next = this.pickPatch(u, FP * 14);
         if (next) { o.targetId = next.id; u.path = null; }

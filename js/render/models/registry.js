@@ -15,6 +15,15 @@ import { animateMineral, animateGeyser } from "./props.js";
 
 const unitRegistry = {};
 const buildingRegistry = {};
+
+// Temporary placeholder art: until the Ooze faction has its own model family,
+// its types render as the closest-role Cog model (team-colored). Real Ooze
+// builders, once registered under their own keys, take precedence automatically.
+const PLACEHOLDER = {
+  mote: "worker", nip: "marine", spit: "marine", maw: "brute", sluice: "tank", wisp: "wraith",
+  nucleus: "hq", pod: "depot", vent: "turret", den: "barracks", sump: "refinery",
+  warren: "factory", roost: "starport", barb: "turret",
+};
 const propAnimators = {
   mineral: animateMineral,
   geyser: animateGeyser,
@@ -30,7 +39,7 @@ export function registerBuilding(type, def) {
 
 // Build a unit visual by dispatching to the registered builder.
 export function makeUnitVisual(e, color) {
-  const def = unitRegistry[e.type];
+  const def = unitRegistry[e.type] || unitRegistry[PLACEHOLDER[e.type]];
   if (!def) {
     console.warn(`Unknown unit type: ${e.type}`);
     return new THREE.Group();
@@ -40,7 +49,7 @@ export function makeUnitVisual(e, color) {
 
 // Build a building visual by dispatching to the registered builder.
 export function makeBuildingVisual(e, color, size) {
-  const def = buildingRegistry[e.type];
+  const def = buildingRegistry[e.type] || buildingRegistry[PLACEHOLDER[e.type]];
   if (!def) {
     console.warn(`Unknown building type: ${e.type}`);
     return new THREE.Group();

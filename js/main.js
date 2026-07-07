@@ -28,7 +28,7 @@ function say(msg, isError) {
 // Each group's selected data-val is stored as a string; "random" means the map
 // generator resolves it from the rng, so we OMIT the key entirely for random.
 const MAPOPT_KEY = "webrts-mapopts";
-const optGroups = ["spawns", "expansions", "theme"];
+const optGroups = ["spawns", "expansions", "theme", "faction", "aifaction"];
 
 function selectedVal(group) {
   const active = document.querySelector(`#opt-${group} .seg-btn.is-active`);
@@ -45,6 +45,8 @@ function readMapOpts() {
   if (expansions !== "random") opts.expansions = parseInt(expansions, 10); // 0|1|2
   const theme = selectedVal("theme");
   if (theme !== "random") opts.theme = parseInt(theme, 10); // 0|1|2
+  // factions: [localPlayer(0), enemy(1)]. Ignored by generateMap, read by Sim.
+  opts.factions = [selectedVal("faction") || "cogs", selectedVal("aifaction") || "cogs"];
   return opts;
 }
 
