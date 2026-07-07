@@ -437,6 +437,7 @@ export class Hud {
 
     this.drawMinimap();
     this.refreshSelection();
+    this.updateAbilityCooldowns();
   }
 
   // ---------- selection panel + command card ----------
@@ -612,7 +613,9 @@ export class Hud {
       const cls = [s.cls, s.disabled ? "cooldown" : ""].filter(Boolean).join(" ");
       const pos = GRID_POS[s.key];
       const at = pos ? ` style="grid-row:${rowMap[pos[0]]};grid-column:${pos[1]}"` : "";
-      card += `<button data-cmd="${s.cmd}"${cls ? ` class="${cls}"` : ""}${at}><kbd>${s.key.toUpperCase()}</kbd><span>${s.label}</span><small>${s.sub}</small></button>`;
+      // ability buttons get a cooldown sweep + countdown, updated each frame
+      const cd = s.cmd.startsWith("ability-") ? `<i class="cd-fill"></i><b class="cd-num"></b>` : "";
+      card += `<button data-cmd="${s.cmd}"${cls ? ` class="${cls}"` : ""}${at}><kbd>${s.key.toUpperCase()}</kbd><span>${s.label}</span><small>${s.sub}</small>${cd}</button>`;
     }
     this.$cmdCard.innerHTML = card;
     for (const b of this.$cmdCard.querySelectorAll("button")) {
@@ -736,6 +739,35 @@ export class Hud {
       if (list.length >= keys.length) break;
     }
     return list;
+  }
+
+  // Per-frame: paint a shrinking cooldown sweep + seconds countdown on each
+  // ability button so you can SEE when the ability comes back (the fastest-ready
+  // unit of that type in the selection drives the display).
+  updateAbilityCooldowns() {
+    const btns = this.$cmdCard.querySelectorAll('button[data-cmd^="ability-"]');
+    if (!btns.length) return;
+    const mine = [...this.renderer.selection]
+      .map((id) => this.sim.byId.get(id))
+      .filter((e) => e && e.owner === this.pid && e.type === this.activeType);
+    for (const b of btns) {
+      const a = ABILITIES[b.dataset.cmd.slice(8)];
+      if (!a) continue;
+      let rem = Infinity;
+      for (const e of mine) if (e.type === a.unit) rem = Math.min(rem, e.abilityCd | 0);
+      if (!isFinite(rem)) rem = 0;
+      const fill = b.querySelector(".cd-fill");
+      const num = b.querySelector(".cd-num");
+      if (rem > 0) {
+        b.classList.add("cooldown");
+        if (fill) fill.style.height = `${Math.max(0, Math.min(1, rem / (a.cd || 1))) * 100}%`;
+        if (num) num.textContent = Math.ceil(rem / 10);   // 10 sim ticks per second
+      } else {
+        b.classList.remove("cooldown");
+        if (fill) fill.style.height = "0%";
+        if (num) num.textContent = "";
+      }
+    }
   }
 
   // True if any selected unit of the ability's type is off cooldown (so the
