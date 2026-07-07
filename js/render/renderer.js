@@ -1591,7 +1591,20 @@ export class Renderer {
         // hide a geyser vent once a refinery is built over it
         if (e.type === "geyser") g.visible = g.visible && !this.sim.refineryOnGeyser(e.id);
       } else {
-        g.position.set(x, terrainY, z);
+        let baseY = terrainY;
+        // Clank leap: a parabolic HOP instead of a flat ground slide. The sim
+        // interpolates the unit along leapFrom->leapTo on the ground, so leap
+        // progress = the horizontal fraction along that path; the arc peaks at
+        // mid-leap. Render-only (never touches the deterministic sim position).
+        if (e.type === "brute" && e.leapUntil && e.leapFrom && e.leapTo) {
+          const fx = W2(e.leapFrom.x), fz = W2(e.leapFrom.y);
+          const tX = W2(e.leapTo.x), tZ = W2(e.leapTo.y);
+          const dtot = Math.hypot(tX - fx, tZ - fz);
+          let p = dtot > 0.001 ? Math.hypot(x - fx, z - fz) / dtot : 1;
+          p = p < 0 ? 0 : p > 1 ? 1 : p;
+          baseY += 1.7 * 4 * p * (1 - p);   // peak ~1.7 world units at p=0.5
+        }
+        g.position.set(x, baseY, z);
       }
 
       // smoothed motion amount drives walk cycles
