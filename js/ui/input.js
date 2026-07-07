@@ -211,7 +211,10 @@ export class Input {
     // Rally can target the ground, a mineral/geyser/refinery (gather rally),
     // or any entity/unit (flag snaps to it).
     if (!ids.length) {
-      const buildings = this.mySelected().filter((e) => e.building && e.done);
+      // Rally can be set on INCOMPLETE buildings too — the rally is stored now
+      // and takes effect the moment the structure finishes (the sim's rally
+      // command never required `done`; only this filter did).
+      const buildings = this.mySelected().filter((e) => e.building);
       if (buildings.length && g) {
         // gather-rally when the target is a resource or our own refinery
         const gatherTarget = target && (target.type === "mineral" || target.type === "geyser" ||
@@ -223,7 +226,7 @@ export class Input {
           this.game.issue({ t: "rally", buildingId: b.id, x: rx, y: ry, targetId: gatherTarget ? target.id : 0 });
         }
         const gas = target && (target.type === "geyser" || target.type === "refinery");
-        this.renderer.orderPing(rx / FP, ry / FP, gatherTarget ? (gas ? "#7cd94f" : "#63e8db") : "#7cff6b");
+        this.renderer.orderPing(rx / FP, ry / FP, gatherTarget ? (gas ? "#3a8f2c" : "#0e8f83") : "#0b3d20");
         this.audio.rally();
         this.hud.toastInfo(gatherTarget
           ? (gas ? "Rally set: workers will gather gas" : "Rally set: workers will mine")

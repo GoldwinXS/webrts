@@ -550,13 +550,22 @@ export class Hud {
       a: [2, 1], s: [2, 2], d: [2, 3], f: [2, 4], g: [2, 5],
       z: [3, 1], x: [3, 2], c: [3, 3], v: [3, 4], b: [3, 5],
     };
+    // Collapse EMPTY rows so the card is only as tall as it needs to be (a Hub
+    // with just the worker button no longer reserves 3 rows and floats high).
+    // Columns are preserved (keys still line up L-R); only the used rows are
+    // remapped to consecutive positions, keeping physical top-to-bottom order.
+    const usedRows = [...new Set(slots.map((s) => GRID_POS[s.key]?.[0]).filter(Boolean))].sort();
+    const rowMap = {};
+    usedRows.forEach((r, i) => { rowMap[r] = i + 1; });
+    this.$cmdCard.style.gridTemplateRows = `repeat(${usedRows.length || 1}, 58px)`;
+
     this.hotkeys = {};
     let card = "";
     for (const s of slots) {
       this.hotkeys[s.key] = s.cmd;
       const cls = [s.cls, s.disabled ? "cooldown" : ""].filter(Boolean).join(" ");
       const pos = GRID_POS[s.key];
-      const at = pos ? ` style="grid-row:${pos[0]};grid-column:${pos[1]}"` : "";
+      const at = pos ? ` style="grid-row:${rowMap[pos[0]]};grid-column:${pos[1]}"` : "";
       card += `<button data-cmd="${s.cmd}"${cls ? ` class="${cls}"` : ""}${at}><kbd>${s.key.toUpperCase()}</kbd><span>${s.label}</span><small>${s.sub}</small></button>`;
     }
     this.$cmdCard.innerHTML = card;
