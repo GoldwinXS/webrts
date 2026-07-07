@@ -7,7 +7,7 @@ import { Hud } from "./ui/hud.js";
 import { Net, makeCode } from "./net/net.js";
 import { GameAudio } from "./audio.js";
 import { rebind } from "./ui/keys.js";
-import { TICK_MS, UNITS, BUILDINGS } from "./core/data.js";
+import { TICK_MS, UNITS, BUILDINGS, FACTIONS } from "./core/data.js";
 import { FP, HALF, tileToFp } from "./core/fixed.js";
 
 const audio = new GameAudio();
@@ -125,14 +125,17 @@ function buildShowcase(game, renderer) {
   const label = (text, wx, wz, y, color) => makeLabel(renderer.scene, text, wx, wz, y, color);
   const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 
-  // buildings row (player 0)
-  const buildings = ["hq", "depot", "barracks", "factory", "starport", "turret", "refinery"];
+  // roster derives from the SELECTED faction (Cogs or Ooze), so the gallery
+  // showcases whichever faction you picked in the menu.
+  const fac = (sim.factions && sim.factions[0]) || "cogs";
+  // buildings row (player 0) — every constructable building of this faction
+  const buildings = FACTIONS[fac].build;
   const bz = cz - 8;
   buildings.forEach((type, i) => {
-    const bx = cx - 18 + i * 6;
+    const bx = cx - Math.floor(buildings.length / 2) * 6 + i * 6;
     const d = BUILDINGS[type];
     const off = d.size >> 1;
-    if (type === "refinery") {
+    if (d.onGeyser) {
       // refineries render on a geyser — give it one to sit on
       const gey = sim.addEntity({ type: "geyser", owner: -1, x: tileToFp(bx), y: tileToFp(bz), hp: 0, maxHp: 0, amount: 2500, radius: (FP * 0.45) | 0, geyser: true });
       const b = sim.spawnBuilding(0, type, bx - off, bz - off, true);
@@ -145,9 +148,9 @@ function buildShowcase(game, renderer) {
 
   // unit rows: player 0 (your colour) and player 1 (enemy colour), far enough
   // apart that idle auto-acquire never triggers (no combat in the gallery)
-  const units = ["worker", "marine", "brute", "tank", "wraith", "banshee"];
+  const units = Object.keys(UNITS).filter((k) => UNITS[k].faction === fac);
   const rowFor = (pid, uz, tint) => units.forEach((type, i) => {
-    const ux = cx - 15 + i * 6;
+    const ux = cx - Math.floor(units.length / 2) * 6 + i * 6;
     sim.spawnUnit(pid, type, tileToFp(ux), tileToFp(uz));
     if (pid === 0) label(cap(UNITS[type].name), ux, uz, 2.4, tint);
   });
@@ -272,8 +275,10 @@ $("btn-skirmish").addEventListener("click", () => {
 });
 
 $("btn-showcase").addEventListener("click", () => {
-  // seed/opts irrelevant — the map gets flattened into a clean stage
-  startGame("ai", 12345, null, {}, true);
+  // seed/opts irrelevant — the map gets flattened into a clean stage. Pass the
+  // picked faction so the gallery showcases Cogs OR Ooze.
+  const fac = selectedVal("faction") || "cogs";
+  startGame("ai", 12345, null, { factions: [fac, fac] }, true);
 });
 
 $("btn-host").addEventListener("click", async () => {
