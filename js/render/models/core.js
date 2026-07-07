@@ -233,6 +233,58 @@ export function liftToGround(group, floor = -0.05) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// THE OOZE — additive-only shared resources for the gooey-alien faction. NONE
+// of the Cog materials/geometries above are touched. Family DNA:
+//   * Translucent wobbly shells: a per-instance acid-green MeshToonMaterial with
+//     transparency + a faint emissive "subsurface" glow (oozeShell()).
+//   * Bruised-purple flesh underneath (OOZE_PURPLE) reads through the shell.
+//   * Glistening rim/membrane accents in team color (via teamMat) + glowing
+//     cores/eyes (glowMat) — accent only, never the whole body.
+//   * Spore/bubble bumps (OG.bubble) and gooey rounded blobs everywhere.
+//   * Amber is a Cog thing; the Ooze glows sickly acid-green / cyan-bile.
+// ---------------------------------------------------------------------------
+
+// Opaque flesh tones (read through / behind the translucent shells).
+export const OOZE_PURPLE = new THREE.MeshToonMaterial({ color: 0x4a2b52, gradientMap: toonGradient() }); // bruised inner flesh
+export const OOZE_PLUM   = new THREE.MeshToonMaterial({ color: 0x6b3a63, gradientMap: toonGradient() }); // lighter membrane
+export const OOZE_DARK   = new THREE.MeshToonMaterial({ color: 0x241830, gradientMap: toonGradient() }); // sockets / gaps / maw interior
+export const OOZE_BONE   = new THREE.MeshToonMaterial({ color: 0xe8e6cf, gradientMap: toonGradient() }); // fangs / teeth / claws
+// Sickly acid-green emissive: the Ooze answer to the Cogs' AMBER glow.
+export const BILE = 0x9be23a;
+
+// Per-instance translucent acid-green shell. Transparent + faint self-emissive
+// gives the wet "subsurface" jelly feel; ONE instance per model, shared across
+// all its shell parts, and returned so it can also drive the damage flash.
+export function oozeShell(intensity = 0.22) {
+  return new THREE.MeshToonMaterial({
+    color: 0x8fd63a, gradientMap: toonGradient(),
+    emissive: 0x5aa02a, emissiveIntensity: intensity,
+    transparent: true, opacity: 0.72,
+  });
+}
+
+// Ooze shared geometry — additive companion to G. Blobby spheres, sacs, tendrils,
+// fangs, spores. All created once, reused across every Ooze model instance.
+export const OG = {
+  blob:    new THREE.SphereGeometry(0.5, 16, 12),          // the universal goo blob
+  blobHi:  new THREE.SphereGeometry(0.5, 20, 14),          // smoother hero blob
+  bubble:  new THREE.SphereGeometry(0.09, 10, 8),          // spore / surface bump
+  bubbleBig: new THREE.SphereGeometry(0.16, 12, 9),        // fat spore pod
+  eye:     new THREE.SphereGeometry(0.12, 14, 12),         // glossy eye
+  core:    new THREE.SphereGeometry(0.3, 16, 12),          // glowing inner organ
+  tendril: new THREE.CapsuleGeometry(0.06, 0.4, 4, 8),     // wobbly limb / tool
+  tendrilFat: new THREE.CapsuleGeometry(0.11, 0.5, 5, 10), // leg / thick arm
+  fang:    new THREE.ConeGeometry(0.06, 0.22, 7),          // tooth / claw / spine
+  fangBig: new THREE.ConeGeometry(0.13, 0.5, 8),           // barb spine / tusk
+  pore:    new THREE.CylinderGeometry(0.16, 0.26, 0.34, 12), // vent / orifice
+  poreLip: new THREE.TorusGeometry(0.24, 0.08, 8, 18),     // puckered rim
+  membrane: new THREE.TorusGeometry(0.5, 0.06, 8, 24),     // team-color rim band
+  sac:     new THREE.SphereGeometry(0.5, 18, 14),          // bloated body (scaled tall/wide)
+  proboscis: new THREE.CylinderGeometry(0.1, 0.22, 0.7, 10), // sump ground-straw
+  droplet: new THREE.SphereGeometry(0.5, 12, 9),           // teardrop (scaled)
+};
+
 // Small canvas texture of additive glowing fissure lines (lava crack decal)
 let _crackTex = null;
 export function makeCrackTexture() {

@@ -23,3 +23,4 @@ export {
 // Side-effect imports: these register all unit and building models
 import "./units.js";
 import "./buildings.js";
+import "./ooze.js";
