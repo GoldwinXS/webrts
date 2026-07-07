@@ -482,7 +482,25 @@ export class Input {
     const g = this.groundAt(this.mouse.x, this.mouse.y);
     if (!g) return;
     const d = BUILDINGS[this.placing];
-    const tx = fpToTile(g.x) - (d.size >> 1), ty = fpToTile(g.y) - (d.size >> 1);
+    let tx = fpToTile(g.x) - (d.size >> 1), ty = fpToTile(g.y) - (d.size >> 1);
+    // Refineries (onGeyser) SNAP to the nearest geyser so aligning the 2x2
+    // footprint on the 2x2 geyser is effortless (SC2 behavior). Without this,
+    // the cursor sits at the footprint's bottom-right corner and only one narrow
+    // offset validates near a plateau-edge geyser, reading as "can't place".
+    if (d.onGeyser) {
+      const geo = this.sim.nearestEntity(g.x, g.y, FP * 4, (e) => e.type === "geyser");
+      if (geo) {
+        const gx = fpToTile(geo.x), gz = fpToTile(geo.y);
+        let chosen = [gx, gz];
+        outer:
+        for (let oy = 0; oy < d.size; oy++)
+          for (let ox = 0; ox < d.size; ox++) {
+            const cx = gx - ox, cy = gz - oy;                 // (0,0) = exact overlap first
+            if (this.sim.canPlace(this.placing, cx, cy)) { chosen = [cx, cy]; break outer; }
+          }
+        tx = chosen[0]; ty = chosen[1];
+      }
+    }
     this.ghostTile = { tx, ty };
     const gy = this.renderer.heightAt ? this.renderer.heightAt(tx + d.size / 2, ty + d.size / 2) : 0;
     this.ghost.position.set(tx + d.size / 2, gy + 0.4, ty + d.size / 2);
