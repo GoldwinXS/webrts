@@ -67,6 +67,9 @@ export class Sim {
       type, owner: pid, x, y, hp: d.hp, maxHp: d.hp, radius: d.radius,
       unit: true, fly: !!d.fly, order: { kind: "idle" }, next: [], path: null, pathI: 0,
       cooldown: 0, carry: 0, carryKind: 0, gatherTimer: 0,
+      // anti-stuck: ticks of no progress toward the current waypoint, the last
+      // measured distance to it, and which waypoint index that distance was for.
+      noProg: 0, wpDist: 0, wpI: -1,
       // ability state (all sim-visible, mixed into checksum):
       abilityCd: 0,        // ticks until this unit's ability is ready again
       stimUntil: 0,        // marine: stim buff active while tick < stimUntil
@@ -1131,17 +1134,31 @@ export class Sim {
         u.path = findPath(this.blocked, this.map.w, this.map.h, u.x, u.y, x, y);
         if (!u.path) { u.order = { kind: "idle" }; return false; }
       }
-      u.pathI = 0;
+      u.pathI = 0; u.wpI = -1; u.noProg = 0;
     }
 
     const wp = u.path[u.pathI];
     const dd = dist(u.x, u.y, wp.x, wp.y);
     if (dd <= Math.max(speed, HALF >> 1)) {
       u.x = wp.x; u.y = wp.y;
+      u.noProg = 0; u.wpI = -1;                     // reached a waypoint = progress
       if (++u.pathI >= u.path.length) { u.path = null; return true; }
     } else {
       u.x += ((wp.x - u.x) * speed / dd) | 0;
       u.y += ((wp.y - u.y) * speed / dd) | 0;
+      // Anti-stuck: if we're not getting meaningfully closer to the waypoint —
+      // because the separation pass keeps ejecting us off a barrier we've
+      // drifted onto, so the straight-line to the waypoint clips a blocked tile
+      // (the thrash the LOS smoother warns about) — recompute the path from where
+      // we actually are. A* routes around the obstacle. Truly-blocked units fall
+      // through to findPath's null -> idle rather than thrashing forever.
+      const near = dist(u.x, u.y, wp.x, wp.y);      // distance AFTER moving
+      if (u.wpI === u.pathI && near >= u.wpDist - (HALF >> 3)) {
+        if (++u.noProg >= 12) { u.path = null; u.noProg = 0; u.wpI = -1; return false; }
+      } else {
+        u.noProg = 0;
+      }
+      u.wpDist = near; u.wpI = u.pathI;
     }
     return false;
   }
@@ -1342,7 +1359,7 @@ export class Sim {
         h.mix(e.gatherTimer | 0);
         h.mix(e.stimUntil | 0); h.mix(e.burnUntil | 0);
         h.mix(e.transformUntil | 0); h.mix(e.leapUntil | 0);
-        h.mix(e.channelUntil | 0);
+        h.mix(e.channelUntil | 0); h.mix(e.noProg | 0);
         h.mix(e.order?.kind?.charCodeAt(0) || 0);
         h.mix(e.order?.targetId || 0);
       }
