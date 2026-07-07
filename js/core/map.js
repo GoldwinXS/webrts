@@ -330,21 +330,97 @@ function buildCandidate(seed, opts) {
   // with a wide ramp so the lane onward stays traversable one level at a time.
   if (natLvl > 0) carveStepRamp(nat0, natR, c0, natWidth, natLvl, 0);
 
-  // ---- 3. additional expansions (open territory) ----------------------------
+  // ---- 3. additional expansions (route-first: spread around the RIM) --------
+  // Instead of marching expansions straight down the toward-center vector (which
+  // dumped them into a single lane and read as "crammed"), place each extra
+  // expansion on the map RIM, at a distinct ANGULAR position spread between this
+  // main and its partner. We walk inward from a rim point until we find an open
+  // pocket, so an expansion always sits in a sensible edge/pocket location — never
+  // floating in the open middle of a lane. Player-0 owns placement; the partner()
+  // setters mirror everything so both players get equivalent expansions.
   const extraPairs = opts.expansions;               // resolved 0/1/2
   const expansions = [nat0];
-  for (let e = 0; e < extraPairs; e++) {
-    const reach = plateauR + 13 + e * 8 + (rng() % 4);
-    const perp = perpOffset(c0, (e & 1) ? 6 : -6, rng);
-    const ex = {
-      x: clampTile(start0.x + c0.dx * reach + perp.x, W),
-      y: clampTile(start0.y + c0.dy * reach + perp.y, H),
-    };
-    // extra expansions sit on lowland (flatten a pocket) so their CP is easy.
-    for (let dy = -5; dy <= 5; dy++)
-      for (let dx = -5; dx <= 5; dx++) { setHeight(ex.x + dx, ex.y + dy, 0); setRamp(ex.x + dx, ex.y + dy, 0); }
-    clearArea3(ex, 3);
-    expansions.push(ex);
+  {
+    // Candidate rim anchors: points along the two map edges NOT occupied by the
+    // mains, biased to player-0's half. We generate a deterministic ordered fan
+    // of rim points and pick the first `extraPairs` that yield a clear pocket
+    // sufficiently far from every other base and its own partner.
+    const rimCandidates = rimAnchorFan(start0, c0, rng);
+    let placed = 0;
+    for (const rc of rimCandidates) {
+      if (placed >= extraPairs) break;
+      const ex = findExpansionPocket(rc, starts, nat0, expansions, plateauR, natR, partner, rng);
+      if (!ex) continue;
+      // extra expansions sit on lowland (flatten a pocket) so their CP is easy.
+      for (let dy = -5; dy <= 5; dy++)
+        for (let dx = -5; dx <= 5; dx++) { setHeight(ex.x + dx, ex.y + dy, 0); setRamp(ex.x + dx, ex.y + dy, 0); }
+      clearArea3(ex, 3);
+      expansions.push(ex);
+      placed++;
+    }
+    // Fallback: if the rim fan couldn't seat enough pockets (tight geometry),
+    // fill the remainder with the old perpendicular-offset placement so the
+    // requested expansion count is still honoured and the attempt can validate.
+    for (let e = placed; e < extraPairs; e++) {
+      const reach = plateauR + 13 + e * 8 + (rng() % 4);
+      const perp = perpOffset(c0, (e & 1) ? 6 : -6, rng);
+      const ex = {
+        x: clampTile(start0.x + c0.dx * reach + perp.x, W),
+        y: clampTile(start0.y + c0.dy * reach + perp.y, H),
+      };
+      for (let dy = -5; dy <= 5; dy++)
+        for (let dx = -5; dx <= 5; dx++) { setHeight(ex.x + dx, ex.y + dy, 0); setRamp(ex.x + dx, ex.y + dy, 0); }
+      clearArea3(ex, 3);
+      expansions.push(ex);
+    }
+  }
+
+  // ---- 3b. RESERVE THE LANES (route-first core) -----------------------------
+  // Before any center elevation or barrier growth, plan the pathways that join
+  // every base and BOTH players, and reserve their tiles. Terrain features grow
+  // AROUND this reserve so the routes stay clear and readable by construction.
+  //   * spine     : nat0 -> map center -> nat1 (the direct central route).
+  //   * flanks    : laneCount-1 spine copies offset perpendicular, so 2-3 lanes
+  //                 you can trace by eye converge on the contested center.
+  //   * spokes    : each extra expansion is linked to the nearest spine point so
+  //                 no base is stranded off the lane network.
+  // reserved[i] != 0 marks a lane tile; laneClear() later carves them open.
+  const reserved = new Uint8Array(W * H);
+  const [nat1x, nat1y] = partner(nat0.x, nat0.y);
+  const cx0 = W >> 1, cy0 = H >> 1;
+  const laneHalf = 2 + (rng() & 1);                 // 2 or 3 -> 5..7-wide lanes
+  const reserveSeg = (ax, ay, bx, by, hw) => {
+    const steps = Math.max(Math.abs(bx - ax), Math.abs(by - ay)) * 2 || 1;
+    for (let i = 0; i <= steps; i++) {
+      const x = ax + (((bx - ax) * i / steps) | 0);
+      const y = ay + (((by - ay) * i / steps) | 0);
+      for (let dy = -hw; dy <= hw; dy++)
+        for (let dx = -hw; dx <= hw; dx++) {
+          const tx = x + dx, ty = y + dy;
+          if (inb(tx, ty)) {
+            reserved[idx(tx, ty)] = 1;
+            const [px, py] = partner(tx, ty);
+            reserved[idx(px, py)] = 1;
+          }
+        }
+    }
+  };
+  // central spine (nat0 -> center -> nat1), plus perpendicular flanking copies.
+  const spinePerp = { x: -c0.dy, y: c0.dx };
+  for (let l = 0; l < laneCount; l++) {
+    // flank offset: 0, +sep, -sep, ... so lanes fan out symmetrically.
+    const k = (l + 1) >> 1;
+    const sgn = (l & 1) ? -1 : 1;
+    const off = l === 0 ? 0 : sgn * k * (laneHalf * 2 + 3);
+    const ox = spinePerp.x * off, oy = spinePerp.y * off;
+    reserveSeg(nat0.x + ox, nat0.y + oy, cx0 + ox, cy0 + oy, laneHalf);
+    reserveSeg(cx0 + ox, cy0 + oy, nat1x + ox, nat1y + oy, laneHalf);
+  }
+  // spokes: connect each extra expansion to the nearest point on the spine so it
+  // is never stranded. We link toward the map center (a spine point always on it).
+  for (const ex of expansions) {
+    if (ex === nat0) continue;
+    reserveSeg(ex.x, ex.y, cx0, cy0, laneHalf);
   }
 
   // ---- 4. center elevation feature (cliff-based separation) -----------------
@@ -360,13 +436,22 @@ function buildCandidate(seed, opts) {
     for (const ex of expansions) if (ex !== nat0 && Math.abs(x - ex.x) <= 4 && Math.abs(y - ex.y) <= 4) return true;
     return false;
   };
-  const centerGaps = carveCenterElevation(rng, vProfile, laneCount, c0, protectedNear);
+  // Route-first: the center feature grows AROUND the reserved lanes. Its ramp
+  // gaps are aligned to the lane directions and any cliff face that would fall on
+  // a reserved tile is left as passable lowland, so the planned routes cross the
+  // center as clear ground / stepped ramps rather than being walled off.
+  const centerGaps = carveCenterElevation(rng, vProfile, laneCount, c0, protectedNear, reserved);
 
   // (decorative mesas are stamped AFTER resources are placed — see step 8b —
   // so raiseMesa can avoid burying any mineral/geyser tile.)
 
-  // ---- 6. guarantee connectivity: clear the lane(s) -------------------------
-  clearLane(nat0, { x: partner(nat0.x, nat0.y)[0], y: partner(nat0.x, nat0.y)[1] }, 2);
+  // ---- 6. guarantee connectivity: CARVE every reserved lane -----------------
+  // Open all reserved LOWLAND tiles so each planned route (central spine, flanks,
+  // expansion spokes) is a clear, traceable path. Only lowland (height 0) tiles
+  // are cleared — reserved tiles that coincide with a cliff face keep their wall
+  // unless a ramp/gap already opened them, so elevation drama survives while the
+  // routes stay connected. This generalizes the old single nat0<->nat1 clearLane.
+  laneClear(reserved);
 
   // Re-assert build areas (later steps may have intruded).
   // Re-flatten the ENTIRE plateau top (full radius plateauR) to mainHeight (not
@@ -547,7 +632,7 @@ function buildCandidate(seed, opts) {
   growBarriers(rng, palette, {
     W, H, idx, inb, partner, rock, height, rampTiles, losBlock,
     setBarrier, starts, expansions, naturalsR: natR, plateauR,
-    geyserTiles, c0, minerals, addDeco,
+    geyserTiles, c0, minerals, addDeco, reserved,
   });
 
   // ---- 10. line-of-sight blockers -------------------------------------------
@@ -891,9 +976,10 @@ function buildCandidate(seed, opts) {
   // The whole footprint is CLAMPED to stay clear of protected zones (bases,
   // naturals) so its terraced skirt always reaches level 0 in open ground — this
   // guarantees no abrupt level jump anywhere on the passable graph.
-  function carveCenterElevation(r, prof, lanes, cdir, protectedNear) {
+  function carveCenterElevation(r, prof, lanes, cdir, protectedNear, reserved) {
     const cx = W >> 1, cy = H >> 1;
     const gaps = [];
+    const isReserved = (x, y) => reserved && inb(x, y) && reserved[idx(x, y)];
     // top level varies by profile: flat modest (1), else a dramatic (2..3).
     const bandLvl = prof === 0 ? 1 : (prof === 1 ? 2 + (r() & 1) : 2);
     const faceDepth = bandLvl;                        // staircase rows per side
@@ -949,7 +1035,10 @@ function buildCandidate(seed, opts) {
         setHeight(x, y, lvl);
         const onTop = step === 0;
         const onStair = step >= 1 && lvl > 0;
-        if (inGap(dx, dy)) {
+        if (inGap(dx, dy) || isReserved(x, y)) {
+          // ramp gap OR a reserved lane tile: keep it PASSABLE so the planned
+          // route crosses the center as a stepped ramp (never walled). Bands step
+          // one level at a time, so the corridor stays skip-free.
           setRock(x, y, 0);
           if (lvl > 0) setRamp(x, y, lvl);
           if (onTop || onStair) gaps.push({ x, y });
@@ -1013,6 +1102,88 @@ function buildCandidate(seed, opts) {
     }
   }
 
+  // Route-first lane carver: open every reserved LOWLAND tile so the planned
+  // pathways are clear ground. Elevated reserved tiles are left alone (a ramp/gap
+  // already opened the ones that must be passable), so cliffs framing the lane
+  // survive. Deterministic: iterates the mask in a fixed order.
+  function laneClear(reserved) {
+    for (let y = 0; y < H; y++)
+      for (let x = 0; x < W; x++) {
+        if (!reserved[idx(x, y)]) continue;
+        if (height[idx(x, y)] === 0) setRock(x, y, 0);
+      }
+  }
+
+  // Deterministic fan of RIM anchor points, biased to the arc "between" this main
+  // and the map center, for seating extra expansions around the edges. Returns
+  // ordered {x,y} rim tiles (player-0 side); the caller mirrors via partner().
+  function rimAnchorFan(s, dir, r) {
+    const cands = [];
+    const M = 5;                                     // edge margin
+    // Base the fan on the perpendicular-to-center direction so anchors spread
+    // across the flanks rather than piling behind the main.
+    const perp = { x: -dir.dy, y: dir.dx };
+    // Two seed rim points: perpendicular flanks projected to the nearest edges,
+    // plus the far mid-edges. We enumerate a handful of rim tiles and jitter.
+    const push = (x, y) => {
+      const cx = clampTile(x, W), cy = clampTile(y, H);
+      cands.push({ x: cx, y: cy });
+    };
+    // flank rim points: from the main, go perpendicular toward each edge.
+    push(s.x + perp.x * 20 + dir.dx * 6, s.y + perp.y * 20 + dir.dy * 6);
+    push(s.x - perp.x * 20 + dir.dx * 6, s.y - perp.y * 20 + dir.dy * 6);
+    // mid-edge rim points near the center band (good "side" expansions).
+    push((W >> 1) + perp.x * 22, (H >> 1) + perp.y * 22);
+    push((W >> 1) - perp.x * 22, (H >> 1) - perp.y * 22);
+    // a deterministic jittered ordering so seeds differ but stay reproducible.
+    const rot = r() % cands.length;
+    const ordered = [];
+    for (let i = 0; i < cands.length; i++) ordered.push(cands[(rot + i) % cands.length]);
+    // clamp all into the playable interior with the edge margin.
+    for (const c of ordered) {
+      c.x = Math.max(M, Math.min(W - 1 - M, c.x));
+      c.y = Math.max(M, Math.min(H - 1 - M, c.y));
+    }
+    return ordered;
+  }
+
+  // Walk inward from a rim anchor until we find a pocket whose 11x11 footprint is
+  // far enough from every base (and the anchor's own partner) to seat an
+  // expansion. Returns {x,y} or null. Deterministic (fixed inward stepping).
+  function findExpansionPocket(rc, starts, nat0, expansions, plateauR, natR, partner, r) {
+    const toCx = Math.sign((W >> 1) - rc.x), toCy = Math.sign((H >> 1) - rc.y);
+    const jx = (r() % 3) - 1, jy = (r() % 3) - 1;
+    for (let step = 0; step <= 10; step++) {
+      const x = clampTile(rc.x + toCx * step + jx, W);
+      const y = clampTile(rc.y + toCy * step + jy, H);
+      let ok = true;
+      // clear of both mains
+      for (const s of starts) if (Math.abs(x - s.x) <= plateauR + 6 && Math.abs(y - s.y) <= plateauR + 6) { ok = false; break; }
+      if (ok) {
+        // clear of the natural and its partner
+        const [pnx, pny] = partner(nat0.x, nat0.y);
+        if ((Math.abs(x - nat0.x) <= natR + 9 && Math.abs(y - nat0.y) <= natR + 9) ||
+            (Math.abs(x - pnx) <= natR + 9 && Math.abs(y - pny) <= natR + 9)) ok = false;
+      }
+      if (ok) {
+        // clear of already-placed expansions and their partners
+        for (const e of expansions) {
+          if (e === nat0) continue;
+          const [pex, pey] = partner(e.x, e.y);
+          if ((Math.abs(x - e.x) <= 12 && Math.abs(y - e.y) <= 12) ||
+              (Math.abs(x - pex) <= 12 && Math.abs(y - pey) <= 12)) { ok = false; break; }
+        }
+      }
+      if (ok) {
+        // clear of this pocket's OWN partner (close spawns can fold it back).
+        const [px, py] = partner(x, y);
+        if (Math.abs(x - px) <= 12 && Math.abs(y - py) <= 12) ok = false;
+      }
+      if (ok) return { x, y };
+    }
+    return null;
+  }
+
   function clampTile(v, n) { return Math.max(2, Math.min(n - 3, v)); }
 
   function perpOffset(dir, mag, r) {
@@ -1039,7 +1210,7 @@ function growBarriers(rng, palette, ctx) {
   const {
     W, H, idx, inb, partner, rock, height, rampTiles, losBlock,
     setBarrier, starts, expansions, naturalsR, plateauR, geyserTiles,
-    minerals, addDeco,
+    minerals, addDeco, reserved,
   } = ctx;
 
   // Protected: no barrier tile may land here. Generous margins so blobs frame
@@ -1051,6 +1222,7 @@ function growBarriers(rng, palette, ctx) {
     const i = idx(x, y);
     if (rampTiles[i]) return true;                    // never on a ramp
     if (rock[i]) return true;                         // already blocked (cliff)
+    if (reserved && reserved[i]) return true;         // never ON a reserved lane (keep routes clear)
     if (mineralSet.has(i)) return true;
     // keep clear of every base main (mining arc radius) and expansion. The main
     // margin is plateauR+4 (not +3): the cliff ring outer face sits at plateauR+1,
@@ -1082,9 +1254,21 @@ function growBarriers(rng, palette, ctx) {
   // scan player-0's half for lowland tiles adjacent to a cliff/height edge or
   // near the vertical center — those are natural "framing" spots — then pick a
   // deterministic subset. Fall back to open lowland if few edges exist.
+  // A lane-adjacent lowland tile is the BEST framing spot: it lines a route
+  // without blocking it. We rank anchors: laneEdge (touches a reserved tile) >
+  // cliffEdge (touches raised terrain) > open.
+  const laneEdgeAnchors = [];
   const edgeAnchors = [];
   const openAnchors = [];
   const halfH = H >> 1;
+  const touchesReserved = (x, y) => {
+    if (!reserved) return false;
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const nx = x + dx, ny = y + dy;
+      if (inb(nx, ny) && reserved[idx(nx, ny)]) return true;
+    }
+    return false;
+  };
   for (let y = 2; y < H - 2; y++) {
     for (let x = 2; x < W - 2; x++) {
       if (!canGrow(x, y)) continue;
@@ -1092,6 +1276,7 @@ function growBarriers(rng, palette, ctx) {
       // partner setter fills the mirror. Use a diagonal split that works for
       // both rotate and reflect modes: keep y in the top half OR (y==mid & left).
       if (y > halfH) continue;
+      if (touchesReserved(x, y)) { laneEdgeAnchors.push({ x, y }); continue; }
       // is this tile beside a height edge? (a border to frame)
       let edge = false;
       for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
@@ -1107,9 +1292,15 @@ function growBarriers(rng, palette, ctx) {
   const pick = (arr) => arr.length ? arr[rng() % arr.length] : null;
 
   for (let b = 0; b < blobCount; b++) {
-    // Prefer edge anchors (framing borders) ~70% of the time.
-    const fromEdge = edgeAnchors.length && (rng() % 10 < 7 || !openAnchors.length);
-    const anchor = fromEdge ? pick(edgeAnchors) : pick(openAnchors);
+    // Route-first framing priority: lane-edge anchors first (line the routes),
+    // then cliff-edge (frame region borders), then open. ~55% lane-edge when
+    // available, ~30% cliff-edge, remainder open — so barriers read as framing
+    // the readable lanes rather than a uniform scatter.
+    const roll = rng() % 10;
+    let anchor = null;
+    if (laneEdgeAnchors.length && roll < 6) anchor = pick(laneEdgeAnchors);
+    else if (edgeAnchors.length && roll < 9) anchor = pick(edgeAnchors);
+    else anchor = pick(openAnchors) || pick(edgeAnchors) || pick(laneEdgeAnchors);
     if (!anchor) break;
 
     // kind: mostly the theme primary, occasionally the secondary (rock).
