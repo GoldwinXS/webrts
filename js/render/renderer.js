@@ -6,6 +6,11 @@ import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
 import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
+import { Line2 } from "three/addons/lines/Line2.js";
+import { LineGeometry } from "three/addons/lines/LineGeometry.js";
+import { LineMaterial } from "three/addons/lines/LineMaterial.js";
+import { LineSegments2 } from "three/addons/lines/LineSegments2.js";
+import { LineSegmentsGeometry } from "three/addons/lines/LineSegmentsGeometry.js";
 import { FP, HALF, fpToTile } from "../core/fixed.js";
 import { makeRng } from "../core/fixed.js";
 import { BUILDINGS, PLAYER_COLORS } from "../core/data.js";
@@ -78,6 +83,7 @@ export class Renderer {
     // near-isoluminant with verdant grass). Order feedback uses DEEP ink tones.
     this.ringMat = new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide, transparent: true, opacity: 0.9, depthWrite: false });
     this.barBgMat = new THREE.MeshBasicMaterial({ color: 0x10141a });
+    this.fatLineMats = [];   // LineMaterial instances needing resolution updates on resize
     this.buildRallyPool();
     this.buildQueuePaths();
     this.buildTargetRings();
@@ -91,12 +97,23 @@ export class Renderer {
     this.bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.5, 0.55, 1.0);
     this.composer.addPass(this.bloom);
     this.composer.addPass(new OutputPass());
+    this.updateLineResolution();   // fat lines need an initial resolution before first frame
 
     window.addEventListener("resize", () => {
       this.camera.resize();
       this.renderer.setSize(innerWidth, innerHeight);
       this.composer.setSize(innerWidth, innerHeight);
+      this.updateLineResolution();
     });
+  }
+
+  // Fat lines (Line2/LineMaterial) need their pixel resolution kept in sync
+  // with the actual render target size, or their world-space width computation
+  // is wrong. Called on init and on every resize. this.fatLineMats is filled
+  // in by each buildXxx() that creates a LineMaterial.
+  updateLineResolution() {
+    if (!this.fatLineMats) return;
+    for (const m of this.fatLineMats) m.resolution.set(innerWidth, innerHeight);
   }
 
   buildLights() {
@@ -628,19 +645,32 @@ export class Renderer {
     const tName = th.name;
     const mixT = (a, b, k) => [CH(a[0] + (b[0] - a[0]) * k), CH(a[1] + (b[1] - a[1]) * k), CH(a[2] + (b[2] - a[2]) * k)];
 
-    // ---- 3. losBlock tiles: sit in saturated biome shade ---------------------
-    // Flat black over the bright palette read as scorched dirt. A saturated
-    // per-biome shadow tint reads as "ground shaded by dense foliage" while
-    // staying clearly darker than open ground so the gameplay cue survives.
+    // ---- 3. losBlock tiles: soft feathered shade, no hard tile boundary ------
+    // Used to be a flat per-tile fillRect at 0.26 alpha, which painted a crisp
+    // dark SQUARE under every vision-blocking doodad (shrubs etc.) — reads as
+    // an ugly rectangular stain on the ground. A radial gradient centered on
+    // each tile, feathered to zero alpha well inside the tile edge, gives a
+    // soft shapeless pool of shade instead; overlapping neighbor tiles blend
+    // into one organic patch with no visible boundary.
     if (losBlock) {
       ctx.save();
-      ctx.globalAlpha = 0.26;
-      ctx.fillStyle = tName === "verdant" ? "rgb(26,74,44)"
-                     : tName === "ashen"  ? "rgb(122,56,30)"
-                     :                      "rgb(54,92,140)";
-      for (let y = 0; y < h; y++)
-        for (let x = 0; x < w; x++)
-          if (losBlock[y * w + x]) ctx.fillRect(x * PX, y * PX, PX, PX);
+      ctx.globalCompositeOperation = "source-over";
+      const tint = tName === "verdant" ? "26,74,44"
+                 : tName === "ashen"  ? "122,56,30"
+                 :                      "54,92,140";
+      const peakAlpha = 0.16;
+      const r = PX * 0.72;   // feather radius: stays inside the tile, no hard edge
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          if (!losBlock[y * w + x]) continue;
+          const cx = x * PX + PX / 2, cy = y * PX + PX / 2;
+          const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
+          grad.addColorStop(0, `rgba(${tint},${peakAlpha})`);
+          grad.addColorStop(1, `rgba(${tint},0)`);
+          ctx.fillStyle = grad;
+          ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
+        }
+      }
       ctx.restore();
     }
 
@@ -1012,20 +1042,26 @@ export class Renderer {
     this.scene.add(inst);
   }
 
-  // one dashed rally line (building center -> rally point)
+  // one thick rally line (building center -> rally point). Fat line via
+  // Line2/LineGeometry/LineMaterial (regular THREE.Line ignores linewidth on
+  // WebGL, so it always renders 1px regardless of the value passed).
   makeRallyLine() {
-    const geo = new THREE.BufferGeometry().setFromPoints([
-      new THREE.Vector3(), new THREE.Vector3(),
-    ]);
-    const mat = new THREE.LineDashedMaterial({
-      color: 0x0b3d20, dashSize: 0.6, gapSize: 0.28,   // dark ink, long dashes: reads on bright ground
+    const geo = new LineGeometry();
+    geo.setPositions([0, 0, 0, 0, 0, 0]);
+    const mat = new LineMaterial({
+      color: 0x0b3d20,           // dark ink: reads on bright ground
+      linewidth: 5.5,            // pixels (worldUnits: false)
       transparent: true, opacity: 0.95,
       depthWrite: false, depthTest: false,   // UI overlay: never hide under terrain
+      dashed: true, dashSize: 0.6, gapSize: 0.28, dashScale: 1,
     });
-    const line = new THREE.Line(geo, mat);
+    mat.resolution.set(innerWidth, innerHeight);
+    this.fatLineMats.push(mat);
+    const line = new Line2(geo, mat);
     line.renderOrder = 5;
     line.visible = false;
     line.frustumCulled = false;
+    line.computeLineDistances();
     this.scene.add(line);
     return line;
   }
@@ -1038,27 +1074,29 @@ export class Renderer {
     }
   }
 
-  // one pooled LineSegments buffer drawing selected units' queued paths
+  // one pooled fat-line-segments buffer drawing selected units' queued paths.
+  // LineSegments2/LineSegmentsGeometry is the disjoint-segment sibling of
+  // Line2/LineGeometry (same fat-line technique, but each pair of verts is an
+  // independent segment rather than a connected polyline) — matches the old
+  // THREE.LineSegments layout so the position/color buffers below are unchanged.
   buildQueuePaths() {
     this.queueMaxSegments = 600;                 // 2 verts/segment, 3 floats/vert
-    const geo = new THREE.BufferGeometry();
-    const buf = new Float32Array(this.queueMaxSegments * 2 * 3);
-    this.queuePathPos = new THREE.BufferAttribute(buf, 3);
-    this.queuePathPos.setUsage(THREE.DynamicDrawUsage);
-    geo.setAttribute("position", this.queuePathPos);
-    // per-vertex colors: order type decides the segment color
-    const colBuf = new Float32Array(this.queueMaxSegments * 2 * 3);
-    this.queuePathCol = new THREE.BufferAttribute(colBuf, 3);
-    this.queuePathCol.setUsage(THREE.DynamicDrawUsage);
-    geo.setAttribute("color", this.queuePathCol);
-    geo.setDrawRange(0, 0);
-    const mat = new THREE.LineBasicMaterial({
-      vertexColors: true, transparent: true, opacity: 0.92,  // near-opaque: 1px lines vanish on bright ground otherwise
+    const geo = new LineSegmentsGeometry();
+    this.queuePathArr = new Float32Array(this.queueMaxSegments * 2 * 3);
+    this.queuePathCol = new Float32Array(this.queueMaxSegments * 2 * 3);
+    geo.setPositions(this.queuePathArr);
+    geo.setColors(this.queuePathCol);
+    const mat = new LineMaterial({
+      vertexColors: true, transparent: true, opacity: 0.92,  // near-opaque: reads over bright ground
+      linewidth: 4.5,          // pixels (worldUnits: false)
       depthWrite: false, depthTest: false,   // UI overlay: never hide under terrain
     });
-    this.queuePaths = new THREE.LineSegments(geo, mat);
+    mat.resolution.set(innerWidth, innerHeight);
+    this.fatLineMats.push(mat);
+    this.queuePaths = new LineSegments2(geo, mat);
     this.queuePaths.renderOrder = 5;
     this.queuePaths.frustumCulled = false;
+    this.queuePaths.visible = false;   // nothing queued yet
     this.scene.add(this.queuePaths);
   }
 
@@ -1086,8 +1124,8 @@ export class Renderer {
   // amber build.
   updateQueuePaths() {
     const sim = this.sim;
-    const arr = this.queuePathPos.array;
-    const col = this.queuePathCol.array;
+    const arr = this.queuePathArr;
+    const col = this.queuePathCol;
     const cap = this.queueMaxSegments;
     let seg = 0;
 
@@ -1136,9 +1174,15 @@ export class Renderer {
       }
     }
 
-    this.queuePaths.geometry.setDrawRange(0, seg * 2);
-    this.queuePathPos.needsUpdate = true;
-    this.queuePathCol.needsUpdate = true;
+    this.queuePaths.visible = seg > 0;
+    if (seg > 0) {
+      // LineSegmentsGeometry rebuilds its instanced attributes from a flat
+      // array each call, so pass only the filled prefix (a full-capacity
+      // buffer would draw `cap` segments, most of them stale zero-length
+      // leftovers from a previous, longer selection).
+      this.queuePaths.geometry.setPositions(arr.subarray(0, seg * 6));
+      this.queuePaths.geometry.setColors(col.subarray(0, seg * 6));
+    }
   }
 
   // Rally lines + flags for every selected own finished building with a rally.
@@ -1155,11 +1199,13 @@ export class Renderer {
       const rx = W2(b.rally.x), rz = W2(b.rally.y);
       const bx = W2(b.x), bz = W2(b.y);
       line.visible = true;
-      const pts = line.geometry.attributes.position;
-      // follow the terrain at both ends so the line/flag sit on the ground
-      pts.setXYZ(0, bx, this.heightAt(bx, bz) + 0.12, bz);
-      pts.setXYZ(1, rx, this.heightAt(rx, rz) + 0.12, rz);
-      pts.needsUpdate = true;
+      // follow the terrain at both ends so the line/flag sit on the ground.
+      // LineGeometry (fat-line addon) has no attribute-level setXYZ; rebuild
+      // its instanced position buffer from a flat array instead.
+      line.geometry.setPositions([
+        bx, this.heightAt(bx, bz) + 0.12, bz,
+        rx, this.heightAt(rx, rz) + 0.12, rz,
+      ]);
       line.computeLineDistances();
       const onMineral = b.rally.targetId && sim.byId.get(b.rally.targetId)?.type === "mineral";
       line.material.color.setHex(onMineral ? 0x074f46 : 0x0b3d20);
@@ -1568,6 +1614,28 @@ export class Renderer {
       } else if (g.userData.flyer && g.userData.body) {
         // level out when not turning
         g.userData.body.rotation.z += (0 - g.userData.body.rotation.z) * Math.min(1, dt * 3);
+      }
+      // Stationary ranged attackers (marine/tank/wraith/banshee/etc.) turn to
+      // face their live attack target instead of holding stale travel facing.
+      // Tank/turret already track targets via aimYaw (turret-relative), so
+      // this only needs to drive the whole-body yaw for the rest. Gated on
+      // "ranged" (range beyond melee reach) so brutes/workers don't spin to
+      // face melee targets they're already walking into.
+      if (g.userData.body && !moving && e.unit) {
+        const o = e.order;
+        const hasTarget = (o?.kind === "attack" || o?.kind === "attackmove") && o.targetId != null;
+        const u = UNITS[e.type];
+        if (hasTarget && u && u.range > FP * 1.5) {
+          const tgt = sim.byId.get(o.targetId);
+          if (tgt) {
+            const aimYaw = Math.atan2(tgt.x - e.x, tgt.y - e.y);
+            let dy = aimYaw - g.userData.body.rotation.y;
+            while (dy > Math.PI) dy -= Math.PI * 2;
+            while (dy < -Math.PI) dy += Math.PI * 2;
+            const rate = g.userData.flyer ? Math.min(1, dt * 6) : Math.min(1, dt * 12);
+            g.userData.body.rotation.y += dy * rate;
+          }
+        }
       }
       // turret/tank aim: face the attack target (or travel direction)
       if (g.userData.anim) {
