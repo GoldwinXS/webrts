@@ -175,6 +175,23 @@ registerUnit("marine", {
     m.add(part(G.rivet, COPPER).pos(0.27, 0.66, 0));
     m.add(part(G.rivet, COPPER).pos(-0.27, 0.64, 0));
 
+    // LEFT arm — the blaster is the right arm; the -x pauldron had no limb
+    // beneath it, reading as a missing arm. Dark upper + tin forearm + cream mitt.
+    const armL = new THREE.Group();
+    armL.add(part(G.leg, DARK).scl(0.9, 0.85, 0.9).mesh);
+    armL.add(part(G.leg, TIN).pos(0, -0.19, 0.02).scl(0.72, 0.7, 0.72).mesh);
+    armL.add(part(G.dome, shell).pos(0, -0.34, 0.03).scl(0.17, 0.15, 0.17).mesh);
+    armL.position.set(-0.31, 0.54, 0.03);
+    armL.rotation.set(0.1, 0, 0.14);
+    m.addGroup(armL, "armL");
+    // RIGHT forearm bridging the pauldron to the held blaster (so it reads held).
+    const armR = new THREE.Group();
+    armR.add(part(G.leg, DARK).scl(0.82, 0.72, 0.82).mesh);
+    armR.add(part(G.dome, shell).pos(0, -0.2, 0).scl(0.15, 0.13, 0.15).mesh);
+    armR.position.set(0.29, 0.52, 0.06);
+    armR.rotation.set(1.0, 0, -0.12);
+    m.addGroup(armR, "armR");
+
     // chunky little blaster: tin body, copper muzzle band, amber tip
     const gunGroup = new THREE.Group();
     gunGroup.add(part(G.gunReceiver, DARK).pos(0, 0, -0.06).mesh);
@@ -307,7 +324,10 @@ registerUnit("tank", {
     turret.add(part(G.domeVisor, glow).pos(0, 0.02, 0).scl(0.5, 0.4, 0.5).mesh);
     turret.add(part(G.tankMantlet, TIN).pos(0, -0.02, 0.22).scl(0.8, 0.7, 0.8).mesh);
     turret.add(part(G.antenna, GUNMETAL).pos(-0.16, 0.12, -0.14).rot(0.35, 0, 0).scl(0.6, 0.35, 0.6).mesh);
-    turret.add(part(G.lamp, glowMat(color, 1.5)).pos(-0.16, 0.42, -0.25).scl(0.7).mesh);
+    // Bobble AT the antenna tip. The 0.9-tall antenna scaled y*0.35 and tilted
+    // rot.x 0.35 puts its tip at (~-0.16, 0.42, -0.03); the old z=-0.25 left the
+    // bulb floating 0.22 behind the mast.
+    turret.add(part(G.lamp, glowMat(color, 1.5)).pos(-0.16, 0.43, -0.03).scl(0.7).mesh);
 
     const barrelGroup = new THREE.Group();
     barrelGroup.add(part(G.tankBarrel2, TIN).mesh);

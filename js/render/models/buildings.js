@@ -132,10 +132,28 @@ registerBuilding("hq", {
     const dome = domeCap(1.16, shell, 0, 1.32, 0, 0.62);
     const visor = new THREE.Mesh(G.domeVisor, glowMat(color, 0.6));
     visor.position.set(0, 1.66, 0); visor.scale.set(1.4, 1.0, 1.4);
-    // Copper cog crown stamped flat on the dome apex + rivet ring around it.
+    // Big copper cog hub stamped flat on the dome apex — a machine crown, not a
+    // cherry. (No rivet ring: those small copper studs read as cake sprinkles.)
     const crownCog = new THREE.Mesh(G.cog, COPPER);
-    crownCog.position.set(0, 1.94, 0); crownCog.rotation.x = -Math.PI / 2; crownCog.scale.setScalar(1.4);
-    const crownRivets = rivetRing(8, 0.6, 1.9, COPPER);
+    crownCog.position.set(0, 1.96, 0); crownCog.rotation.x = -Math.PI / 2; crownCog.scale.setScalar(1.9);
+    // Two flat copper cogs on the dome shoulders (disc facing up) — a clear
+    // machine read from the top-down RTS camera, where the side skirt-gears go
+    // edge-on. Seated just into the dome surface (~y1.92 at this radius).
+    const shoulderCogA = new THREE.Mesh(G.cog, COPPER);
+    shoulderCogA.position.set(0.5, 1.86, 0.42); shoulderCogA.rotation.set(-Math.PI / 2, 0, 0.2); shoulderCogA.scale.setScalar(0.72);
+    const shoulderCogB = new THREE.Mesh(G.cog, COPPER);
+    shoulderCogB.position.set(-0.5, 1.86, 0.42); shoulderCogB.rotation.set(-Math.PI / 2, 0, -0.2); shoulderCogB.scale.setScalar(0.72);
+    // Gear-teeth rim at the hull/dome junction — converts the smooth "icing"
+    // collar band into a toothed cog rim, the biggest anti-cake fix top-down.
+    const rimTeeth = new THREE.Group();
+    const toothGeo = new THREE.BoxGeometry(0.14, 0.13, 0.11);
+    for (let i = 0; i < 20; i++) {
+      const a = (i / 20) * Math.PI * 2;
+      const th = new THREE.Mesh(toothGeo, COPPER);
+      th.position.set(Math.sin(a) * 1.28, 1.36, Math.cos(a) * 1.28);
+      th.rotation.y = a;
+      rimTeeth.add(th);
+    }
 
     // Radar mast rising OUT of the dome crown (starts inside the dome).
     const mastFoot = cyl(0.22, 0.28, 0.3, 12, GUNMETAL, 0, 2.06, 0);
@@ -155,9 +173,27 @@ registerBuilding("hq", {
     const ventB = new THREE.Mesh(G.vent, GUNMETAL); ventB.position.set(0.55, 1.64, -0.62); ventB.scale.setScalar(0.6);
     const ventBglow = cyl(0.13, 0.13, 0.04, 10, glowMat(AMBER, 1.4), 0.55, 1.8, -0.62);
 
+    // Copper DRIVE-GEARS bolted to the machine skirt (both sides), each meshing
+    // with a smaller gunmetal gear behind it — the clearest "this is a machine,
+    // not a cake" signal on the Hub. Each cog sits in an oriented hub group (disc
+    // faces sideways, thin along x so auto-fit isn't tripped) and turns slowly;
+    // the meshing pair counter-rotate. Half-embedded in the skirt = mounted.
+    const gearMounts = [], gearSpin = [];
+    for (const side of [1, -1]) {
+      const hub1 = new THREE.Group();
+      hub1.position.set(1.3 * side, 0.56, 0.14); hub1.rotation.y = Math.PI / 2; hub1.scale.setScalar(0.82);
+      const c1 = new THREE.Mesh(G.cog, COPPER); hub1.add(c1);
+      const hub2 = new THREE.Group();
+      hub2.position.set(1.24 * side, 0.32, -0.44); hub2.rotation.y = Math.PI / 2; hub2.scale.setScalar(0.5);
+      const c2 = new THREE.Mesh(G.cog, GUNMETAL); hub2.add(c2);
+      gearMounts.push(hub1, hub2);
+      gearSpin.push({ m: c1, dir: side }, { m: c2, dir: -side * 1.6 }); // small gear spins faster
+    }
     built.add(base, baseRivets, skirt, hull, collar, ports, doorFrame, doorPanel, doorCog,
-              dome, visor, crownCog, crownRivets,
+              ...gearMounts,
+              dome, visor, crownCog, shoulderCogA, shoulderCogB, rimTeeth,
               mastFoot, mast, dish, antA, antB, ventA, ventAglow, ventB, ventBglow);
+    anim.gears = gearSpin;
     // Corner lamps ON the base slab top (radius 1.39 < slab top radius 1.5,
     // y half-sunk into the slab). The old (±1.32, ±1.32) diagonal reach of 1.87
     // hovered in AIR past the round slab — and inflated the bounding box so
@@ -175,6 +211,7 @@ registerBuilding("hq", {
 
   animate(g, e, t, move, a) {
     if (a.dish) a.dish.rotation.y = t * 0.7;
+    if (a.gears) for (const s of a.gears) s.m.rotation.z = t * 0.5 * s.dir;
   },
 });
 
