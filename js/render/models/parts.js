@@ -139,5 +139,12 @@ export function wrapBuilding(built, size, scaffoldMat, G) {
 
   group.userData.built = built;
   group.userData.scaffold = scaffold;
+  // Propagate the model's userData to the OUTER group: the renderer and
+  // animateVisual read g.userData.anim / .mats on the wrapper (registry.js:53),
+  // not on the inner model — without this, building animations (dish spin,
+  // turret aim, lamp blink...) and damage-flash materials silently never run.
+  group.userData.anim = built.userData.anim || null;
+  group.userData.mats = built.userData.mats || null;
+  group.userData.named = built.userData.named || null;
   return group;
 }

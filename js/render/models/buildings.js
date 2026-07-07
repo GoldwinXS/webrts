@@ -1,120 +1,158 @@
-// Building model definitions. Each building has a build(e, color, size) function
-// and an optional animate(g, e, t, move, a) function.
+// Building model definitions — THE COGS' civic architecture. These are the
+// factories, silos and towers built by the same tin-toy robots as units.js, so
+// they share the exact family DNA:
+//   1. Warm cream enamel shells (per-building shellMat) over tin/gunmetal machinery
+//   2. Rounded slab bases (RUBBER/DARK) that the cream body sits ON, never floats
+//   3. G.dome roofs + a curved TEAM-GLOW G.domeVisor band, just like unit heads
+//   4. Copper G.cog emblems + copper G.rivet studs stamped on shells
+//   5. Bobble antennae: G.antenna rising FROM a surface, tipped with a team G.lamp
+//   6. A team G.stripe / team-mat trim ring around the waist or roofline
+//   7. Warm AMBER glows for every vent/exhaust/thruster — team color only as accent
 //
-// To add a new building, write build + animate here, then register at the bottom.
+// Every mesh is positioned to OVERLAP the part beneath it (no floating bits):
+// domes sink into their hulls, antennae start inside the roof, pipes enter walls,
+// pads rest on their pylons.
+//
+// Renderer contracts preserved (see registry.js / renderer.js):
+//   - wrapBuilding(built, size, ...) auto-fits to the tile footprint + adds the
+//     construction scaffold. Models build UP from y~0 so the vertical grow reads.
+//   - userData.mats = [team materials] for the damage flash.
+//   - addLamp(...) registers blinking corner lamps into anim.lamps.
+//   - refinery reads g.userData.harvesting; turret reads g.userData.aimYaw and
+//     needs anim.pod (yawed) + anim.podBarrels (recoil) + anim.recoil.
 
 import * as THREE from "three";
 import { wrapBuilding } from "./parts.js";
 import { registerBuilding, addLamp } from "./registry.js";
 import {
-  G, DARK, GUNMETAL, TRIM, SCAFFOLD, BUILDING_BASE,
-  teamMat, glowMat, toonGradient, liftToGround,
+  G, TIN, COPPER, DARK, GUNMETAL, TRIM, RUBBER, SCAFFOLD, AMBER,
+  shellMat, teamMat, glowMat,
 } from "./core.js";
 
-// Helper: create a one-off BoxGeometry mesh with position
+// Shared toon material for warm interior/window glow (cool blue reads as glass).
+const GLASS = glowMat(0x9fdcff, 0.7);
+
+// ---------------------------------------------------------------------------
+// Small mesh helpers (one-off geometries; buildings are few, so per-shape
+// geometry is fine — units share cached geometry, buildings can be bespoke).
+// ---------------------------------------------------------------------------
 function box(w, h, d, mat, x, y, z) {
   const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
   m.position.set(x, y, z);
   return m;
 }
-
-// Helper: create a one-off CylinderGeometry mesh with position
 function cyl(rTop, rBot, h, seg, mat, x, y, z) {
   const m = new THREE.Mesh(new THREE.CylinderGeometry(rTop, rBot, h, seg), mat);
   m.position.set(x, y, z);
   return m;
 }
-
-// Helper: a thin emissive strip (window/vent glow) that reads with bloom.
-function strip(w, h, d, mat, x, y, z) {
-  const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+// Domed cap (hemisphere) — the recurring Cog roof. Overlaps down into whatever
+// it caps by keeping its equator slightly below the seam.
+function domeCap(r, mat, x, y, z, flat = 0.72) {
+  const m = new THREE.Mesh(new THREE.SphereGeometry(r, 18, 12, 0, Math.PI * 2, 0, Math.PI / 2), mat);
   m.position.set(x, y, z);
+  m.scale.y = flat;
+  m.castShadow = true;
   return m;
 }
-
-// Helper: a chamfered/beveled box built from a base + slightly inset cap so
-// silhouettes read less like plain cubes. Returns a Group.
-function beveledBlock(w, h, d, mat, bevel = 0.12) {
-  const grp = new THREE.Group();
-  const base = box(w, h - bevel, d, mat, 0, 0, 0);
-  const cap = box(w - bevel * 1.6, bevel, d - bevel * 1.6, mat, 0, h / 2 - bevel / 2, 0);
-  grp.add(base, cap);
-  return grp;
+// Copper cog emblem, oriented to face +Z (like unit chest badges).
+function cogBadge(mat, x, y, z, s) {
+  const m = new THREE.Mesh(G.cog, mat);
+  m.position.set(x, y, z);
+  m.scale.setScalar(s);
+  return m;
 }
-
-// Helper: run a row of small panel/rivet detail boxes along an edge.
-function panelRow(n, spacing, mat, x0, y, z, sx, sy, sz, axis = "x") {
+// A ring of copper rivets around a circle at height y, radius r.
+function rivetRing(n, r, y, mat, cx = 0, cz = 0) {
   const grp = new THREE.Group();
   for (let i = 0; i < n; i++) {
-    const off = (i - (n - 1) / 2) * spacing;
-    const p = box(sx, sy, sz, mat,
-      x0 + (axis === "x" ? off : 0),
-      y,
-      z + (axis === "z" ? off : 0));
-    grp.add(p);
+    const a = (i / n) * Math.PI * 2;
+    const m = new THREE.Mesh(G.rivet, mat);
+    m.position.set(cx + Math.cos(a) * r, y, cz + Math.sin(a) * r);
+    m.scale.setScalar(1.5);
+    grp.add(m);
   }
   return grp;
 }
+// A bobble antenna: gunmetal whip that STARTS inside `y` and rises, tipped with a
+// glowing team lamp. Returns the group so it can be tilted/positioned as a unit.
+function bobbleAntenna(x, y, z, teamColor, len = 0.5, tilt = 0) {
+  const grp = new THREE.Group();
+  const whip = new THREE.Mesh(G.antenna, GUNMETAL);
+  whip.scale.set(0.7, len, 0.7);
+  grp.add(whip);
+  const lamp = new THREE.Mesh(G.lamp, glowMat(teamColor, 1.6));
+  lamp.scale.setScalar(0.85);
+  // G.antenna is 0.9 tall pre-translate (already shifted so it grows upward from
+  // ~0); its tip lands near 0.9*len. Seat the bobble just below that so it kisses
+  // the whip end with a slight overlap (no gap).
+  lamp.position.y = 0.9 * len - 0.02;
+  grp.add(lamp);
+  grp.position.set(x, y, z);
+  grp.rotation.z = tilt;
+  return grp;
+}
 
 // ===========================================================================
-// HQ — command center: broad base, mid storey, control tower, radar dish
+// HQ ("Command Post") — the big friendly dome at the heart of the base. A broad
+// rubber slab base carries a fat cream drum; a huge cream dome roof wearing a
+// team-glow visor caps it; a copper cog crowns the dome, ringed by rivets, with
+// a spinning radar mast rising out of the crown and a team stripe at the waist.
 // ===========================================================================
 registerBuilding("hq", {
   build(e, color, size) {
-    const team = teamMat(color, 0.08);
-    const glow = glowMat(color);
-    const win = glowMat(0x8fd6ff, 0.9);   // cool interior light
+    const shell = shellMat();
+    const team = teamMat(color, 0.1);
     const built = new THREE.Group();
     const anim = { kind: "hq", lamps: [] };
 
-    // Broad footing skirt + beveled main hull for a heavier, readable base
-    const skirt = cyl(1.5, 1.6, 0.22, 32, DARK, 0, 0.11, 0); skirt.castShadow = true;
-    const hull = cyl(1.3, 1.4, 0.9, 32, BUILDING_BASE, 0, 0.67, 0); hull.castShadow = true;
-    // Corner buttresses break the boxy silhouette - REMOVED FOR ROUND DESIGN
-    // for (const [cx, cz] of [[1.28,1.28],[-1.28,1.28],[1.28,-1.28],[-1.28,-1.28]]) {
-    //   const but = box(0.34, 1.02, 0.34, GUNMETAL, cx, 0.51, cz); but.castShadow = true;
-    //   built.add(but);
-    // }
-    // Glowing window bands on each face
-    const windowRing = new THREE.Mesh(new THREE.TorusGeometry(1.35, 0.04, 8, 48), win);
-    windowRing.rotation.x = Math.PI / 2;
-    windowRing.position.y = 0.6;
-    // Player-color trim ring around the roofline
-    const trim = cyl(1.38, 1.38, 0.16, 32, team, 0, 1.05, 0);
-    const trimInset = cyl(1.25, 1.25, 0.06, 32, glow, 0, 1.15, 0);
-    // Mid storey (control deck) with paneling
-    const b2 = cyl(1.2, 1.25, 0.62, 32, team, 0, 1.42, 0); b2.castShadow = true;
-    for (let i = 0; i < 4; i++) {
-      const a = (i / 4) * Math.PI * 2;
-      const panel = box(0.5, 0.3, 0.2, GUNMETAL, Math.cos(a) * 1.1, 1.42, Math.sin(a) * 1.1);
-      built.add(panel);
-    }
-    for (let i = 0; i < 12; i++) {
-        const a = (i / 12) * Math.PI * 2;
-        const rib = box(0.1, 0.9, 0.1, GUNMETAL, Math.cos(a) * 1.35, 0.67, Math.sin(a) * 1.35);
-        built.add(rib);
-    }
-    // Control tower with banded collar
-    const tower = cyl(0.5, 0.7, 0.86, 12, BUILDING_BASE, 0, 2.13, 0); tower.castShadow = true;
-    const towerBand = cyl(0.53, 0.53, 0.12, 12, team, 0, 2.46, 0);
-    const towerGlow = cyl(0.46, 0.46, 0.08, 12, win, 0, 2.2, 0);
-    const cap = cyl(0.34, 0.5, 0.2, 12, GUNMETAL, 0, 2.66, 0);
-    // Mast + rotating radar dish on top
-    const pole = new THREE.Mesh(G.pole, GUNMETAL); pole.position.y = 2.9; pole.scale.y = 0.55;
-    const dish = new THREE.Mesh(G.dish, team); dish.position.y = 3.25;
-    const dishTip = new THREE.Mesh(G.lamp, glowMat(0xff5f4c, 1.8)); dishTip.position.set(0.26, 3.25, 0);
-    dish.add(dishTip); dishTip.position.set(0.26, 0, 0);
-    // Rooftop greebles: antenna + vents
-    const antL = new THREE.Mesh(G.antenna, GUNMETAL); antL.position.set(-1.05, 1.7, -1.05);
-    const ventA = new THREE.Mesh(G.vent, GUNMETAL); ventA.position.set(-0.8, 1.75, 0.9);
-    const ventB = new THREE.Mesh(G.vent, GUNMETAL); ventB.position.set(0.85, 1.75, -0.85);
+    // Rounded slab base (dark rubber) the whole thing rests ON.
+    const base = cyl(1.5, 1.62, 0.34, 28, RUBBER, 0, 0.17, 0); base.castShadow = true;
+    const baseRivets = rivetRing(12, 1.48, 0.24, COPPER);
+    // Fat cream drum hull, sunk slightly into the base so no seam-gap shows.
+    const hull = cyl(1.28, 1.36, 0.92, 28, shell, 0, 0.78, 0); hull.castShadow = true;
+    // Team stripe ring around the waist + a warm window band of glass glow.
+    const stripe = cyl(1.34, 1.34, 0.16, 28, team, 0, 0.62, 0);
+    const winRing = new THREE.Mesh(new THREE.TorusGeometry(1.31, 0.06, 8, 40), GLASS);
+    winRing.rotation.x = Math.PI / 2; winRing.position.y = 0.98;
+    // Big cream dome roof, equator overlapping down into the drum top (drum top
+    // ~1.24; seat dome at 1.14 so it sinks 0.1 in).
+    const dome = domeCap(1.18, shell, 0, 1.14, 0, 0.62);
+    const visor = new THREE.Mesh(G.domeVisor, glowMat(color, 0.6));
+    visor.position.set(0, 1.5, 0); visor.scale.set(1.4, 1.0, 1.4);
+    // Copper cog crown stamped flat on the dome apex + rivet ring around it.
+    const crownCog = new THREE.Mesh(G.cog, COPPER);
+    crownCog.position.set(0, 1.78, 0); crownCog.rotation.x = -Math.PI / 2; crownCog.scale.setScalar(1.4);
+    const crownRivets = rivetRing(8, 0.6, 1.74, COPPER);
 
-    built.add(skirt, hull, windowRing, trim, trimInset, b2,
-              tower, towerBand, towerGlow, cap, pole, dish, antL, ventA, ventB);
-    addLamp(built, anim, 1.3, 1.12, 1.3, color);
-    addLamp(built, anim, -1.3, 1.12, 1.3, color);
-    addLamp(built, anim, 1.3, 1.12, -1.3, color);
-    addLamp(built, anim, -1.3, 1.12, -1.3, color);
+    // Radar mast rising OUT of the dome crown (starts inside the dome at 1.6).
+    const mastFoot = cyl(0.22, 0.28, 0.3, 12, GUNMETAL, 0, 1.9, 0);
+    const mast = new THREE.Mesh(G.pole, GUNMETAL); mast.scale.y = 0.5; mast.position.y = 2.35;
+    const dish = new THREE.Group();
+    const dishPlate = new THREE.Mesh(G.dish, team);
+    const dishTip = new THREE.Mesh(G.lamp, glowMat(AMBER, 1.8));
+    dishTip.position.set(0.26, 0.04, 0);
+    dish.add(dishPlate, dishTip);
+    dish.position.y = 2.68;
+    // Antenna bobbles flanking the mast foot, rising from the dome shoulders.
+    const antA = bobbleAntenna(0.72, 1.42, 0.2, color, 0.42, -0.3);
+    const antB = bobbleAntenna(-0.72, 1.42, -0.2, color, 0.42, 0.3);
+    // Warm amber vents seated on the dome shoulders (overlap into the dome).
+    const ventA = new THREE.Mesh(G.vent, GUNMETAL); ventA.position.set(-0.55, 1.5, 0.62); ventA.scale.setScalar(0.6);
+    const ventAglow = cyl(0.13, 0.13, 0.04, 10, glowMat(AMBER, 1.4), -0.55, 1.66, 0.62);
+    const ventB = new THREE.Mesh(G.vent, GUNMETAL); ventB.position.set(0.55, 1.5, -0.62); ventB.scale.setScalar(0.6);
+    const ventBglow = cyl(0.13, 0.13, 0.04, 10, glowMat(AMBER, 1.4), 0.55, 1.66, -0.62);
+
+    built.add(base, baseRivets, hull, stripe, winRing, dome, visor, crownCog, crownRivets,
+              mastFoot, mast, dish, antA, antB, ventA, ventAglow, ventB, ventBglow);
+    // Corner lamps ON the base slab top (radius 1.39 < slab top radius 1.5,
+    // y half-sunk into the slab). The old (±1.32, ±1.32) diagonal reach of 1.87
+    // hovered in AIR past the round slab — and inflated the bounding box so
+    // auto-fit shrank the whole HQ ~25% for nothing.
+    addLamp(built, anim, 0.98, 0.36, 0.98, color);
+    addLamp(built, anim, -0.98, 0.36, 0.98, color);
+    addLamp(built, anim, 0.98, 0.36, -0.98, color);
+    addLamp(built, anim, -0.98, 0.36, -0.98, color);
     anim.dish = dish;
 
     built.userData.anim = anim;
@@ -128,45 +166,51 @@ registerBuilding("hq", {
 });
 
 // ===========================================================================
-// DEPOT — supply silo: squat base, glowing band, domed cap, vent
+// DEPOT ("Supply Depot") — squat storage. A low rubber slab carries two chunky
+// cream silos with copper hoop bands + domed tin caps + antenna bobbles, tied
+// together by a gunmetal catwalk. A green fill-gauge glows up each front; a
+// team stripe wraps the base.
 // ===========================================================================
 registerBuilding("depot", {
   build(e, color, size) {
-    const team = teamMat(color, 0.08);
-    const glow = glowMat(color);
-    const gauge = glowMat(0x7cd94f, 0.9);   // fill-level gauge glow
+    const shell = shellMat();
+    const team = teamMat(color, 0.1);
+    const gauge = glowMat(0x7cd94f, 0.9);
     const built = new THREE.Group();
     const anim = { kind: "depot", lamps: [] };
 
-    // Low armored plinth with a player-color band
-    const b1 = beveledBlock(1.7, 0.5, 1.7, BUILDING_BASE, 0.14); b1.position.y = 0.27;
-    b1.children.forEach(c => c.castShadow = true);
-    const band = box(1.76, 0.12, 1.76, glow, 0, 0.56, 0);
-    const deck = box(1.5, 0.14, 1.5, GUNMETAL, 0, 0.68, 0); deck.castShadow = true;
+    // Rounded rubber slab base + team stripe band + rivet ring.
+    const base = cyl(1.6, 1.72, 0.34, 24, RUBBER, 0, 0.17, 0); base.castShadow = true;
+    const band = cyl(1.64, 1.64, 0.14, 24, team, 0, 0.4, 0);   // pulses in animate
+    const baseRivets = rivetRing(10, 1.58, 0.22, COPPER);
+    const deck = cyl(1.4, 1.5, 0.12, 24, GUNMETAL, 0, 0.5, 0); deck.castShadow = true;
 
-    // Twin fuel/supply silos side by side — distinctive readable silhouette
-    const silos = [];
-    for (const sx of [-0.42, 0.42]) {
-      const tank = cyl(0.36, 0.4, 0.7, 16, team, sx, 1.1, 0); tank.castShadow = true;
-      const capT = new THREE.Mesh(new THREE.SphereGeometry(0.36, 16, 8, 0, Math.PI*2, 0, Math.PI/2), GUNMETAL);
-      capT.position.set(sx, 1.44, 0); capT.scale.y = 0.55;
-      const ribA = cyl(0.38, 0.38, 0.05, 16, GUNMETAL, sx, 1.0, 0);
-      const ribB = cyl(0.38, 0.38, 0.05, 16, GUNMETAL, sx, 1.24, 0);
-      // vertical fill gauge running up the front of each silo
-      const g = strip(0.05, 0.5, 0.06, gauge, sx, 1.1, 0.38);
-      silos.push(tank, capT, ribA, ribB, g);
+    // Twin cream silos side by side (the readable squat silhouette).
+    const parts = [];
+    for (const sx of [-0.62, 0.62]) {
+      const tank = cyl(0.5, 0.56, 0.9, 18, shell, sx, 1.0, 0); tank.castShadow = true;
+      // copper hoop bands hugging the tank
+      const hoopA = cyl(0.53, 0.53, 0.07, 18, COPPER, sx, 0.72, 0);
+      const hoopB = cyl(0.53, 0.53, 0.07, 18, COPPER, sx, 1.24, 0);
+      // domed tin cap sunk into the tank top (tank top ~1.45; seat at 1.4)
+      const cap = domeCap(0.52, TIN, sx, 1.4, 0, 0.62);
+      const capCog = cogBadge(COPPER, sx, 1.62, 0, 0.4); capCog.rotation.x = -Math.PI / 2;
+      // green fill gauge running up the front face, sitting proud of the shell
+      const gaugeStrip = box(0.08, 0.62, 0.06, gauge, sx, 1.0, 0.52);
+      // antenna bobble rising from the cap
+      const ant = bobbleAntenna(sx, 1.5, 0, color, 0.34);
+      parts.push(tank, hoopA, hoopB, cap, capCog, gaugeStrip, ant);
     }
-    // Cross catwalk + pipe tying the silos together
-    const bridge = box(0.9, 0.08, 0.24, GUNMETAL, 0, 1.32, 0);
-    const pipe = new THREE.Mesh(G.pipe, TRIM); pipe.rotation.z = Math.PI / 2;
-    pipe.scale.set(1, 1.3, 1); pipe.position.set(0, 0.9, -0.34);
-    const vent = new THREE.Mesh(G.vent, GUNMETAL); vent.position.set(0, 1.55, 0); vent.scale.setScalar(0.7);
+    // Gunmetal catwalk + amber-lit pipe tying the two silos together (both ends
+    // buried into the tanks so nothing floats).
+    const bridge = box(1.24, 0.1, 0.28, GUNMETAL, 0, 1.2, 0.0);
+    const pipe = new THREE.Mesh(G.pipe, TRIM);
+    pipe.rotation.z = Math.PI / 2; pipe.scale.set(1, 1.9, 1); pipe.position.set(0, 0.78, -0.4);
+    const pipeGlow = cyl(0.06, 0.06, 0.02, 8, glowMat(AMBER, 1.2), 0, 0.78, -0.53);
 
-    for (const [rx, rz] of [[0.72,0.72],[-0.72,0.72],[0.72,-0.72],[-0.72,-0.72]]) {
-      const r = new THREE.Mesh(G.lamp, GUNMETAL); r.scale.setScalar(1.4);
-      r.position.set(rx, 0.27, rz); built.add(r);
-    }
-    built.add(b1, band, deck, ...silos, bridge, pipe, vent);
+    built.add(base, band, baseRivets, deck, ...parts, bridge, pipe, pipeGlow);
+    for (const [rx, rz] of [[1.02, 1.02], [-1.02, 1.02], [1.02, -1.02], [-1.02, -1.02]])
+      addLamp(built, anim, rx, 0.34, rz, color);
     anim.band = band; anim.gaugeMat = gauge;
 
     built.userData.anim = anim;
@@ -181,36 +225,114 @@ registerBuilding("depot", {
 });
 
 // ===========================================================================
-// REFINERY — gas extractor: dome, intake ring, side tanks, exhaust stack
+// BARRACKS — wide unit-maker with a big glowing bay DOOR. A cream hall on a
+// rubber slab, dome-visor roof cap, copper cog over the door, rivet studs, a
+// team roof stripe, a comms antenna bobble and a warm amber vent.
+// ===========================================================================
+registerBuilding("barracks", {
+  build(e, color, size) {
+    const shell = shellMat();
+    const team = teamMat(color, 0.1);
+    const glow = glowMat(color);
+    const built = new THREE.Group();
+    const anim = { kind: "barracks", lamps: [] };
+
+    // Rounded rubber slab footing + copper rivet studs at the corners.
+    const base = box(2.62, 0.28, 2.26, RUBBER, 0, 0.14, 0); base.castShadow = true;
+    // Cream drill hall.
+    const hall = box(2.42, 1.1, 2.06, shell, 0, 0.83, 0); hall.castShadow = true;
+    for (const [rx, rz] of [[1.22, 1.06], [-1.22, 1.06], [1.22, -1.06], [-1.22, -1.06]]) {
+      const rv = new THREE.Mesh(G.rivet, COPPER); rv.scale.setScalar(2.2); rv.position.set(rx, 0.5, rz);
+      built.add(rv);
+    }
+    // Team trim + slightly overhanging gunmetal roof + a big dome-visor cap sunk
+    // into the roof (roof top ~1.5; seat dome at 1.42).
+    const trim = box(2.5, 0.14, 2.14, team, 0, 1.35, 0);
+    const roof = box(2.56, 0.2, 2.2, GUNMETAL, 0, 1.44, 0); roof.castShadow = true;
+    const dome = domeCap(0.95, shell, 0, 1.42, -0.1, 0.6);
+    const visor = new THREE.Mesh(G.domeVisor, glow); visor.position.set(0, 1.72, -0.1); visor.scale.set(1.1, 0.85, 1.1);
+    // Comms antenna bobble rising from the roof spine + amber vent seated on roof.
+    const ant = bobbleAntenna(-0.95, 1.5, -0.6, color, 0.55, 0.25);
+    const vent = new THREE.Mesh(G.vent, GUNMETAL); vent.position.set(0.85, 1.5, -0.6); vent.scale.setScalar(0.7);
+    const ventGlow = cyl(0.15, 0.15, 0.04, 10, glowMat(AMBER, 1.4), 0.85, 1.68, -0.6);
+
+    // Recessed bay door on the front wall: dark surround set INTO the wall, team
+    // frame, glowing door face proud of the frame, copper cog keystone above,
+    // threshold light on the ground.
+    const surround = box(1.16, 1.06, 0.16, DARK, 0, 0.66, 1.0);
+    const frame = box(1.04, 0.94, 0.08, team, 0, 0.62, 1.06);
+    const door = box(0.86, 0.8, 0.08, glow, 0, 0.56, 1.1);   // pulses in animate
+    const keyCog = cogBadge(COPPER, 0, 1.18, 1.08, 0.4);
+    const threshold = box(0.94, 0.05, 0.16, glow, 0, 0.16, 1.16);
+
+    built.add(base, hall, trim, roof, dome, visor, ant, vent, ventGlow,
+              surround, frame, door, keyCog, threshold);
+    addLamp(built, anim, 1.28, 1.5, 0.9, color);
+    addLamp(built, anim, -1.28, 1.5, 0.9, color);
+    anim.door = door;
+
+    built.userData.anim = anim;
+    built.userData.mats = [team];
+    return wrapBuilding(built, size, SCAFFOLD, G);
+  },
+
+  animate(g, e, t, move, a) {
+    if (a.door) a.door.material.emissiveIntensity = e.queue?.length ? 1.6 + Math.sin(t * 6) * 0.6 : 0.9;
+  },
+});
+
+// ===========================================================================
+// REFINERY — gas extractor straddling the geyser. A cream dome sits on a rubber
+// ring; a spinning green intake ring feeds it; two riveted cream side-tanks with
+// tin caps flank it, tied by gunmetal pipes that ENTER the dome; an amber exhaust
+// stack vents at the back.
 // ===========================================================================
 registerBuilding("refinery", {
   build(e, color, size) {
-    const team = teamMat(color, 0.08);
-    const glow = glowMat(color);
+    const shell = shellMat();
+    const team = teamMat(color, 0.1);
     const built = new THREE.Group();
     const anim = { kind: "refinery", lamps: [] };
 
-    const skirt = cyl(0.9, 1.0, 0.24, 14, BUILDING_BASE, 0, 0.12, 0);
-    const dome = new THREE.Mesh(new THREE.SphereGeometry(0.82, 16, 10, 0, Math.PI*2, 0, Math.PI/2), BUILDING_BASE);
-    dome.position.y = 0.2; dome.scale.y = 0.8; dome.castShadow = true;
-    const collar = cyl(0.55, 0.7, 0.3, 14, team, 0, 0.62, 0);
+    // Rounded rubber ring base + team stripe.
+    const base = cyl(0.98, 1.08, 0.28, 16, RUBBER, 0, 0.14, 0); base.castShadow = true;
+    const stripe = cyl(1.0, 1.0, 0.1, 16, team, 0, 0.32, 0);
+    // Cream dome core sunk into the base.
+    const dome = domeCap(0.88, shell, 0, 0.22, 0, 0.85);
+    const domeRivets = rivetRing(8, 0.6, 0.62, COPPER);
+    const cog = cogBadge(COPPER, 0, 0.55, 0.7, 0.42);
+    // Spinning green intake ring hugging the dome throat (sits on the dome top).
     const intakeMat = glowMat(0x7cd94f, 0.9);
-    const intake = new THREE.Mesh(new THREE.TorusGeometry(0.42, 0.08, 10, 22), intakeMat);
-    intake.rotation.x = Math.PI / 2; intake.position.y = 0.78;
+    const intake = new THREE.Mesh(new THREE.TorusGeometry(0.42, 0.08, 10, 24), intakeMat);
+    intake.rotation.x = Math.PI / 2; intake.position.y = 0.86;
+    // tin throat collar the intake sits around (overlaps into dome + intake)
+    const throat = cyl(0.34, 0.42, 0.24, 14, TIN, 0, 0.86, 0);
 
-    const pipeGeo = new THREE.CylinderGeometry(0.14, 0.14, 0.72, 10);
-    const pipeL = new THREE.Mesh(pipeGeo, GUNMETAL); pipeL.position.set(0.75, 0.4, 0.2); pipeL.rotation.z = 0.3;
-    const pipeR = pipeL.clone(); pipeR.position.set(-0.75, 0.4, -0.2); pipeR.rotation.z = -0.3;
-    const tankL = cyl(0.22, 0.22, 0.5, 12, team, 0.92, 0.55, 0.2);
-    const tankCapL = new THREE.Mesh(new THREE.SphereGeometry(0.22, 12, 6, 0, Math.PI*2, 0, Math.PI/2), GUNMETAL);
-    tankCapL.position.set(0.92, 0.8, 0.2);
-    const tankR = tankL.clone(); tankR.position.set(-0.92, 0.55, -0.2);
-    const tankCapR = tankCapL.clone(); tankCapR.position.set(-0.92, 0.8, -0.2);
-    const stack = new THREE.Mesh(G.vent, GUNMETAL); stack.position.set(0.1, 0.95, -0.55);
+    // Two riveted cream side-tanks with tin caps + gunmetal feed pipes that run
+    // from the tank INTO the dome (both ends overlap their targets).
+    const parts = [];
+    for (const [sx, sz] of [[0.92, 0.22], [-0.92, -0.22]]) {
+      const tank = cyl(0.24, 0.26, 0.6, 12, shell, sx, 0.52, sz); tank.castShadow = true;
+      const cap = domeCap(0.26, TIN, sx, 0.8, sz, 0.7);
+      const hoop = cyl(0.27, 0.27, 0.05, 12, COPPER, sx, 0.62, sz);
+      // pipe angled from tank shoulder into the dome side
+      const pipe = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.13, 0.78, 10), GUNMETAL);
+      pipe.position.set(sx * 0.55, 0.42, sz * 0.55);
+      pipe.rotation.z = sx > 0 ? 0.7 : -0.7;
+      pipe.rotation.y = sz > 0 ? -0.3 : 0.3;
+      parts.push(tank, cap, hoop, pipe);
+    }
+    // Amber exhaust stack at the back, its foot buried in the dome.
+    const stack = cyl(0.16, 0.2, 0.5, 10, GUNMETAL, 0.1, 0.9, -0.55); stack.castShadow = true;
+    const stackGlow = cyl(0.15, 0.15, 0.06, 10, glowMat(AMBER, 1.3), 0.1, 1.16, -0.55);
+    // antenna bobble on the dome shoulder
+    const ant = bobbleAntenna(-0.28, 0.6, 0.35, color, 0.32);
 
-    built.add(skirt, dome, collar, intake, pipeL, pipeR, tankL, tankCapL, tankR, tankCapR, stack);
-    addLamp(built, anim, 0.95, 0.14, 0.95, color);
-    addLamp(built, anim, -0.95, 0.14, -0.95, color);
+    built.add(base, stripe, dome, domeRivets, cog, throat, intake, ...parts, stack, stackGlow, ant);
+    // Lamps ON the base ring (radius 0.9 < base top radius 0.98) — the old
+    // (±0.96, ±0.96) diagonal reach of 1.36 floated well past the round base.
+    addLamp(built, anim, 0.64, 0.3, 0.64, color);
+    addLamp(built, anim, -0.64, 0.3, -0.64, color);
     anim.intake = intake; anim.intakeMat = intakeMat;
 
     built.userData.anim = anim;
@@ -230,39 +352,63 @@ registerBuilding("refinery", {
 });
 
 // ===========================================================================
-// FACTORY — wide plant: stepped roof, vents, rolling door, smokestack
+// FACTORY — heavy industrial plant with a smoking CHIMNEY and a gantry. A wide
+// cream block on a rubber slab, stepped roof with a gunmetal cap, a big rolling
+// bay door with a copper cog, twin tin vents, a side gantry pipe, and a tall
+// stack that puffs amber embers when producing.
 // ===========================================================================
 registerBuilding("factory", {
   build(e, color, size) {
-    const team = teamMat(color, 0.08);
+    const shell = shellMat();
+    const team = teamMat(color, 0.1);
     const glow = glowMat(color);
     const built = new THREE.Group();
     const anim = { kind: "factory", lamps: [] };
 
-    const b1 = box(2.7, 0.95, 2.3, BUILDING_BASE, 0, 0.48, 0); b1.castShadow = true;
-    const step = box(2.0, 0.5, 1.7, BUILDING_BASE, 0, 1.12, -0.18); step.castShadow = true;
-    const roof = box(1.85, 0.22, 1.55, GUNMETAL, 0, 1.45, -0.18); roof.castShadow = true;
-    const trim = box(2.74, 0.12, 2.34, team, 0, 0.9, 0);
+    // Rubber slab base + wide cream main block + stepped upper storey.
+    const base = box(2.74, 0.24, 2.34, RUBBER, 0, 0.12, 0); base.castShadow = true;
+    const b1 = box(2.6, 0.9, 2.2, shell, 0, 0.69, 0); b1.castShadow = true;
+    const trim = box(2.66, 0.14, 2.26, team, 0, 1.1, 0);
+    const step = box(1.9, 0.5, 1.6, shell, 0, 1.42, -0.2); step.castShadow = true;
+    const roofCap = box(1.98, 0.16, 1.68, GUNMETAL, 0, 1.72, -0.2); roofCap.castShadow = true;
+    // copper cog + rivets on the upper storey face
+    const stepCog = cogBadge(COPPER, 0, 1.42, 0.62, 0.5);
+    const stepRivets = new THREE.Group();
+    for (const rx of [-0.7, 0.7]) {
+      const rv = new THREE.Mesh(G.rivet, COPPER); rv.scale.setScalar(2.2); rv.position.set(rx, 1.42, 0.62);
+      stepRivets.add(rv);
+    }
 
-    const ventGeo = new THREE.CylinderGeometry(0.16, 0.18, 0.7, 10);
-    const ventL = new THREE.Mesh(ventGeo, GUNMETAL); ventL.position.set(1.15, 1.15, 0.55);
-    const ventCapL = cyl(0.2, 0.16, 0.1, 10, TRIM, 1.15, 1.52, 0.55);
-    const ventL2 = new THREE.Mesh(ventGeo, GUNMETAL); ventL2.position.set(1.15, 1.15, 0.05);
-    const ventCapL2 = ventCapL.clone(); ventCapL2.position.set(1.15, 1.52, 0.05);
-    const flankPipe = new THREE.Mesh(G.pipe, TRIM);
-    flankPipe.rotation.x = Math.PI / 2; flankPipe.position.set(-1.36, 0.7, 0.1);
-    const louver = box(0.08, 0.5, 1.4, team, 1.37, 0.55, -0.2);
+    // Twin tin exhaust vents on the roof, each with a tin cap that overlaps down.
+    const vents = new THREE.Group();
+    for (const vz of [0.5, 0.02]) {
+      const v = cyl(0.16, 0.18, 0.66, 10, GUNMETAL, 1.15, 1.28, vz); v.castShadow = true;
+      const vc = cyl(0.21, 0.16, 0.12, 10, TIN, 1.15, 1.6, vz);
+      vents.add(v, vc);
+    }
+    // Side gantry pipe running along the flank (buried into the wall at both ends).
+    const gantry = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.09, 1.9, 10), TRIM);
+    gantry.rotation.x = Math.PI / 2; gantry.position.set(-1.32, 0.55, 0.1);
+    const louver = box(0.1, 0.5, 1.4, team, 1.32, 0.62, -0.2);
 
-    const door = box(1.6, 0.8, 0.1, DARK, 0, 0.46, 1.16);
-    const doorTrim = box(1.7, 0.9, 0.06, team, 0, 0.48, 1.13);
-    const stack = cyl(0.2, 0.26, 0.9, 10, GUNMETAL, -0.85, 1.55, -0.7);
+    // Big rolling bay door recessed into the front wall + team frame + copper cog.
+    const surround = box(1.7, 0.94, 0.14, DARK, 0, 0.6, 1.12);
+    const door = box(1.5, 0.82, 0.08, team, 0, 0.55, 1.18);
+    const doorGlow = box(1.5, 0.06, 0.1, glow, 0, 0.18, 1.2);
+    const doorCog = cogBadge(COPPER, 0, 1.02, 1.18, 0.42);
+
+    // Tall smokestack with an amber ember mouth (foot buried in the roof).
+    const stack = cyl(0.2, 0.26, 0.95, 10, GUNMETAL, -0.85, 1.55, -0.72); stack.castShadow = true;
+    const stackBand = cyl(0.24, 0.24, 0.1, 10, COPPER, -0.85, 1.35, -0.72);
     const emberMat = glowMat(0xff7a2a, 0.2);
-    const ember = cyl(0.2, 0.2, 0.1, 10, emberMat, -0.85, 2.03, -0.7);
+    const ember = cyl(0.2, 0.2, 0.12, 10, emberMat, -0.85, 2.06, -0.72);
+    const ant = bobbleAntenna(0.95, 1.5, -0.7, color, 0.4);
 
-    built.add(b1, step, roof, trim, ventL, ventL2, ventCapL, ventCapL2, flankPipe, louver, door, doorTrim, stack, ember);
-    addLamp(built, anim, 1.25, 0.98, 1.1, color);
-    addLamp(built, anim, -1.25, 0.98, 1.1, color);
-    anim.stackTip = ember; anim.emberMat = emberMat;
+    built.add(base, b1, trim, step, roofCap, stepCog, stepRivets, vents, gantry, louver,
+              surround, door, doorGlow, doorCog, stack, stackBand, ember, ant);
+    addLamp(built, anim, 1.28, 1.16, 1.12, color);
+    addLamp(built, anim, -1.28, 1.16, 1.12, color);
+    anim.emberMat = emberMat;
 
     built.userData.anim = anim;
     built.userData.mats = [team];
@@ -278,47 +424,61 @@ registerBuilding("factory", {
 });
 
 // ===========================================================================
-// STARPORT — landing pad on pylons, radar beacon, marker lights
+// STARPORT — landing pad on pylons. A round cream pad ringed with a team-glow
+// edge and green marker lights, resting ON four gunmetal pylons with rubber
+// feet, plus a corner control nub with a domed cap and a spinning radar beacon.
 // ===========================================================================
 registerBuilding("starport", {
   build(e, color, size) {
-    const team = teamMat(color, 0.08);
-    const glow = glowMat(color);
+    const shell = shellMat();
+    const team = teamMat(color, 0.1);
     const built = new THREE.Group();
     const anim = { kind: "starport", lamps: [] };
 
-    const pad = cyl(1.62, 1.62, 0.14, 24, BUILDING_BASE, 0, 0.78, 0); pad.castShadow = true;
+    // Four gunmetal pylons on rubber feet holding up the pad.
+    for (const [px, pz] of [[1, 1], [-1, 1], [1, -1], [-1, -1]]) {
+      const foot = cyl(0.24, 0.3, 0.16, 10, RUBBER, px, 0.08, pz); foot.castShadow = true;
+      const pylon = cyl(0.15, 0.2, 0.7, 10, GUNMETAL, px, 0.5, pz); pylon.castShadow = true;
+      built.add(foot, pylon);
+    }
+    // Round cream landing pad resting ON the pylons (pylon tops ~0.85; pad center
+    // 0.85 so pad underside overlaps the pylon caps).
+    const pad = cyl(1.6, 1.66, 0.16, 24, shell, 0, 0.85, 0); pad.castShadow = true;
+    const padRivets = rivetRing(12, 1.5, 0.78, COPPER);
+    // Team-glow edge ring hugging the pad rim.
     const edgeMat = glowMat(color, 0.5);
     const edge = new THREE.Mesh(new THREE.TorusGeometry(1.56, 0.07, 8, 36), edgeMat);
-    edge.rotation.x = Math.PI / 2; edge.position.y = 0.86;
-
-    const pylonGeo = new THREE.CylinderGeometry(0.14, 0.18, 0.75, 10);
-    for (const [px, pz] of [[1,1],[-1,1],[1,-1],[-1,-1]]) {
-      const py = new THREE.Mesh(pylonGeo, GUNMETAL); py.position.set(px, 0.37, pz);
-      const foot = cyl(0.22, 0.26, 0.12, 10, DARK, px, 0.06, pz);
-      built.add(py, foot);
-    }
+    edge.rotation.x = Math.PI / 2; edge.position.y = 0.9;
+    // Green landing marker lights set INTO the pad surface around the rim.
     for (let i = 0; i < 8; i++) {
       const a = (i / 8) * Math.PI * 2;
-      const mk = new THREE.Mesh(G.lamp, glowMat(0x7cd94f, 1.3));
-      mk.scale.setScalar(0.7);
-      mk.position.set(Math.cos(a) * 1.35, 0.87, Math.sin(a) * 1.35);
+      const mk = new THREE.Mesh(G.lamp, glowMat(0x7cd94f, 1.3)); mk.scale.setScalar(0.7);
+      mk.position.set(Math.cos(a) * 1.32, 0.94, Math.sin(a) * 1.32);
       built.add(mk);
     }
-    const nub = box(0.5, 0.4, 0.5, team, 0.6, 1.07, 0.6);
-    const mast = new THREE.Mesh(G.pole, GUNMETAL); mast.scale.y = 0.5; mast.position.set(0.6, 1.5, 0.6);
-    const beacon = new THREE.Group();
-    const dish = new THREE.Mesh(G.dish, team);
-    const beaconLamp = new THREE.Mesh(G.lamp, glowMat(0xff5f4c, 2.0));
-    beaconLamp.position.set(0.28, 0.06, 0);
-    beacon.add(dish, beaconLamp);
-    beacon.position.set(0.6, 1.85, 0.6);
+    // Central copper landing-cog decal painted on the pad.
+    const padCog = cogBadge(COPPER, 0, 0.95, 0, 0.9); padCog.rotation.x = -Math.PI / 2;
 
-    built.add(pad, edge, nub, mast, beacon);
-    addLamp(built, anim, 1.2, 0.88, 1.2, color);
-    addLamp(built, anim, -1.2, 0.88, 1.2, color);
-    addLamp(built, anim, 1.2, 0.88, -1.2, color);
-    addLamp(built, anim, -1.2, 0.88, -1.2, color);
+    // Corner control nub: cream box + tin dome cap + spinning radar beacon +
+    // antenna bobble. Everything seated on the pad (base at pad top 0.93).
+    const nub = box(0.56, 0.44, 0.56, shell, 0.62, 1.15, 0.62); nub.castShadow = true;
+    const nubDome = domeCap(0.34, TIN, 0.62, 1.36, 0.62, 0.7);
+    const mast = new THREE.Mesh(G.pole, GUNMETAL); mast.scale.y = 0.42; mast.position.set(0.62, 1.68, 0.62);
+    const beacon = new THREE.Group();
+    const dishPlate = new THREE.Mesh(G.dish, team);
+    const beaconLamp = new THREE.Mesh(G.lamp, glowMat(AMBER, 2.0)); beaconLamp.position.set(0.28, 0.05, 0);
+    beacon.add(dishPlate, beaconLamp);
+    beacon.position.set(0.62, 1.96, 0.62);
+    const ant = bobbleAntenna(-0.62, 1.0, -0.62, color, 0.4);
+
+    built.add(pad, padRivets, edge, padCog, nub, nubDome, mast, beacon, ant);
+    // Team corner beacons ON the pad surface (radius 1.46 < pad radius 1.6),
+    // set between the green rim markers — the old (±1.2, ±1.2) diagonal reach
+    // of 1.70 floated just past the pad rim in mid-air.
+    addLamp(built, anim, 1.03, 0.94, 1.03, color);
+    addLamp(built, anim, -1.03, 0.94, 1.03, color);
+    addLamp(built, anim, 1.03, 0.94, -1.03, color);
+    addLamp(built, anim, -1.03, 0.94, -1.03, color);
     anim.beacon = beacon; anim.padEdgeMat = edgeMat;
 
     built.userData.anim = anim;
@@ -336,37 +496,51 @@ registerBuilding("starport", {
 });
 
 // ===========================================================================
-// TURRET — base + rotating twin-barrel missile pod
+// TURRET — small friendly gun tower. A rubber slab base, a squat cream column
+// with a copper cog + team band, and a rotating dome gun-head wearing a team
+// visor with a glowing sensor eye and twin amber-tipped barrels. anim.pod is
+// yawed by aimYaw; anim.podBarrels recoils.
 // ===========================================================================
 registerBuilding("turret", {
   build(e, color, size) {
-    const team = teamMat(color, 0.08);
+    const shell = shellMat();
+    const team = teamMat(color, 0.1);
     const glow = glowMat(color);
     const built = new THREE.Group();
     const anim = { kind: "turret", lamps: [] };
 
-    const skirt = cyl(0.75, 0.9, 0.4, 12, BUILDING_BASE, 0, 0.2, 0); skirt.castShadow = true;
-    const column = cyl(0.4, 0.5, 0.5, 10, GUNMETAL, 0, 0.6, 0);
-    const band = new THREE.Mesh(new THREE.TorusGeometry(0.42, 0.06, 8, 16), glow);
-    band.rotation.x = Math.PI / 2; band.position.y = 0.82;
+    // Rounded rubber slab base + copper rivet ring.
+    const base = cyl(0.78, 0.92, 0.34, 14, RUBBER, 0, 0.17, 0); base.castShadow = true;
+    const baseRivets = rivetRing(8, 0.72, 0.24, COPPER);
+    // Squat cream column with a copper cog badge + team band collar.
+    const column = cyl(0.42, 0.54, 0.62, 12, shell, 0, 0.62, 0); column.castShadow = true;
+    const colCog = cogBadge(COPPER, 0, 0.62, 0.42, 0.42);
+    const band = new THREE.Mesh(new THREE.TorusGeometry(0.44, 0.06, 8, 18), team);
+    band.rotation.x = Math.PI / 2; band.position.y = 0.9;
 
+    // Rotating dome gun-head (the aiming pod). Built around origin; the whole
+    // group is placed on top of the column and yawed by aimYaw.
     const pod = new THREE.Group();
-    const podBox = box(0.6, 0.34, 0.5, team, 0, 0, 0);
-    const podCheek = new THREE.Mesh(new THREE.CylinderGeometry(0.19, 0.19, 0.62, 10), team);
-    podCheek.rotation.z = Math.PI / 2; podCheek.position.z = -0.02;
-    const sensor = new THREE.Mesh(G.droneEye, glowMat(0xff5f4c, 1.6));
-    sensor.scale.set(1.4, 0.8, 1); sensor.position.set(0, 0.06, 0.22);
-    const barrelGeo = new THREE.CylinderGeometry(0.06, 0.07, 0.75, 10).rotateX(Math.PI/2).translate(0, 0, 0.38);
+    // dome head + team visor (matches every unit head)
+    const head = domeCap(0.42, shell, 0, -0.06, 0, 0.85); head.castShadow = true;
+    const chin = box(0.5, 0.24, 0.42, TIN, 0, -0.08, 0.06);
+    const visor = new THREE.Mesh(G.domeVisor, glow); visor.position.set(0, 0.06, 0); visor.scale.setScalar(0.85);
+    const sensor = new THREE.Mesh(G.droneEye, glowMat(color, 1.6));
+    sensor.scale.set(1.4, 0.9, 1); sensor.position.set(0, 0.0, 0.34);
+    // twin barrels with amber tips (recoil group)
+    const barrelGeo = new THREE.CylinderGeometry(0.06, 0.07, 0.75, 10).rotateX(Math.PI / 2).translate(0, 0, 0.38);
     const barrels = new THREE.Group();
-    const bL = new THREE.Mesh(barrelGeo, GUNMETAL); bL.position.x = 0.16;
-    const bR = new THREE.Mesh(barrelGeo, GUNMETAL); bR.position.x = -0.16;
-    const tipL = new THREE.Mesh(G.tankMuzzle, glow); tipL.scale.setScalar(0.55); tipL.position.set(0.16, 0, 0.72);
-    const tipR = tipL.clone(); tipR.position.x = -0.16;
+    const bL = new THREE.Mesh(barrelGeo, GUNMETAL); bL.position.set(0.15, -0.04, 0.14);
+    const bR = new THREE.Mesh(barrelGeo, GUNMETAL); bR.position.set(-0.15, -0.04, 0.14);
+    const tipL = new THREE.Mesh(G.tankMuzzle, glowMat(AMBER, 1.5)); tipL.scale.setScalar(0.55); tipL.position.set(0.15, -0.04, 0.88);
+    const tipR = tipL.clone(); tipR.position.x = -0.15;
     barrels.add(bL, bR, tipL, tipR);
-    pod.add(podBox, podCheek, sensor, barrels);
-    pod.position.y = 1.0;
+    // antenna bobble on the head crown
+    const ant = bobbleAntenna(-0.12, 0.18, -0.16, color, 0.32, 0.25);
+    pod.add(head, chin, visor, sensor, barrels, ant);
+    pod.position.y = 1.12;
 
-    built.add(skirt, column, band, pod);
+    built.add(base, baseRivets, column, colCog, band, pod);
     anim.pod = pod; anim.podBarrels = barrels; anim.barrelHome = 0; anim.recoil = 0;
 
     built.userData.anim = anim;
@@ -390,57 +564,5 @@ registerBuilding("turret", {
         a.podBarrels.position.z += (a.barrelHome - a.podBarrels.position.z) * 0.25;
       }
     }
-  },
-});
-
-// ===========================================================================
-// BARRACKS — infantry training block: hall, roof cap, bay door, comms mast
-// ===========================================================================
-registerBuilding("barracks", {
-  build(e, color, size) {
-    const team = teamMat(color, 0.08);
-    const glow = glowMat(color);
-    const win = glowMat(0xffb14c, 0.7);   // warm barracks interior
-    const built = new THREE.Group();
-    const anim = { kind: "barracks", lamps: [] };
-
-    // Main drill hall — beveled block on an armored footing
-    const skirt = box(2.62, 0.16, 2.22, DARK, 0, 0.08, 0); skirt.castShadow = true;
-    const b1 = beveledBlock(2.5, 1.08, 2.1, BUILDING_BASE, 0.18); b1.position.y = 0.62;
-    b1.children.forEach(c => c.castShadow = true);
-    // Ribbed armor pilasters along the long side + row of small windows
-    const ribs = panelRow(4, 0.6, GUNMETAL, 0, 0.62, -1.06, 0.16, 0.9, 0.06, "x");
-    const winRow = panelRow(4, 0.55, win, 0, 0.85, 1.06, 0.28, 0.14, 0.05, "x");
-    // Player-color trim + slightly overhanging roof with a raised spine
-    const trim = box(2.56, 0.14, 2.16, team, 0, 1.12, 0);
-    const roof = box(2.62, 0.22, 2.32, GUNMETAL, 0, 1.28, 0); roof.castShadow = true;
-    const spine = box(1.4, 0.16, 2.0, team, 0, 1.45, 0); spine.castShadow = true;
-    const spineGlow = strip(1.2, 0.06, 0.2, glow, 0, 1.54, 0);
-    // Recessed reinforced bay door with a glowing frame + threshold light
-    const surround = box(1.1, 1.02, 0.12, DARK, 0, 0.55, 1.02);
-    const doorFrame = box(1.0, 0.92, 0.06, team, 0, 0.5, 1.07);
-    const door = box(0.82, 0.78, 0.08, glow, 0, 0.44, 1.1);
-    const threshold = strip(0.9, 0.05, 0.14, glow, 0, 0.06, 1.18);
-    // Side annex + comms gear
-    const annex = box(0.5, 0.6, 1.2, BUILDING_BASE, 1.36, 0.4, -0.3); annex.castShadow = true;
-    const pole = new THREE.Mesh(G.pole, GUNMETAL); pole.position.set(-1.05, 1.95, -0.85);
-    const dish = new THREE.Mesh(G.dish, team); dish.position.set(-1.05, 2.55, -0.85); dish.rotation.z = 0.5;
-    const vent = new THREE.Mesh(G.vent, GUNMETAL); vent.position.set(0.9, 1.55, -0.75);
-    const vent2 = new THREE.Mesh(G.vent, GUNMETAL); vent2.position.set(0.5, 1.55, -0.75); vent2.scale.setScalar(0.8);
-
-    built.add(skirt, b1, ribs, winRow, trim, roof, spine, spineGlow,
-              surround, doorFrame, door, threshold, annex, pole, dish, vent, vent2);
-    addLamp(built, anim, -1.05, 2.65, -0.85, color);
-    addLamp(built, anim, 1.28, 1.2, 1.0, color);
-    addLamp(built, anim, -1.28, 1.2, 1.0, color);
-    anim.door = door;
-
-    built.userData.anim = anim;
-    built.userData.mats = [team];
-    return wrapBuilding(built, size, SCAFFOLD, G);
-  },
-
-  animate(g, e, t, move, a) {
-    if (a.door) a.door.material.emissiveIntensity = e.queue?.length ? 1.6 + Math.sin(t * 6) * 0.6 : 0.9;
   },
 });
