@@ -4,6 +4,46 @@ import { UNITS, BUILDINGS, PLAYER_COLORS, MAX_QUEUE, ABILITIES, UPGRADES, UPGRAD
 import { THEMES } from "../core/map.js";
 import { KEYS, DEFAULTS, rebind, resetBinds } from "./keys.js";
 
+// One-line blurbs for the command-card tooltips (so you know what a button does
+// before clicking). Keyed by internal type/ability/upgrade key.
+const UNIT_DESC = {
+  worker: "Gathers Scrap and Oil, and builds structures.",
+  marine: "Cheap ranged trooper. Hits ground and air.",
+  brute: "Heavy melee bruiser. Leaps onto enemies for splash damage.",
+  tank: "Long-range siege. Devastating in Anchor Mode; can't hit air.",
+  wraith: "Fast, fragile flyer. Hits both ground and air.",
+  banshee: "Gunship flyer with heavy ground damage; can't hit air.",
+};
+const BLDG_DESC = {
+  hq: "Command center. Trains Bearings and collects Scrap/Oil.",
+  depot: "Raises your supply cap so you can field more units.",
+  barracks: "Trains Zappers and Clanks; researches infantry upgrades.",
+  refinery: "Built on an Oil seep. Bearings harvest Oil from it.",
+  factory: "Trains Thumpers; researches vehicle upgrades. Needs an Assembly.",
+  starport: "Trains Darts and Rumbles; researches Afterburners. Needs a Foundry.",
+  turret: "Static defense. Fires on ground and air. Needs an Assembly.",
+};
+const ABIL_DESC = {
+  stim: "Burst of speed and attack rate for a short time, at the cost of HP.",
+  leap: "Clank leaps to a target area, dealing splash damage on landing.",
+  siege: "Anchor down to fire at long range with splash; can't move while anchored.",
+  burners: "Brief speed burst to reposition the Dart.",
+  barrage: "Rumble channels a volley of rockets onto a target area.",
+};
+const UPG_DESC = {
+  stims: "Unlocks the Overclock ability for Zappers.",
+  plating: "Adds HP to all Zappers and Clanks, current and future.",
+  siegetech: "Unlocks Anchor Mode for Thumpers.",
+  servos: "Thumpers move noticeably faster.",
+  afterburners: "Unlocks the Afterburners ability for Darts.",
+};
+const CMD_DESC = {
+  attack: "Move toward a point, attacking any enemies encountered on the way.",
+  stop: "Cancel current orders and hold still.",
+  hold: "Hold this ground: fire on enemies in range but never give chase.",
+  patrol: "Patrol back and forth between here and a chosen point.",
+};
+
 export class Hud {
   constructor(game, renderer, audio) {
     this.game = game;
@@ -26,6 +66,12 @@ export class Hud {
     this.$toasts = document.getElementById("toasts");
     this.$selectBox = document.getElementById("select-box");
     this.$status = document.getElementById("net-status");
+
+    // Floating tooltip for command-card buttons (created once, positioned on hover).
+    this.$cmdTip = document.createElement("div");
+    this.$cmdTip.id = "cmd-tooltip";
+    this.$cmdTip.className = "hidden";
+    document.getElementById("hud").appendChild(this.$cmdTip);
 
     this.minimap = document.getElementById("minimap");
     this.mmCtx = this.minimap.getContext("2d");
@@ -572,8 +618,60 @@ export class Hud {
     for (const b of this.$cmdCard.querySelectorAll("button")) {
       b.addEventListener("pointerdown", (e) => e.stopPropagation());
       b.addEventListener("click", () => this.command(b.dataset.cmd));
+      b.addEventListener("pointerenter", () => this.showCmdTip(b));
+      b.addEventListener("pointerleave", () => this.hideCmdTip());
     }
   }
+
+  // Build the tooltip HTML for a command-card button from its data-cmd.
+  cmdTipHTML(cmd) {
+    const dash = cmd.indexOf("-");
+    const verb = dash < 0 ? cmd : cmd.slice(0, dash);
+    const key = dash < 0 ? null : cmd.slice(dash + 1);
+    const wrap = (title, body, stats) =>
+      `<b>${title}</b>${body ? `<p>${body}</p>` : ""}${stats ? `<small>${stats}</small>` : ""}`;
+    const rangedFP = FP * 1.5;
+    if ((verb === "train" || verb === "build") && key) {
+      if (UNITS[key]) {
+        const u = UNITS[key];
+        const stats = `HP ${u.hp} · DMG ${u.dmg}${u.dmgAir ? ` (air ${u.dmgAir})` : ""}`
+          + ` · ${u.range > rangedFP ? "Ranged" : "Melee"}${u.fly ? " · Flyer" : ""} · ${u.supply} supply`;
+        return wrap(u.name, UNIT_DESC[key], stats);
+      }
+      if (BUILDINGS[key]) {
+        const b = BUILDINGS[key];
+        const tr = (b.trains || []).map((t) => UNITS[t].name).join(", ");
+        const stats = `HP ${b.hp}${b.supply ? ` · +${b.supply} supply` : ""}${tr ? ` · Trains ${tr}` : ""}`;
+        return wrap(b.name, BLDG_DESC[key], stats);
+      }
+    }
+    if (verb === "research" && key && UPGRADES[key])
+      return wrap(UPGRADES[key].name, UPG_DESC[key]);
+    if (verb === "ability" && key && ABILITIES[key])
+      return wrap(ABILITIES[key].name, ABIL_DESC[key], `Cooldown ${Math.round(ABILITIES[key].cd / 10)}s`);
+    if (CMD_DESC[verb]) {
+      const titles = { attack: "Attack-move", stop: "Stop", hold: "Hold Position", patrol: "Patrol" };
+      return wrap(titles[verb] || verb, CMD_DESC[verb]);
+    }
+    return "";
+  }
+
+  showCmdTip(button) {
+    const html = this.cmdTipHTML(button.dataset.cmd);
+    if (!html) return;
+    this.$cmdTip.innerHTML = html;
+    this.$cmdTip.classList.remove("hidden");
+    // position centered above the button, clamped to the viewport
+    const r = button.getBoundingClientRect();
+    const tw = this.$cmdTip.offsetWidth, th = this.$cmdTip.offsetHeight;
+    let left = r.left + r.width / 2 - tw / 2;
+    left = Math.max(8, Math.min(left, innerWidth - tw - 8));
+    const top = Math.max(8, r.top - th - 10);
+    this.$cmdTip.style.left = `${left}px`;
+    this.$cmdTip.style.top = `${top}px`;
+  }
+
+  hideCmdTip() { this.$cmdTip.classList.add("hidden"); }
 
   // Tab cycles which subgroup of the selection drives the command card.
   cycleSubgroup(dir = 1) {
