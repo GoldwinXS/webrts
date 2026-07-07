@@ -10,8 +10,8 @@ including GitHub Pages, with working PvP multiplayer.
   fog of war baked into the terrain, health bars, selection rings, tracer fire
 - **Classic economy** — workers mine mineral patches and return them to your
   Command Post; supply caps your army; buildings construct in place
-- **Base building** — Command Post (trains workers), Supply Depot (+8 supply),
-  Barracks (trains Marines and Brutes)
+- **Base building** — Hub (trains Bolt workers), Battery (+8 supply),
+  Assembly (trains Zappers and Clanks)
 - **Combat** — attack-move, auto-acquisition, ranged and melee units;
   destroy every enemy building to win
 - **Skirmish AI** — rule-based opponent that expands its economy, keeps supply

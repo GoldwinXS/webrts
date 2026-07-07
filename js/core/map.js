@@ -33,24 +33,26 @@ import { MAP_W, MAP_H } from "./data.js";
 export const THEMES = [
   {
     name: "verdant",                                  // Meadow
-    ground: [104, 178, 104], groundHi: [158, 214, 142], patch: [24, 20, 6],
-    rock: 0x9aa2ad, cliff: 0x74808f, cliffTop: [176, 182, 168],
-    fog: 0xcfe9ff, sky: 0xb6def7,
-    deco: [0x8ce89c, 0xbdf5c6, 0x5cc273], // fresh flora greens
+    // Tones sit a step below full brightness so units, buildings and order
+    // lines pop against the ground (playtest: max-bright washed everything out).
+    ground: [86, 152, 88], groundHi: [128, 186, 118], patch: [24, 20, 6],
+    rock: 0x8a929d, cliff: 0x68737f, cliffTop: [156, 162, 148],
+    fog: 0xc4dcf2, sky: 0xaed6f2,
+    deco: [0x7cd88c, 0xa8e8b2, 0x4fae63], // fresh flora greens
   },
   {
     name: "ashen",                                    // Sunbaked canyon
-    ground: [206, 130, 84], groundHi: [234, 178, 118], patch: [40, 22, 10],
-    rock: 0xc08256, cliff: 0x9a6340, cliffTop: [224, 164, 112],
-    fog: 0xffe2c2, sky: 0xffd0a6,
-    deco: [0xffb066, 0xffd08a, 0xe07a3c], // warm blooms / hot rock
+    ground: [178, 110, 70], groundHi: [206, 152, 96], patch: [40, 22, 10],
+    rock: 0xa87048, cliff: 0x855436, cliffTop: [196, 142, 94],
+    fog: 0xf2d2b2, sky: 0xf5c496,
+    deco: [0xf0a058, 0xf5c47c, 0xd06c32], // warm blooms / hot rock
   },
   {
-    name: "frozen",                                   // Glacier
-    ground: [176, 208, 232], groundHi: [216, 236, 250], patch: [30, 42, 58],
-    rock: 0xa6b6c8, cliff: 0x8494a8, cliffTop: [206, 224, 240],
-    fog: 0xeaf6ff, sky: 0xd6efff,
-    deco: [0x9fe0ff, 0xd4f2ff, 0x77c4ee], // ice shards
+    name: "frozen",                                    // Glacier
+    ground: [146, 180, 208], groundHi: [184, 210, 234], patch: [30, 42, 58],
+    rock: 0x92a2b6, cliff: 0x748498, cliffTop: [178, 198, 220],
+    fog: 0xdceefc, sky: 0xc6e4f8,
+    deco: [0x8cd4f8, 0xc0e8fc, 0x64b4e2], // ice shards
   },
 ];
 

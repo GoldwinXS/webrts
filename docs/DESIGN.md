@@ -32,6 +32,25 @@ depth**, rendered in rounded low-poly.
 The timeless RTS triangle, cute-ified. Each plays fundamentally differently
 (own macro mechanic, production style, roster).
 
+### Naming lexicon (no StarCraft names — own identity, 2026-07-06)
+Display names only; internal type keys (worker/marine/... ) are frozen (sim,
+net protocol, replays, AI all reference them).
+
+| key | display | | key | display |
+| --- | --- | --- | --- | --- |
+| worker | **Bolt** | | hq | **Hub** |
+| marine | **Zapper** | | depot | **Battery** (supply = charge) |
+| brute | **Clank** | | barracks | **Assembly** |
+| tank | **Thumper** | | refinery | **Pumpjack** |
+| wraith | **Dart** | | factory | **Foundry** |
+| banshee | **Rumble** | | starport | **Hangar** |
+| | | | turret | **Sentry** |
+
+Upgrades/abilities: Stim Pack→**Overclock** (robots overheat, perfect fit),
+Combat Plating→**Tin Plating**, Siege Tech→**Anchor Tech**, Siege
+Mode→**Anchor Mode**. "Vespene"→plain **Gas**. Naming rule for new content:
+robot parts / machine noises / toolbox words — cute, mechanical, one word.
+
 ### The Cogs — robots (THE CURRENT FACTION, reworked first)
 Industrious tin/plastic robots. Domes, antennae, treads, rivets. Warm metals +
 team-color visors. **Identity: build, repair, salvage.** Everything mechanical,

@@ -27,35 +27,35 @@ export const GAS_DEPLETED = 2;       // gas yielded once a geyser hits 0
 
 export const UNITS = {
   worker: {
-    name: "Worker", cost: 50, gasCost: 0, supply: 1, hp: 45, speed: 68,
+    name: "Bolt", cost: 50, gasCost: 0, supply: 1, hp: 45, speed: 68,
     dmg: 4, dmgAir: 0, range: (FP * 0.7) | 0, acquire: 0, cooldown: 10,
     sight: 7, buildTime: 80, radius: (FP * 0.34) | 0,
   },
   marine: {
-    name: "Marine", cost: 50, gasCost: 0, supply: 1, hp: 55, speed: 62,
+    name: "Zapper", cost: 50, gasCost: 0, supply: 1, hp: 55, speed: 62,
     dmg: 6, dmgAir: 6, range: (FP * 4.5) | 0, acquire: (FP * 7) | 0, cooldown: 9,
     sight: 8, buildTime: 100, radius: (FP * 0.36) | 0,
   },
   brute: {
-    name: "Brute", cost: 90, gasCost: 0, supply: 2, hp: 120, speed: 54,
+    name: "Clank", cost: 90, gasCost: 0, supply: 2, hp: 120, speed: 54,
     dmg: 12, dmgAir: 0, range: (FP * 0.9) | 0, acquire: (FP * 6) | 0, cooldown: 11,
     sight: 7, buildTime: 140, radius: (FP * 0.46) | 0,
   },
   // Siege tank: heavy ground damage, no air weapon.
   tank: {
-    name: "Siege Tank", cost: 150, gasCost: 75, supply: 3, hp: 180, speed: 40,
+    name: "Thumper", cost: 150, gasCost: 75, supply: 3, hp: 180, speed: 40,
     dmg: 22, dmgAir: 0, range: (FP * 6) | 0, acquire: (FP * 8) | 0, cooldown: 18,
     sight: 8, buildTime: 220, radius: (FP * 0.55) | 0,
   },
   // Wraith: fast flyer, weak but hits both ground and air.
   wraith: {
-    name: "Wraith", cost: 125, gasCost: 75, supply: 2, hp: 95, speed: 85,
+    name: "Dart", cost: 125, gasCost: 75, supply: 2, hp: 95, speed: 85,
     dmg: 7, dmgAir: 14, range: (FP * 4.5) | 0, acquire: (FP * 9) | 0, cooldown: 10,
     sight: 9, buildTime: 180, radius: (FP * 0.4) | 0, fly: true,
   },
   // Banshee: flyer, heavy ground damage, cannot hit air.
   banshee: {
-    name: "Banshee", cost: 150, gasCost: 100, supply: 3, hp: 115, speed: 70,
+    name: "Rumble", cost: 150, gasCost: 100, supply: 3, hp: 115, speed: 70,
     dmg: 18, dmgAir: 0, range: (FP * 4) | 0, acquire: (FP * 8) | 0, cooldown: 12,
     sight: 8, buildTime: 220, radius: (FP * 0.44) | 0, fly: true,
   },
@@ -63,35 +63,35 @@ export const UNITS = {
 
 export const BUILDINGS = {
   hq: {
-    name: "Command Post", cost: 400, gasCost: 0, hp: 1200, size: 3, supply: 10,
+    name: "Hub", cost: 400, gasCost: 0, hp: 1200, size: 3, supply: 10,
     buildTime: 500, sight: 9, trains: ["worker"], deposit: true,
   },
   depot: {
-    name: "Supply Depot", cost: 100, gasCost: 0, hp: 450, size: 2, supply: 8,
+    name: "Battery", cost: 100, gasCost: 0, hp: 450, size: 2, supply: 8,
     buildTime: 180, sight: 6, trains: [],
   },
   barracks: {
-    name: "Barracks", cost: 150, gasCost: 0, hp: 750, size: 3, supply: 0,
+    name: "Assembly", cost: 150, gasCost: 0, hp: 750, size: 3, supply: 0,
     buildTime: 300, sight: 7, trains: ["marine", "brute"],
   },
   // Refinery: built over a geyser; enables gas harvest. No deposit, low sight.
   refinery: {
-    name: "Refinery", cost: 75, gasCost: 0, hp: 400, size: 2, supply: 0,
+    name: "Pumpjack", cost: 75, gasCost: 0, hp: 400, size: 2, supply: 0,
     buildTime: 180, sight: 4, trains: [], deposit: false, onGeyser: true,
   },
   // Factory: unlocks tanks; needs a barracks first.
   factory: {
-    name: "Factory", cost: 150, gasCost: 100, hp: 900, size: 3, supply: 0,
+    name: "Foundry", cost: 150, gasCost: 100, hp: 900, size: 3, supply: 0,
     buildTime: 350, sight: 7, trains: ["tank"], requires: "barracks",
   },
   // Starport: unlocks air; needs a factory first.
   starport: {
-    name: "Starport", cost: 150, gasCost: 125, hp: 850, size: 3, supply: 0,
+    name: "Hangar", cost: 150, gasCost: 125, hp: 850, size: 3, supply: 0,
     buildTime: 350, sight: 7, trains: ["wraith", "banshee"], requires: "factory",
   },
   // Turret: static anti-ground/anti-air defense; needs a barracks first.
   turret: {
-    name: "Turret", cost: 100, gasCost: 0, hp: 350, size: 2, supply: 0,
+    name: "Sentry", cost: 100, gasCost: 0, hp: 350, size: 2, supply: 0,
     buildTime: 200, sight: 7, trains: [], requires: "barracks",
     armed: true, dmg: 8, dmgAir: 16, range: (FP * 5.5) | 0, cooldown: 9,
   },
@@ -106,9 +106,9 @@ export const UPGRADE_BITS = {
 // Research definitions. `building` is the structure whose production queue the
 // research shares; cost is deducted at queue time like a unit.
 export const UPGRADES = {
-  stims:       { name: "Stim Pack",     building: "barracks", cost: 100, gasCost: 50,  time: 300, bit: 1 },
-  plating:     { name: "Combat Plating", building: "barracks", cost: 125, gasCost: 75,  time: 350, bit: 2 },
-  siegetech:   { name: "Siege Tech",    building: "factory",  cost: 150, gasCost: 100, time: 400, bit: 4 },
+  stims:       { name: "Overclock",     building: "barracks", cost: 100, gasCost: 50,  time: 300, bit: 1 },
+  plating:     { name: "Tin Plating",   building: "barracks", cost: 125, gasCost: 75,  time: 350, bit: 2 },
+  siegetech:   { name: "Anchor Tech",   building: "factory",  cost: 150, gasCost: 100, time: 400, bit: 4 },
   servos:      { name: "Servo Motors",  building: "factory",  cost: 100, gasCost: 100, time: 300, bit: 8 },
   afterburners:{ name: "Afterburners",  building: "starport", cost: 100, gasCost: 100, time: 300, bit: 16 },
 };
@@ -123,7 +123,7 @@ export const SERVOS_SPEED_NUM = 13, SERVOS_SPEED_DEN = 10;
 // integer-only and deterministic.
 export const ABILITIES = {
   stim: {
-    name: "Stim Pack", unit: "marine", requires: "stims", targeted: false,
+    name: "Overclock", unit: "marine", requires: "stims", targeted: false,
     cd: 120, hpCost: 8, dur: 80, spdNum: 14, spdDen: 10, cdNum: 6, cdDen: 10,
   },
   leap: {
@@ -131,7 +131,7 @@ export const ABILITIES = {
     cd: 150, range: 4, dur: 6, dmg: 10, splash: 1, // range/splash in tiles
   },
   siege: {
-    name: "Siege Mode", unit: "tank", requires: "siegetech", targeted: false, toggle: true,
+    name: "Anchor Mode", unit: "tank", requires: "siegetech", targeted: false, toggle: true,
     cd: 0, transform: 20, range: 9, dmg: 30, minRange: 25, // minRange in tenths of a tile (2.5)
     splash: 1, splashDmg: 15, cooldown: 24,
   },

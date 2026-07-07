@@ -109,41 +109,54 @@ registerBuilding("hq", {
     // Rounded slab base (dark rubber) the whole thing rests ON.
     const base = cyl(1.5, 1.62, 0.34, 28, RUBBER, 0, 0.17, 0); base.castShadow = true;
     const baseRivets = rivetRing(12, 1.48, 0.24, COPPER);
-    // Fat cream drum hull, sunk slightly into the base so no seam-gap shows.
-    const hull = cyl(1.28, 1.36, 0.92, 28, shell, 0, 0.78, 0); hull.castShadow = true;
-    // Team stripe ring around the waist + a warm window band of glass glow.
-    const stripe = cyl(1.34, 1.34, 0.16, 28, team, 0, 0.62, 0);
-    const winRing = new THREE.Mesh(new THREE.TorusGeometry(1.31, 0.06, 8, 40), GLASS);
-    winRing.rotation.x = Math.PI / 2; winRing.position.y = 0.98;
-    // Big cream dome roof, equator overlapping down into the drum top (drum top
-    // ~1.24; seat dome at 1.14 so it sinks 0.1 in).
-    const dome = domeCap(1.18, shell, 0, 1.14, 0, 0.62);
+    // TWO-TONE hull (de-caked): a gunmetal machine skirt carries a cream upper
+    // hull — mechanical, not tiered icing. The old cream drum + white glass
+    // torus + wide stripe sandwich read as a birthday cake.
+    const skirt = cyl(1.36, 1.46, 0.44, 28, GUNMETAL, 0, 0.54, 0); skirt.castShadow = true;
+    const hull = cyl(1.18, 1.3, 0.66, 28, shell, 0, 1.06, 0); hull.castShadow = true;
+    // Slim team collar just under the dome seat (accent, not a layer).
+    const collar = cyl(1.22, 1.22, 0.09, 28, team, 0, 1.36, 0);
+    // Porthole windows dotted around the upper hull (diagonals, clear of the door).
+    const ports = new THREE.Group();
+    for (const [px, pz] of [[0.88, 0.88], [-0.88, 0.88], [0.88, -0.88], [-0.88, -0.88]]) {
+      const p = new THREE.Mesh(G.lamp, GLASS); p.scale.setScalar(0.95);
+      p.position.set(px, 1.1, pz);
+      ports.add(p);
+    }
+    // Glowing bay DOOR on the skirt front + copper cog keystone — the same door
+    // language as the Assembly, so the base reads as one family.
+    const doorFrame = box(0.66, 0.56, 0.16, GUNMETAL, 0, 0.56, 1.36);
+    const doorPanel = box(0.5, 0.44, 0.2, GLASS, 0, 0.52, 1.37);
+    const doorCog = cogBadge(COPPER, 0, 0.94, 1.24, 0.32);
+    // Big cream dome roof seated into the hull top (hull top ~1.39; seat 1.32).
+    const dome = domeCap(1.16, shell, 0, 1.32, 0, 0.62);
     const visor = new THREE.Mesh(G.domeVisor, glowMat(color, 0.6));
-    visor.position.set(0, 1.5, 0); visor.scale.set(1.4, 1.0, 1.4);
+    visor.position.set(0, 1.66, 0); visor.scale.set(1.4, 1.0, 1.4);
     // Copper cog crown stamped flat on the dome apex + rivet ring around it.
     const crownCog = new THREE.Mesh(G.cog, COPPER);
-    crownCog.position.set(0, 1.78, 0); crownCog.rotation.x = -Math.PI / 2; crownCog.scale.setScalar(1.4);
-    const crownRivets = rivetRing(8, 0.6, 1.74, COPPER);
+    crownCog.position.set(0, 1.94, 0); crownCog.rotation.x = -Math.PI / 2; crownCog.scale.setScalar(1.4);
+    const crownRivets = rivetRing(8, 0.6, 1.9, COPPER);
 
-    // Radar mast rising OUT of the dome crown (starts inside the dome at 1.6).
-    const mastFoot = cyl(0.22, 0.28, 0.3, 12, GUNMETAL, 0, 1.9, 0);
-    const mast = new THREE.Mesh(G.pole, GUNMETAL); mast.scale.y = 0.5; mast.position.y = 2.35;
+    // Radar mast rising OUT of the dome crown (starts inside the dome).
+    const mastFoot = cyl(0.22, 0.28, 0.3, 12, GUNMETAL, 0, 2.06, 0);
+    const mast = new THREE.Mesh(G.pole, GUNMETAL); mast.scale.y = 0.5; mast.position.y = 2.5;
     const dish = new THREE.Group();
     const dishPlate = new THREE.Mesh(G.dish, team);
     const dishTip = new THREE.Mesh(G.lamp, glowMat(AMBER, 1.8));
     dishTip.position.set(0.26, 0.04, 0);
     dish.add(dishPlate, dishTip);
-    dish.position.y = 2.68;
+    dish.position.y = 2.84;
     // Antenna bobbles flanking the mast foot, rising from the dome shoulders.
-    const antA = bobbleAntenna(0.72, 1.42, 0.2, color, 0.42, -0.3);
-    const antB = bobbleAntenna(-0.72, 1.42, -0.2, color, 0.42, 0.3);
+    const antA = bobbleAntenna(0.72, 1.58, 0.2, color, 0.42, -0.3);
+    const antB = bobbleAntenna(-0.72, 1.58, -0.2, color, 0.42, 0.3);
     // Warm amber vents seated on the dome shoulders (overlap into the dome).
-    const ventA = new THREE.Mesh(G.vent, GUNMETAL); ventA.position.set(-0.55, 1.5, 0.62); ventA.scale.setScalar(0.6);
-    const ventAglow = cyl(0.13, 0.13, 0.04, 10, glowMat(AMBER, 1.4), -0.55, 1.66, 0.62);
-    const ventB = new THREE.Mesh(G.vent, GUNMETAL); ventB.position.set(0.55, 1.5, -0.62); ventB.scale.setScalar(0.6);
-    const ventBglow = cyl(0.13, 0.13, 0.04, 10, glowMat(AMBER, 1.4), 0.55, 1.66, -0.62);
+    const ventA = new THREE.Mesh(G.vent, GUNMETAL); ventA.position.set(-0.55, 1.64, 0.62); ventA.scale.setScalar(0.6);
+    const ventAglow = cyl(0.13, 0.13, 0.04, 10, glowMat(AMBER, 1.4), -0.55, 1.8, 0.62);
+    const ventB = new THREE.Mesh(G.vent, GUNMETAL); ventB.position.set(0.55, 1.64, -0.62); ventB.scale.setScalar(0.6);
+    const ventBglow = cyl(0.13, 0.13, 0.04, 10, glowMat(AMBER, 1.4), 0.55, 1.8, -0.62);
 
-    built.add(base, baseRivets, hull, stripe, winRing, dome, visor, crownCog, crownRivets,
+    built.add(base, baseRivets, skirt, hull, collar, ports, doorFrame, doorPanel, doorCog,
+              dome, visor, crownCog, crownRivets,
               mastFoot, mast, dish, antA, antB, ventA, ventAglow, ventB, ventBglow);
     // Corner lamps ON the base slab top (radius 1.39 < slab top radius 1.5,
     // y half-sunk into the slab). The old (±1.32, ±1.32) diagonal reach of 1.87

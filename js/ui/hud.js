@@ -871,7 +871,7 @@ export class Hud {
       this.game.issue({ t: "move", ids, x: fx, y: fy, q: e.shiftKey ? 1 : 0 });
       this.audio.ack();
     }
-    this.renderer.orderPing(wx, wy, "#1c7d3f");
+    this.renderer.orderPing(wx, wy, "#0b3d20");
   }
 
   // ---------- feedback ----------

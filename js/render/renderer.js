@@ -1018,8 +1018,8 @@ export class Renderer {
       new THREE.Vector3(), new THREE.Vector3(),
     ]);
     const mat = new THREE.LineDashedMaterial({
-      color: 0x1c7d3f, dashSize: 0.45, gapSize: 0.3,
-      transparent: true, opacity: 0.65,
+      color: 0x0b3d20, dashSize: 0.6, gapSize: 0.28,   // dark ink, long dashes: reads on bright ground
+      transparent: true, opacity: 0.95,
       depthWrite: false, depthTest: false,   // UI overlay: never hide under terrain
     });
     const line = new THREE.Line(geo, mat);
@@ -1053,7 +1053,7 @@ export class Renderer {
     geo.setAttribute("color", this.queuePathCol);
     geo.setDrawRange(0, 0);
     const mat = new THREE.LineBasicMaterial({
-      vertexColors: true, transparent: true, opacity: 0.5,
+      vertexColors: true, transparent: true, opacity: 0.92,  // near-opaque: 1px lines vanish on bright ground otherwise
       depthWrite: false, depthTest: false,   // UI overlay: never hide under terrain
     });
     this.queuePaths = new THREE.LineSegments(geo, mat);
@@ -1091,14 +1091,15 @@ export class Renderer {
     const cap = this.queueMaxSegments;
     let seg = 0;
 
-    // Deep ink tones: the old pastel-bright lines washed out on bright terrain.
+    // Near-black ink tones: order lines are 1px, so they need MAXIMUM value
+    // contrast against the bright terrain (the toon-outline language).
     const KIND_COLORS = {
-      move: [0.11, 0.49, 0.25],
-      attackmove: [0.85, 0.23, 0.17],
-      attack: [0.85, 0.23, 0.17],
-      patrol: [0.14, 0.34, 0.70],
-      gather: [0.05, 0.56, 0.51],
-      build: [0.70, 0.42, 0.07],
+      move: [0.03, 0.26, 0.12],
+      attackmove: [0.55, 0.08, 0.05],
+      attack: [0.55, 0.08, 0.05],
+      patrol: [0.06, 0.18, 0.45],
+      gather: [0.02, 0.34, 0.31],
+      build: [0.45, 0.26, 0.03],
     };
 
     // follow the terrain: each endpoint sits at ground height + a small lift
@@ -1161,7 +1162,7 @@ export class Renderer {
       pts.needsUpdate = true;
       line.computeLineDistances();
       const onMineral = b.rally.targetId && sim.byId.get(b.rally.targetId)?.type === "mineral";
-      line.material.color.setHex(onMineral ? 0x0e8f83 : 0x1c7d3f);
+      line.material.color.setHex(onMineral ? 0x074f46 : 0x0b3d20);
 
       flag.visible = true;
       flag.position.set(rx, this.heightAt(rx, rz), rz);
@@ -1349,7 +1350,7 @@ export class Renderer {
     const g = new THREE.Group();
     const pole = new THREE.Mesh(SHARED.pole, new THREE.MeshBasicMaterial({ color: 0xcccccc }));
     pole.position.y = 0.7;
-    const flag = new THREE.Mesh(SHARED.flag, new THREE.MeshBasicMaterial({ color: 0x1c7d3f }));
+    const flag = new THREE.Mesh(SHARED.flag, new THREE.MeshBasicMaterial({ color: 0x0b3d20 }));
     flag.position.set(0.17, 1.25, 0);
     g.add(pole, flag);
     g.visible = false;
