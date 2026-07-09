@@ -517,7 +517,12 @@ export class Input {
     if (!worker) { this.hud.toast("Select a worker first"); this.audio.error(); return; }
     if (!this.sim.canAfford(this.pid, d.cost)) { this.hud.toast("Not enough scrap"); this.audio.error(); return; }
     if (!this.sim.canPlace(this.placing, tx, ty)) { this.hud.toast("Can't build there"); this.audio.error(); return; }
-    this.game.issue({ t: "build", workerId: worker.id, building: this.placing, tx, ty });
+    // Ooze faction: the worker (Mote) melts into the building site
+    const cmd = d.faction === "ooze" ? "ooze_build" : "build";
+    const buildCmd = cmd === "ooze_build"
+      ? { t: "ooze_build", building: this.placing, tx, ty }
+      : { t: "build", workerId: worker.id, building: this.placing, tx, ty };
+    this.game.issue(buildCmd);
     this.audio.place();
     this.cancelPlace();
   }

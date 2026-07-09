@@ -301,6 +301,26 @@ export class Renderer {
     mesh.receiveShadow = true;
     this.scene.add(mesh);
     this.lastFogPaint = -1;
+
+    // ---- Goo overlay (Ooze faction creep) ----
+    this.gooCanvas = document.createElement("canvas");
+    this.gooCanvas.width = w * PX;
+    this.gooCanvas.height = h * PX;
+    this.gooTex = new THREE.CanvasTexture(this.gooCanvas);
+    this.gooTex.colorSpace = THREE.SRGBColorSpace;
+    this.gooTex.magFilter = THREE.NearestFilter;
+    this.gooTex.minFilter = THREE.NearestFilter;
+    this.gooTex.generateMipmaps = false;
+    const gooGeo = new THREE.PlaneGeometry(w, h);
+    const gooMat = new THREE.MeshBasicMaterial({
+      map: this.gooTex, transparent: true, opacity: 0.65,
+      depthWrite: false, depthTest: false,
+    });
+    this.gooPlane = new THREE.Mesh(gooGeo, gooMat);
+    this.gooPlane.rotation.x = -Math.PI / 2;
+    this.gooPlane.position.set(w / 2, 0.15, h / 2);
+    this.gooPlane.renderOrder = 1;
+    this.scene.add(this.gooPlane);
   }
 
   // Minecraft-style SEAMLESS tileable ground texture: a PXxPX pixel-art canvas
@@ -829,6 +849,49 @@ export class Renderer {
       }
     }
     this.groundTex.needsUpdate = true;
+  }
+
+  // Paint the goo creep overlay (Ooze faction). Acid-green translucent blobs
+  // with a pulsing network feel. Only painted where the gooGrid has a 1 AND
+  // the fog is clear (fog===2) so hidden goo doesn't leak information.
+  paintGoo() {
+    const { w, h } = this.sim.map;
+    if (!this.sim.gooGrid) { this.gooPlane.visible = false; return; }
+    const fog = this.sim.fog[this.localPlayer];
+    const ctx = this.gooCanvas.getContext("2d");
+    ctx.clearRect(0, 0, this.gooCanvas.width, this.gooCanvas.height);
+    let anyGoo = false;
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        if (this.sim.gooGrid[y * w + x] !== 1) continue;
+        if (fog[y * w + x] !== 2) continue; // hidden by fog
+        anyGoo = true;
+        const px = x * PX, py = y * PX;
+        // Acid-green base with per-tile variation
+        const hh = pixHash(x + 42, y + 99);
+        // Vibrant acid-green with per-tile variation — stands out on any terrain
+        const r = 40 + (hh & 23);
+        const g = 210 + ((hh >> 4) & 35);
+        const b = 30 + ((hh >> 8) & 15);
+        ctx.fillStyle = `rgba(${r},${g},${b},0.72)`;
+        ctx.fillRect(px + 1, py + 1, PX - 2, PX - 2);
+        // Brighter vein/network highlight
+        ctx.fillStyle = `rgba(${r+60},${g+30},${b+20},0.28)`;
+        const cx = px + PX / 2, cy = py + PX / 2;
+        const veins = 3 + (hh & 3);
+        for (let v = 0; v < veins; v++) {
+          const ang = ((hh >> (v * 3)) & 15) / 15 * Math.PI * 2;
+          ctx.beginPath();
+          ctx.moveTo(cx + Math.cos(ang) * 2, cy + Math.sin(ang) * 2);
+          ctx.lineTo(cx + Math.cos(ang) * (PX * 0.4), cy + Math.sin(ang) * (PX * 0.4));
+          ctx.lineWidth = 2 + (hh & 2);
+          ctx.strokeStyle = `rgba(${r+70},${g+40},${b+25},0.24)`;
+          ctx.stroke();
+        }
+      }
+    }
+    this.gooPlane.visible = anyGoo;
+    if (anyGoo) { this.gooTex.needsUpdate = true; }
   }
 
   // Instanced, theme-tinted barrier props keyed by map.barrierKind:
@@ -1544,6 +1607,7 @@ export class Renderer {
 
     if (sim.tick !== this.lastFogPaint && sim.tick % 3 === 0) {
       this.paintFog();
+      this.paintGoo();
       this.lastFogPaint = sim.tick;
     }
 

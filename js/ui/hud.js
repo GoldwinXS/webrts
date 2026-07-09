@@ -13,6 +13,13 @@ const UNIT_DESC = {
   tank: "Long-range siege. Devastating in Anchor Mode; can't hit air.",
   wraith: "Fast, fragile flyer. Hits both ground and air.",
   banshee: "Gunship flyer with heavy ground damage; can't hit air.",
+  // Ooze
+  mote: "Ooze worker: gathers Scrap (minerals), melts into buildings.",
+  nip: "Cheap Ooze melee swarm unit.",
+  spit: "Ranged Ooze assault unit; attacks ground.",
+  maw: "Heavy Ooze melee bruiser; Engulf leaps onto enemies.",
+  sluice: "Ooze artillery. Burrow for long-range splash bombardment.",
+  wisp: "Ooze flying support; can attack ground.",
 };
 const BLDG_DESC = {
   hq: "Command center. Trains Bearings and collects Scrap/Oil.",
@@ -22,6 +29,12 @@ const BLDG_DESC = {
   factory: "Trains Thumpers; researches vehicle upgrades. Needs an Assembly.",
   starport: "Trains Darts and Rumbles; researches Afterburners. Needs a Foundry.",
   turret: "Static defense. Fires on ground and air. Needs an Assembly.",
+  // Ooze
+  nucleus: "Ooze command center. Trains Motes.",
+  den: "Ooze unit production; morphs Nips two at a time (Broods).",
+  goovent: "Ooze gas extraction. Spreads goo in a radius.",
+  warren: "Ooze defensive structure; researches Burrow Tech. Fires on ground + air.",
+  roost: "Ooze air production building; researches Membrane.",
 };
 const ABIL_DESC = {
   stim: "Burst of speed and attack rate for a short time, at the cost of HP.",
@@ -29,6 +42,9 @@ const ABIL_DESC = {
   siege: "Anchor down to fire at long range with splash; can't move while anchored.",
   burners: "Brief speed burst to reposition the Dart.",
   barrage: "Rumble channels a volley of rockets onto a target area.",
+  // Ooze
+  burrow: "Burrow to fire at long range with splash; immobile while burrowed.",
+  engulf: "Maw lunges at a target, dealing splash damage on landing.",
 };
 const UPG_DESC = {
   stims: "Unlocks the Overclock ability for Zappers.",
@@ -36,6 +52,11 @@ const UPG_DESC = {
   siegetech: "Unlocks Anchor Mode for Thumpers.",
   servos: "Thumpers move noticeably faster.",
   afterburners: "Unlocks the Afterburners ability for Darts.",
+  // Ooze
+  carapace: "Adds HP to all Ooze ground units, current and future.",
+  adrenal: "Increases attack speed of Nips, Spits, and Maws.",
+  burrowtech: "Unlocks Burrow ability for Sluices.",
+  membrane: "Increases speed of Wisps.",
 };
 const CMD_DESC = {
   attack: "Move toward a point, attacking any enemies encountered on the way.",
@@ -585,6 +606,18 @@ export class Hud {
         sub: ab.sub, cls: ready ? "" : "cooldown",
       });
     }
+    // ---- morph buttons for Ooze units ----
+    if (this.activeType === "nip") {
+      const md = UNITS.maw;
+      if (md) {
+        const canAfford = this.sim.canAfford(this.pid, md.cost, md.gasCost || 0);
+        slots.push({
+          key: "x", cmd: "morph-nip-maw", label: "Morph to Maw",
+          sub: md.gasCost ? `${md.cost}m ${md.gasCost}g` : `${md.cost}`,
+          cls: canAfford ? "" : "cooldown",
+        });
+      }
+    }
     if (anyUnits) {
       slots.push({ key: "a", cmd: "attack", label: "Attack-move", sub: "all units" });
       slots.push({ key: "s", cmd: "stop", label: "Stop", sub: "all units" });
@@ -702,6 +735,10 @@ export class Hud {
     if (e.type === "wraith" && t < e.burnUntil) return "Afterburners";
     if (e.type === "brute" && e.leapUntil) return "Leaping";
     if (e.type === "banshee" && e.channelUntil) return "Barraging";
+    // Ooze states
+    if (e.type === "sluice" && t < e.transformUntil) return "Burrowing";
+    if (e.type === "sluice" && e.burrowed) return "Burrowed";
+    if (e.type === "maw" && e.leapUntil) return "Engulfing";
     return "";
   }
 
@@ -778,6 +815,7 @@ export class Hud {
     const a = ABILITIES[ab.name];
     return mine.some((e) => e.type === a.unit && e.abilityCd === 0 &&
       !(e.type === "tank" && this.sim.tick < e.transformUntil) &&
+      !(e.type === "sluice" && this.sim.tick < e.transformUntil) &&
       !e.leapUntil && !e.channelUntil);
   }
 
@@ -836,6 +874,20 @@ export class Hud {
     } else if (cmd === "stop") {
       const ids = this.input?.mySelectedUnitIds() || [];
       if (ids.length) { this.game.issue({ t: "stop", ids }); this.audio.ack(); }
+    } else if (cmd === "morph-nip-maw") {
+      const md = UNITS.maw;
+      if (!md) return;
+      if (!this.sim.canAfford(this.pid, md.cost, md.gasCost || 0)) {
+        this.audio.error();
+        return this.toast("Not enough resources to morph");
+      }
+      const ids = this.input?.mySelectedUnitIds()?.filter(id => {
+        const e = this.sim.byId.get(id);
+        return e && e.owner === this.pid && e.type === "nip";
+      }) || [];
+      if (!ids.length) return;
+      this.game.issue({ t: "ooze_morph", ids: [ids[0]], fromType: "nip", targetType: "maw" });
+      this.audio.ack();
     }
   }
 

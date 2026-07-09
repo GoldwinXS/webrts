@@ -101,6 +101,7 @@ export const BUILDINGS = {
 // sim.upgrades[pid] is a bitmask of these bits. Each upgrade is researched once.
 export const UPGRADE_BITS = {
   stims: 1, plating: 2, siegetech: 4, servos: 8, afterburners: 16,
+  carapace: 32, adrenal: 64, burrowtech: 128, membrane: 256,
 };
 
 // Research definitions. `building` is the structure whose production queue the
@@ -111,6 +112,11 @@ export const UPGRADES = {
   siegetech:   { name: "Anchor Tech",   building: "factory",  cost: 150, gasCost: 100, time: 400, bit: 4 },
   servos:      { name: "Servo Motors",  building: "factory",  cost: 100, gasCost: 100, time: 300, bit: 8 },
   afterburners:{ name: "Afterburners",  building: "starport", cost: 100, gasCost: 100, time: 300, bit: 16 },
+  // Ooze upgrades
+  carapace:    { name: "Carapace",      building: "den",      cost: 150, gasCost: 100, time: 350, bit: 32 },
+  adrenal:     { name: "Adrenal",       building: "den",      cost: 100, gasCost: 100, time: 300, bit: 64 },
+  burrowtech:  { name: "Burrow Tech",   building: "warren",   cost: 100, gasCost: 100, time: 300, bit: 128 },
+  membrane:    { name: "Membrane",      building: "roost",    cost: 100, gasCost: 100, time: 300, bit: 256 },
 };
 
 // Retroactive plating buff applied to living + future marines/brutes.
@@ -143,15 +149,36 @@ export const ABILITIES = {
     name: "Rocket Barrage", unit: "banshee", requires: null, targeted: true,
     cd: 200, range: 6, channel: 15, rockets: 5, interval: 3, dmg: 8, radius: 192, // radius fp (0.75 tile)
   },
+  // Ooze abilities
+  burrow: {
+    name: "Burrow", unit: "sluice", requires: "burrowtech", targeted: false, toggle: true,
+    cd: 0, transform: 20, range: 7, dmg: 20, minRange: 25, // minRange in tenths (2.5 tiles)
+    splash: 1, splashDmg: 10, cooldown: 20,
+  },
+  engulf: {
+    name: "Engulf", unit: "maw", requires: null, targeted: true,
+    cd: 120, range: 3, dur: 5, dmg: 14, splash: 1,
+  },
 };
 
 export const PLAYER_COLORS = ["#4cc2ff", "#ff5f4c"];
 export const MAX_QUEUE = 5;
 
+// Goo-field constants (Ooze faction). The gooGrid spreads from Nucleus and Goo
+// Vent sources. Ticks are 100ms real-time, so 10 ticks = 1s.
+export const GOO_SPREAD_INTERVAL = 10;    // spread one ring every 10 ticks (1s)
+export const GOO_MAX_RADIUS = 10;          // tiles from source at max spread
+export const GOO_SPEED_NUM = 6, GOO_SPEED_DEN = 5;  // ×1.2 speed on Goo
+export const REGEN_DELAY = 30;             // 3s before regen starts after damage
+export const REGEN_RATE = 1;               // HP per tick on Goo
+export const REGEN_RATE_OFF = 0.5;         // HP per 2 ticks off Goo (integer: 1/2)
+
 // ===========================================================================
 // THE OOZE (Phase 3) — see docs/DESIGN.md S8. Same flat registries, unique type
-// keys, tagged faction:"ooze". Increment A: functional combat faction (goo /
-// regen / morph / broods / burrow are layered on in a later increment). Type
+// Carapace HP bonus per unit type (Ooze faction). Applied retroactively and
+// on spawn, same as Cog's Tin Plating.
+export const CARAPACE_HP = { nip: 12, spit: 12, sluice: 12, maw: 16 };
+// all implemented in sim.js. Type
 // keys never collide with Cog keys, so the sim's spawn/combat/tech code is
 // unchanged — it still looks up UNITS[type] / BUILDINGS[type].
 // ===========================================================================
@@ -192,15 +219,15 @@ Object.assign(UNITS, {
 Object.assign(BUILDINGS, {
   nucleus: {
     name: "Nucleus", faction: "ooze", cost: 400, gasCost: 0, hp: 1100, size: 3, supply: 10,
-    buildTime: 500, sight: 9, trains: ["mote"], deposit: true,
+    buildTime: 500, sight: 9, trains: ["mote"], deposit: true, gooOozes: true,
   },
   pod: {
     name: "Pod", faction: "ooze", cost: 100, gasCost: 0, hp: 450, size: 2, supply: 8,
     buildTime: 180, sight: 6, trains: [],
   },
-  vent: {   // spreads Goo in a later increment; for now just a cheap outpost
+  vent: {
     name: "Goo Vent", faction: "ooze", cost: 75, gasCost: 0, hp: 350, size: 2, supply: 0,
-    buildTime: 160, sight: 6, trains: [],
+    buildTime: 160, sight: 6, trains: [], gooOozes: true,
   },
   den: {
     name: "Den", faction: "ooze", cost: 150, gasCost: 0, hp: 750, size: 3, supply: 0,

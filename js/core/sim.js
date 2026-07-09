@@ -5,7 +5,9 @@
 import { FP, HALF, tileToFp, fpToTile, isqrt, dist, dist2, makeHash } from "./fixed.js";
 import { UNITS, BUILDINGS, FACTIONS, START_MINERALS, START_GAS, CARRY_AMOUNT, GATHER_TICKS, PATCH_AMOUNT, MAX_QUEUE,
   GAS_CARRY, GAS_GATHER_TICKS, GAS_AMOUNT, GAS_DEPLETED, HQ_RESOURCE_CLEARANCE,
-  UPGRADES, UPGRADE_BITS, ABILITIES, PLATING_HP, SERVOS_SPEED_NUM, SERVOS_SPEED_DEN } from "./data.js";
+  UPGRADES, UPGRADE_BITS, ABILITIES, PLATING_HP, SERVOS_SPEED_NUM, SERVOS_SPEED_DEN,
+  GOO_SPREAD_INTERVAL, GOO_MAX_RADIUS, GOO_SPEED_NUM, GOO_SPEED_DEN,
+  REGEN_DELAY, REGEN_RATE, REGEN_RATE_OFF, CARAPACE_HP } from "./data.js";
 import { generateMap } from "./map.js";
 import { findPath, nearestFree } from "./path.js";
 
@@ -39,6 +41,16 @@ export class Sim {
     // (0 = unseen black is reserved for future campaign maps.)
     this.fog = [new Uint8Array(w * h).fill(1), new Uint8Array(w * h).fill(1)];
 
+    // Goo field: Ooze creep grid. 0 = no goo, 1 = goo. Spreads from Nucleus
+    // and Goo Vent sources (buildings with gooOozes: true). Ooze ground units
+    // get +speed and +regen on Goo; Ooze buildings require Goo underneath
+    // (except the sources themselves).
+    this.gooGrid = new Uint8Array(w * h);
+    // Per-source goo radius (tiles from the source footprint edge). Incremented
+    // every GOO_SPREAD_INTERVAL ticks until GOO_MAX_RADIUS. Initial radius = 3
+    // so the starting Nucleus immediately covers its surroundings.
+    this._gooSources = [];
+
     for (const m of this.map.minerals) {
       this.addEntity({ type: "mineral", owner: -1, x: m.x, y: m.y, hp: 0, maxHp: 0, amount: PATCH_AMOUNT, radius: (FP * 0.4) | 0 });
     }
@@ -59,6 +71,15 @@ export class Sim {
         this.autoGather(u);
       }
     }
+    // Initialize goo sources from start buildings and spread the initial goo.
+    // Ooze players start with a Nucleus (gooOozes: true) that needs to radiate
+    // goo from tick 0 so their buildings (Pod, Den, etc.) can be placed.
+    for (const e of this.entities) {
+      if (e.building && e.done && BUILDINGS[e.type]?.gooOozes) {
+        this._gooSources.push({ id: e.id, radius: 3 });
+      }
+    }
+    this.rebuildGooGrid();
     this.updateFog();
   }
 
@@ -86,16 +107,26 @@ export class Sim {
       stimUntil: 0,        // marine: stim buff active while tick < stimUntil
       burnUntil: 0,        // wraith: afterburner buff active while tick < burnUntil
       sieged: 0,           // tank: 1 while in siege mode
+      burrowed: 0,         // sluice: 1 while burrowed (mortar mode)
       transformUntil: 0,   // tank: transforming (immobile) while tick < transformUntil
       leapUntil: 0,        // brute: leaping (airborne) while tick < leapUntil
       leapTo: null,        // brute: landing point {x,y}
       channelUntil: 0,     // banshee: barrage channel end tick
       channel: null,       // banshee: barrage state {x,y,fired}
+      // Ooze regen: last tick this unit took damage (0 = never). Used to
+      // gate regeneration (only heals after REGEN_DELAY ticks without dmg).
+      lastDmg: 0,
     });
     // FUTURE-unit plating: marines/brutes built after plating completes get +12 maxHp.
     if ((type === "marine" || type === "brute") && (this.upgrades[pid] & UPGRADE_BITS.plating)) {
       e.maxHp += PLATING_HP;
       e.hp += PLATING_HP;
+    }
+    // Ooze Carapace: units built after carapace completes get bonus HP
+    const carapaceHp = CARAPACE_HP[type];
+    if (carapaceHp && (this.upgrades[pid] & UPGRADE_BITS.carapace)) {
+      e.maxHp += carapaceHp;
+      e.hp += carapaceHp;
     }
     return e;
   }
@@ -213,6 +244,13 @@ export class Sim {
         // footprint must be one flat level — no straddling a cliff/slope edge
         if (H) { if (lvl < 0) lvl = H[idx]; else if (H[idx] !== lvl) return false; }
       }
+    // Ooze buildings (except sources like Nucleus/Vent) must be built on Goo.
+    if (d.faction === "ooze" && !d.gooOozes) {
+      for (let y = ty; y < ty + d.size; y++)
+        for (let x = tx; x < tx + d.size; x++) {
+          if (!this.tileOnGoo(x, y)) return false;
+        }
+    }
     // don't allow placement on top of mineral patches or units
     const cx = tx * FP + (d.size * FP >> 1), cy = ty * FP + (d.size * FP >> 1);
     for (const e of this.entities) {
@@ -261,12 +299,126 @@ export class Sim {
     return false;
   }
 
+  // ---------- Goo field ----------
+  // The gooGrid is a Uint8Array(w*h) where 1 = covered by goo. It spreads from
+  // gooOozes buildings (Nucleus, Goo Vents) outward by one ring every
+  // GOO_SPREAD_INTERVAL ticks, up to GOO_MAX_RADIUS from the source's footprint
+  // edge.
+
+  // Is a tile coordinate covered by goo?
+  tileOnGoo(tx, ty) {
+    const { w } = this.map;
+    return tx >= 0 && tx < w && ty >= 0 && ty < this.map.h && this.gooGrid[ty * w + tx] === 1;
+  }
+
+  // Is an fp position on goo?
+  fpOnGoo(fpx, fpy) {
+    return this.tileOnGoo(fpToTile(fpx), fpToTile(fpy));
+  }
+
+  // Regenerate HP for Ooze units that haven't taken damage recently.
+  applyRegen(e) {
+    const d = UNITS[e.type];
+    if (!d || d.faction !== "ooze" || e.hp <= 0 || e.hp >= e.maxHp) return;
+    if (e.lastDmg > 0 && this.tick - e.lastDmg < REGEN_DELAY) return; // recent damage
+    const onGoo = this.fpOnGoo(e.x, e.y);
+    if (onGoo && e.hp < e.maxHp) {
+      e.hp = Math.min(e.maxHp, e.hp + REGEN_RATE);
+    } else if (!onGoo && this.tick % 2 === 0 && e.hp < e.maxHp) {
+      // Off-goo: half rate (1 HP per 2 ticks)
+      e.hp = Math.min(e.maxHp, e.hp + REGEN_RATE_OFF);
+    }
+  }
+
+  // Rebuild the gooGrid entirely from the current goo sources. Used at init
+  // and when a new goo source is created (e.g. a Goo Vent finishes).
+  rebuildGooGrid() {
+    const { w, h } = this.map;
+    this.gooGrid.fill(0);
+    for (const src of this._gooSources) {
+      const e = this.byId.get(src.id);
+      if (!e || !e.building || !e.done || !BUILDINGS[e.type]?.gooOozes) continue;
+      const r = src.radius;
+      // footprint expanded outward by `r` tiles in each direction
+      const left = Math.max(0, e.ty - r);
+      const top = Math.max(0, e.tx - r);
+      const right = Math.min(w, e.ty + e.size + r);
+      const bottom = Math.min(h, e.tx + e.size + r);
+      for (let y = left; y < right; y++) {
+        for (let x = top; x < bottom; x++) {
+          // distance from the footprint edge (Manhattan-ish)
+          if (x >= e.tx && x < e.tx + e.size && y >= e.ty && y < e.ty + e.size) {
+            // inside the building footprint: always goo
+            this.gooGrid[y * w + x] = 1;
+          } else {
+            // outside: tile must be within `r` of the footprint edge
+            const dx = Math.max(0, e.tx - x, x - (e.tx + e.size - 1));
+            const dy = Math.max(0, e.ty - y, y - (e.ty + e.size - 1));
+            // Use Chebyshev distance (square spread) for organic look
+            const d = Math.max(dx, dy);
+            if (d <= r) this.gooGrid[y * w + x] = 1;
+          }
+        }
+      }
+    }
+    // Also mark the tiles under any Ooze building as goo (buildings that finish
+    // on a tile that the source hasn't yet reached still count)
+    for (const e of this.entities) {
+      if (!e.building || !e.done) continue;
+      const bd = BUILDINGS[e.type];
+      if (!bd || bd.faction !== "ooze") continue;
+      for (let y = e.ty; y < e.ty + e.size; y++)
+        for (let x = e.tx; x < e.tx + e.size; x++)
+          this.gooGrid[y * w + x] = 1;
+    }
+  }
+
+  // Incrementally expand goo from all sources. Called every step.
+  spreadGoo() {
+    let changed = false;
+    // Step 1: remove dead goo sources
+    this._gooSources = this._gooSources.filter((src) => {
+      const e = this.byId.get(src.id);
+      return e && e.building && e.hp > 0;
+    });
+    // Step 2: add any NEW goo sources (buildings that just finished)
+    for (const e of this.entities) {
+      if (!e.building || !e.done || e.hp <= 0) continue;
+      if (!BUILDINGS[e.type]?.gooOozes) continue;
+      if (this._gooSources.some((s) => s.id === e.id)) continue;
+      this._gooSources.push({ id: e.id, radius: 3 });
+      changed = true;
+    }
+    // Step 3: expand radii on timer
+    if (this.tick % GOO_SPREAD_INTERVAL === 0) {
+      for (const src of this._gooSources) {
+        if (src.radius < GOO_MAX_RADIUS) {
+          src.radius++;
+          changed = true;
+        }
+      }
+    }
+    if (changed) this.rebuildGooGrid();
+  }
+
+  // Does the player have a building that oozes goo? (for AI checks)
+  hasGooSources(pid) {
+    for (const src of this._gooSources) {
+      const e = this.byId.get(src.id);
+      if (e && e.owner === pid) return true;
+    }
+    return false;
+  }
+
   // ---------- commands ----------
   // bundle: [{pid, cmds:[...]}] applied in pid order — deterministic.
 
   step(bundle) {
     this.events.length = 0;
     for (const e of this.entities) { e.px = e.x; e.py = e.y; }
+
+    // Spread goo before commands so newly-placed sources start radiating
+    this.spreadGoo();
 
     if (bundle) {
       for (const group of bundle) {
@@ -277,6 +429,10 @@ export class Sim {
     for (const e of this.entities) {
       if (e.unit) this.updateUnit(e);
       else if (e.building) this.updateBuilding(e);
+    }
+    // Ooze regeneration: apply after all damage from this tick is resolved.
+    for (const e of this.entities) {
+      if (e.unit) this.applyRegen(e);
     }
     this.separate();
     this.removeDead();
@@ -373,6 +529,58 @@ export class Sim {
         worker.path = null;
         break;
       }
+      case "ooze_build": {
+        // Ooze faction: a Mote melts into the building site, consumed.
+        // No worker babysitting — the building auto-completes.
+        const d = BUILDINGS[c.building];
+        if (!d || d.faction !== "ooze") break;
+        if (!this.canAfford(pid, d.cost, d.gasCost || 0)) break;
+        if (d.requires && !this.hasBuilding(pid, d.requires)) break;
+        if (!this.canPlace(c.building, c.tx, c.ty)) break;
+        // Find a Mote within 4 tiles of the build site
+        const cx = c.tx * FP + (d.size * FP >> 1);
+        const cy = c.ty * FP + (d.size * FP >> 1);
+        const mote = this.nearestEntity(cx, cy, FP * 4, (e) =>
+          e.owner === pid && e.unit && e.type === "mote" && e.hp > 0);
+        if (!mote) break;
+        this.minerals[pid] -= d.cost;
+        this.gas[pid] -= (d.gasCost || 0);
+        // Consume the Mote
+        mote.hp = 0; // killed on next removeDead
+        this.byId.delete(mote.id);
+        // Spawn the building
+        const site = this.spawnBuilding(pid, c.building, c.tx, c.ty, false);
+        if (d.onGeyser) {
+          const geo = this.geyserInFootprint(c.tx, c.ty, d.size);
+          if (geo) site.geyserId = geo.id;
+        }
+        // Auto-complete progress — the building builds itself
+        site.builderId = 0;
+        break;
+      }
+      case "ooze_morph": {
+        // Ooze unit morph: consume a unit and morph it into the target type.
+        // e.g. Nip → Maw.
+        const targetType = c.targetType;
+        const td = UNITS[targetType];
+        if (!td || td.faction !== "ooze") break;
+        if (!this.canAfford(pid, td.cost, td.gasCost || 0)) break;
+        for (const id of c.ids) {
+          const u = this.byId.get(id);
+          if (!u || u.owner !== pid || u.type !== c.fromType || u.hp <= 0) continue;
+          // Consume the source unit
+          const sx = u.x, sy = u.y;
+          u.hp = 0;
+          this.byId.delete(u.id);
+          // Spawn the target unit at the same position
+          this.minerals[pid] -= td.cost;
+          this.gas[pid] -= (td.gasCost || 0);
+          const nu = this.spawnUnit(pid, targetType, sx, sy);
+          this.events.push({ t: "morph", id: nu.id, owner: pid, from: c.fromType, to: targetType, x: sx, y: sy });
+          break; // only morph one unit per command
+        }
+        break;
+      }
       case "resume": {
         // send workers (back) to an unfinished building of ours
         const site = this.byId.get(c.targetId);
@@ -464,6 +672,15 @@ export class Sim {
         }
       }
     }
+    // Carapace: retroactive HP bonus to existing Ooze ground units
+    if (upg === "carapace") {
+      for (const e of this.entities) {
+        if (e.owner === pid && e.unit) {
+          const bonus = CARAPACE_HP[e.type];
+          if (bonus) { e.maxHp += bonus; e.hp += bonus; }
+        }
+      }
+    }
     this.events.push({ t: "research", owner: pid, upg });
   }
 
@@ -487,6 +704,8 @@ export class Sim {
         case "siege":  this.castSiege(u, a); break;
         case "burners":this.castBurners(u, a); break;
         case "barrage":this.castBarrage(u, a, c.x, c.y); break;
+        case "burrow": this.castBurrow(u, a); break;
+        case "engulf": this.castEngulf(u, a, c.x, c.y); break;
       }
     }
   }
@@ -550,7 +769,10 @@ export class Sim {
     const r = a.splash * FP;
     for (const e of this.entities) {
       if (!e.unit || e.fly || e.owner < 0 || e.owner === u.owner || e.hp <= 0) continue;
-      if (dist2(u.x, u.y, e.x, e.y) <= r * r) e.hp -= a.dmg;
+      if (dist2(u.x, u.y, e.x, e.y) <= r * r) {
+        e.hp -= a.dmg;
+        e.lastDmg = this.tick;
+      }
     }
     this.events.push({ t: "ability", kind: "leap_land", id: u.id, owner: u.owner, x: u.x, y: u.y });
   }
@@ -611,7 +833,10 @@ export class Sim {
       const r = a.radius;
       for (const e of this.entities) {
         if (!e.unit || e.fly || e.owner < 0 || e.owner === u.owner || e.hp <= 0) continue;
-        if (dist2(ix, iy, e.x, e.y) <= r * r) e.hp -= a.dmg;
+        if (dist2(ix, iy, e.x, e.y) <= r * r) {
+          e.hp -= a.dmg;
+          e.lastDmg = this.tick;
+        }
       }
       this.events.push({ t: "ability", kind: "barrage_hit", id: u.id, owner: u.owner, x: ix, y: iy });
       ch.fired++;
@@ -623,6 +848,50 @@ export class Sim {
       // window elapsed but rockets remain: fire the rest, then end next check
       u.channelUntil = this.tick + 1;
     }
+  }
+
+  // Sluice burrow toggle: mirrors tank siege — begin transform, set burrowed
+  // flag which enables longer-range splash mortar (gated by transformUntil in
+  // updateUnit so it can't fire while winding up).
+  castBurrow(u, a) {
+    if (u.abilityCd > 0) return;
+    u.transformUntil = this.tick + a.transform;
+    u.abilityCd = a.transform;
+    u.order = { kind: "idle" }; u.path = null; u.next = [];
+    if (!u.burrowed) {
+      u.burrowed = 1;
+      this.events.push({ t: "ability", kind: "burrow_up", id: u.id, owner: u.owner, x: u.x, y: u.y });
+    } else {
+      u.burrowed = 0;
+      this.events.push({ t: "ability", kind: "burrow_down", id: u.id, owner: u.owner, x: u.x, y: u.y });
+    }
+  }
+
+  // Maw engulf: short-range lunge that lands on the target and deals splash
+  // damage to nearby enemy ground units (mirrors brute leap).
+  castEngulf(u, a, tx, ty) {
+    if (u.abilityCd > 0) return;
+    tx = this.clampX(tx | 0); ty = this.clampY(ty | 0);
+    const maxR = a.range * FP;
+    const dx = tx - u.x, dy = ty - u.y;
+    const dd = isqrt(dx * dx + dy * dy);
+    if (dd > maxR) { tx = u.x + ((dx * maxR / dd) | 0); ty = u.y + ((dy * maxR / dd) | 0); }
+    // must land on a passable tile — else snap to nearest free
+    const { w, h } = this.map;
+    if (this.blocked[fpToTile(ty) * w + fpToTile(tx)]) {
+      const free = nearestFree(this.blocked, w, h, fpToTile(tx), fpToTile(ty));
+      if (!free) return;
+      tx = tileToFp(free.x); ty = tileToFp(free.y);
+    }
+    u.leapFrom = { x: u.x, y: u.y };
+    u.leapTo = { x: tx, y: ty };
+    u.leapUntil = this.tick + a.dur;
+    u.abilityCd = a.cd;
+    u.path = null; u.next = [];
+    this.events.push({
+      t: "ability", kind: "engulf", id: u.id, owner: u.owner,
+      fromX: u.x, fromY: u.y, toX: tx, toY: ty,
+    });
   }
 
   groupMove(units, x, y, attackMove, queued) {
@@ -671,13 +940,13 @@ export class Sim {
     const o = u.order;
 
     // ---- special ability states preempt the normal order machine ----
-    // Leaping brute: fly straight to the landing point, then slam.
-    if (u.type === "brute" && u.leapUntil) { this.updateLeap(u); return; }
+    // Leaping brute / Engulfing maw: fly straight to the landing point, then slam.
+    if ((u.type === "brute" || u.type === "maw") && u.leapUntil) { this.updateLeap(u); return; }
     // Channeling banshee: fire a timed volley of rockets, immobile.
     if (u.type === "banshee" && u.channelUntil) { this.updateBarrage(u); return; }
-    // Transforming tank: immobile, can't fire; finish the toggle when the timer
-    // elapses. Weapon/acquire resumes next tick in its normal order.
-    if (u.type === "tank" && this.tick < u.transformUntil) return;
+    // Transforming tank / Burrowing sluice: immobile, can't fire; finish the
+    // toggle when the timer elapses. Weapon/acquire resumes next tick.
+    if ((u.type === "tank" || u.type === "sluice") && this.tick < u.transformUntil) return;
 
     const speed = this.unitSpeed(u);
 
@@ -690,7 +959,7 @@ export class Sim {
         break;
 
       case "move":
-        if (u.sieged) { u.order = { kind: "idle" }; break; } // sieged tank ignores moves
+        if (u.sieged || u.burrowed) { u.order = { kind: "idle" }; break; } // immobile
         if (this.travelTo(u, o.x, o.y, speed)) this.popNext(u);
         break;
 
@@ -806,7 +1075,22 @@ export class Sim {
   // ---------- building brain: training queues ----------
 
   updateBuilding(b) {
-    if (!b.done) return;
+    // Auto-build for Ooze faction: no worker needed. If the building isn't done
+    // and has no active builder (or the builder is dead/missing), tick progress.
+    if (!b.done) {
+      const bd = BUILDINGS[b.type];
+      if (bd && bd.faction === "ooze") {
+        b.progress++;
+        b.hp = Math.min(b.maxHp, b.hp + Math.ceil(b.maxHp / bd.buildTime));
+        if (b.progress >= bd.buildTime) {
+          b.done = true;
+          b.hp = b.maxHp;
+          this.events.push({ t: "complete", id: b.id, x: b.x, y: b.y, owner: b.owner });
+        }
+        return; // no further processing until done
+      }
+      return;
+    }
     const bd = BUILDINGS[b.type];
     // armed buildings (turret): acquire the nearest VISIBLE enemy in range that
     // this weapon can hit and fire. Never chase — just gate on cooldown.
@@ -821,6 +1105,7 @@ export class Sim {
           b.cooldown = bd.cooldown;
           const dmg = target.fly ? bd.dmgAir : bd.dmg;
           target.hp -= dmg;
+          if (target.unit) target.lastDmg = this.tick;
           this.events.push({
             t: "shot", fx: b.x, fy: b.y, tx: target.x, ty: target.y,
             owner: b.owner, ranged: true, air: !!target.fly,
@@ -851,26 +1136,33 @@ export class Sim {
       const spot = nearestFree(this.blocked, this.map.w, this.map.h,
         fpToTile(b.x), b.ty + b.size); // prefer below the building
       if (spot) {
-        const u = this.spawnUnit(b.owner, item.type, tileToFp(spot.x), tileToFp(spot.y));
-        this.events.push({ t: "trained", id: u.id, owner: b.owner, type: item.type, x: u.x, y: u.y });
-        // send the fresh unit to the rally point (workers rally onto minerals)
-        if (b.rally) {
-          const target = b.rally.targetId ? this.byId.get(b.rally.targetId) : null;
-          if (isWorker(u.type) && target?.type === "mineral") {
-            // rally onto minerals: balance across the line, not one patch
-            const patch = this.pickPatch(target, FP * 6) || (target.amount > 0 ? target : null);
-            if (patch) u.order = { kind: "gather", targetId: patch.id, phase: "to", resource: "minerals" };
-          } else if (isWorker(u.type) && target && (isGasBuilding(target.type) || target.type === "geyser")) {
-            // rally onto gas: send workers to a finished refinery/sump on that spot
-            const ref = isGasBuilding(target.type) ? target
-              : this.entities.find((e) => isGasBuilding(e.type) && e.done && e.geyserId === target.id);
-            if (ref && ref.done) u.order = { kind: "gather", targetId: ref.id, phase: "to", resource: "gas" };
-            else u.order = { kind: "move", x: b.rally.x, y: b.rally.y };
-          } else {
-            u.order = { kind: "move", x: b.rally.x, y: b.rally.y };
+        // Brood: the Den morphs Nips TWO at a time per cycle
+        const broodCount = (b.type === "den" && item.type === "nip") ? 2 : 1;
+        for (let i = 0; i < broodCount; i++) {
+          const s = i === 0 ? spot : nearestFree(this.blocked, this.map.w, this.map.h,
+            fpToTile(b.x) + (i % 2), b.ty + b.size + ((i / 2) | 0));
+          if (!s) break;
+          const u = this.spawnUnit(b.owner, item.type, tileToFp(s.x), tileToFp(s.y));
+          this.events.push({ t: "trained", id: u.id, owner: b.owner, type: item.type, x: u.x, y: u.y });
+          // send the fresh unit to the rally point (workers rally onto minerals)
+          if (b.rally) {
+            const target = b.rally.targetId ? this.byId.get(b.rally.targetId) : null;
+            if (isWorker(u.type) && target?.type === "mineral") {
+              // rally onto minerals: balance across the line, not one patch
+              const patch = this.pickPatch(target, FP * 6) || (target.amount > 0 ? target : null);
+              if (patch) u.order = { kind: "gather", targetId: patch.id, phase: "to", resource: "minerals" };
+            } else if (isWorker(u.type) && target && (isGasBuilding(target.type) || target.type === "geyser")) {
+              // rally onto gas: send workers to a finished refinery/sump on that spot
+              const ref = isGasBuilding(target.type) ? target
+                : this.entities.find((e) => isGasBuilding(e.type) && e.done && e.geyserId === target.id);
+              if (ref && ref.done) u.order = { kind: "gather", targetId: ref.id, phase: "to", resource: "gas" };
+              else u.order = { kind: "move", x: b.rally.x, y: b.rally.y };
+            } else {
+              u.order = { kind: "move", x: b.rally.x, y: b.rally.y };
+            }
+          } else if (isWorker(item.type)) {
+            this.autoGather(u);
           }
-        } else if (isWorker(item.type)) {
-          this.autoGather(u);
         }
       }
     }
@@ -1015,6 +1307,14 @@ export class Sim {
     if (u.type === "tank" && (this.upgrades[u.owner] & UPGRADE_BITS.servos)) {
       s = (s * SERVOS_SPEED_NUM / SERVOS_SPEED_DEN) | 0;
     }
+    // Ooze ground units on Goo: +20% speed
+    if (d.faction === "ooze" && !u.fly && this.fpOnGoo(u.x, u.y)) {
+      s = (s * GOO_SPEED_NUM / GOO_SPEED_DEN) | 0;
+    }
+    // Membrane: +20% speed for Wisps
+    if (u.type === "wisp" && (this.upgrades[u.owner] & UPGRADE_BITS.membrane)) {
+      s = (s * 6 / 5) | 0;
+    }
     return s;
   }
 
@@ -1026,13 +1326,20 @@ export class Sim {
       const a = ABILITIES.stim; c = (c * a.cdNum / a.cdDen) | 0;
     }
     if (u.type === "tank" && u.sieged) c = ABILITIES.siege.cooldown;
+    if (u.type === "sluice" && u.burrowed) c = ABILITIES.burrow.cooldown;
+    // Ooze Adrenal: +20% attack speed for Nip, Spit, Maw
+    if ((u.type === "nip" || u.type === "spit" || u.type === "maw") &&
+        (this.upgrades[u.owner] & UPGRADE_BITS.adrenal)) {
+      c = (c * 5 / 6) | 0; // -17% = x5/6 = faster
+    }
     return c;
   }
 
-  // Effective weapon range: a sieged tank reaches 9 tiles.
+  // Effective weapon range: a sieged tank reaches 9 tiles; a burrowed sluice 7.
   unitRange(u) {
     const d = UNITS[u.type];
     if (u.type === "tank" && u.sieged) return ABILITIES.siege.range * FP;
+    if (u.type === "sluice" && u.burrowed) return ABILITIES.burrow.range * FP;
     return d.range;
   }
 
@@ -1040,14 +1347,20 @@ export class Sim {
   unitDmg(u, target) {
     const d = UNITS[u.type];
     if (u.type === "tank" && u.sieged && !target.fly) return ABILITIES.siege.dmg;
+    if (u.type === "sluice" && u.burrowed && !target.fly) return ABILITIES.burrow.dmg;
     return target.fly ? d.dmgAir : d.dmg;
   }
 
   // A sieged tank cannot fire at anything inside its minimum range (2.5 tiles).
+  // A burrowed sluice cannot fire inside 2.5 tiles.
   // Every other unit/state can always hit a valid target.
   canSiegeHit(u, target) {
     if (u.type === "tank" && u.sieged) {
       const min = (ABILITIES.siege.minRange * FP / 10) | 0;
+      if (this.gapTo(u, target) < min) return false;
+    }
+    if (u.type === "sluice" && u.burrowed) {
+      const min = (ABILITIES.burrow.minRange * FP / 10) | 0;
       if (this.gapTo(u, target) < min) return false;
     }
     return true;
@@ -1059,25 +1372,28 @@ export class Sim {
     u.cooldown = this.unitCooldown(u);
     const dmg = this.unitDmg(u, target);
     target.hp -= dmg;
+    if (target.unit) target.lastDmg = this.tick;
     this.events.push({
       t: "shot", fx: u.x, fy: u.y, tx: target.x, ty: target.y,
       owner: u.owner, ranged: this.unitRange(u) > FP, air: !!target.fly,
       attackerId: u.id, targetId: target.id, tOwner: target.owner,
       siege: u.type === "tank" && u.sieged ? 1 : 0,
+      burrow: u.type === "sluice" && u.burrowed ? 1 : 0,
     });
-    // sieged-tank splash: all OTHER enemy ground units within 1 tile of the
-    // impact take splash damage too (deterministic id order via entities).
-    if (u.type === "tank" && u.sieged && !target.fly) {
-      const a = ABILITIES.siege;
+    // sieged-tank / burrowed-sluice splash: all OTHER enemy ground units within
+    // 1 tile of the impact take splash damage too (deterministic id order).
+    if ((u.type === "tank" && u.sieged || u.type === "sluice" && u.burrowed) && !target.fly) {
+      const a = u.type === "tank" ? ABILITIES.siege : ABILITIES.burrow;
       const r = a.splash * FP;
       for (const e of this.entities) {
         if (e === target || !e.unit || e.fly || e.owner < 0 || e.owner === u.owner || e.hp <= 0) continue;
         if (dist2(target.x, target.y, e.x, e.y) <= r * r) {
           e.hp -= a.splashDmg;
+          e.lastDmg = this.tick;
           this.events.push({
             t: "shot", fx: u.x, fy: u.y, tx: e.x, ty: e.y,
             owner: u.owner, ranged: true, air: false,
-            attackerId: u.id, targetId: e.id, tOwner: e.owner, siege: 1, splash: 1,
+            attackerId: u.id, targetId: e.id, tOwner: e.owner, siege: 1, splash: 1, burrow: u.type === "sluice" ? 1 : 0,
           });
         }
       }
@@ -1362,16 +1678,22 @@ export class Sim {
     h.mix(this.minerals[0]); h.mix(this.minerals[1]);
     h.mix(this.gas[0]); h.mix(this.gas[1]);
     h.mix(this.upgrades[0]); h.mix(this.upgrades[1]);
+    // Goo grid checksum: sample tiles near sources for deterministic sync
+    const { w } = this.map;
+    for (let i = 0; i < this.gooGrid.length; i += 13) h.mix(this.gooGrid[i]); // sparse sample
+    for (const src of this._gooSources) { h.mix(src.id); h.mix(src.radius); }
     for (const e of this.entities) {
       h.mix(e.id); h.mix(e.x); h.mix(e.y); h.mix(e.hp | 0);
       if (e.amount !== undefined) h.mix(e.amount | 0);
       if (e.unit) {
         h.mix(e.abilityCd | 0); h.mix(e.sieged | 0);
+        h.mix(e.burrowed | 0);
         h.mix(e.cooldown | 0); h.mix(e.carry | 0); h.mix(e.carryKind | 0);
         h.mix(e.gatherTimer | 0);
         h.mix(e.stimUntil | 0); h.mix(e.burnUntil | 0);
         h.mix(e.transformUntil | 0); h.mix(e.leapUntil | 0);
         h.mix(e.channelUntil | 0); h.mix(e.noProg | 0);
+        h.mix(e.lastDmg | 0);
         h.mix(e.order?.kind?.charCodeAt(0) || 0);
         h.mix(e.order?.targetId || 0);
       }
