@@ -337,9 +337,13 @@ export class Input {
       return;
     }
     if (KEYS.cycleBase.includes(k)) {
-      e.preventDefault();
-      this.cycleBase();
-      return;
+      if ((k === "delete" || k === "backspace") && this.mySelected().length) {
+        // fall through to remove handler below
+      } else {
+        e.preventDefault();
+        this.cycleBase();
+        return;
+      }
     }
 
     // control groups (e.code, so Shift+digit works on every layout):
@@ -382,6 +386,17 @@ export class Input {
           this.renderer.camera.jumpTo(cx / alive.length / FP, cy / alive.length / FP);
         }
         this.lastRecall = { key: digit, time: now };
+      }
+      return;
+    }
+
+    if (k === "delete" || k === "backspace") {
+      e.preventDefault();
+      const ids = this.mySelected().map((e) => e.id);
+      if (ids.length) {
+        this.game.issue({ t: "remove", ids });
+        this.selection.clear();
+        this.hud.refreshSelection();
       }
       return;
     }

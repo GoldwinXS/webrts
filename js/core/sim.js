@@ -491,6 +491,14 @@ export class Sim {
         }
         break;
       }
+      case "remove": {
+        for (const id of c.ids) {
+          const e = own(id);
+          // buildings, units, and production structures all removable
+          if (e) { e.hp = 0; }
+        }
+        break;
+      }
       case "gather": {
         const patch = this.byId.get(c.targetId);
         if (!patch) break;
