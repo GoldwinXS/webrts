@@ -803,6 +803,39 @@ function buildCandidate(seed, opts) {
     }
   }
 
+  // ---- 9c. WATCHTOWERS -------------------------------------------------------
+  // A symmetric pair of neutral vision towers. Preferred site: standing right
+  // in the primary choke corridor (the classic xel'naga spot); fallback: open
+  // ground midway between the natural and the center.
+  const watchtowers = [];
+  {
+    const nearResW = (x, y, r) => {
+      for (const gt of geyserTiles) if (Math.abs(x - gt.x) <= r && Math.abs(y - gt.y) <= r) return true;
+      for (const m of minerals.concat(golds)) {
+        if (Math.abs(x - ((m.x / 256) | 0)) <= r && Math.abs(y - ((m.y / 256) | 0)) <= r) return true;
+      }
+      return false;
+    };
+    const towerReach = bfs(rock, W, H, start0.x, start0.y);
+    const towerOk = (x, y) =>
+      inb(x, y) && !rock[idx(x, y)] && !rampTiles[idx(x, y)] && !nearResW(x, y, 2) &&
+      towerReach[idx(x, y)];
+    const candidates = [];
+    if (chokes.length) candidates.push({ x: chokes[0].x, y: chokes[0].y });
+    const mx = (nat0.x + cx0) >> 1, my = (nat0.y + cy0) >> 1;
+    for (let r = 0; r <= 3; r++)
+      for (let dy = -r; dy <= r; dy++)
+        for (let dx = -r; dx <= r; dx++)
+          if (Math.max(Math.abs(dx), Math.abs(dy)) === r) candidates.push({ x: mx + dx, y: my + dy });
+    for (const c of candidates) {
+      if (!towerOk(c.x, c.y)) continue;
+      const [tpx, tpy] = partner(c.x, c.y);
+      if (Math.abs(c.x - tpx) <= 2 && Math.abs(c.y - tpy) <= 2) continue; // too close to own mirror
+      watchtowers.push({ x: c.x, y: c.y }, { x: tpx, y: tpy });
+      break;
+    }
+  }
+
   // ---- 10. line-of-sight blockers -------------------------------------------
   if (opts.losBlockers) {
     placeLosBlockers(rng, setLos, addDeco, rock, height, losBlock, rampTiles, W, H,
@@ -831,6 +864,7 @@ function buildCandidate(seed, opts) {
     starts, minerals, geysers, losBlock, decos,
     golds,                                           // rich contested patches (fp coords)
     chokes,                                          // enforced route pinches (validation)
+    watchtowers,                                     // neutral vision tower tiles
     naturals, clusters,                              // clusters/naturals: internal only
     ramps: [{ tiles: rampMain, alongX: Math.abs(c0.dx) >= Math.abs(c0.dy) }],
     vProfile,                                        // internal: variety logging

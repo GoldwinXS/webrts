@@ -68,6 +68,14 @@ export class Sim {
     for (const m of (this.map.golds || [])) {
       this.addEntity({ type: "mineral", rich: true, owner: -1, x: m.x, y: m.y, hp: 0, maxHp: 0, amount: GOLD_PATCH_AMOUNT, radius: (FP * 0.4) | 0 });
     }
+    // Neutral watchtowers: sole ground presence nearby claims the tower's
+    // vision for that player (see updateFog). claimedBy is sim state.
+    for (const t of (this.map.watchtowers || [])) {
+      this.addEntity({
+        type: "tower", owner: -1, watch: true, claimedBy: -1,
+        x: tileToFp(t.x), y: tileToFp(t.y), hp: 0, maxHp: 0, radius: (FP * 0.45) | 0,
+      });
+    }
     // Vespene geysers: non-blocking resource nodes. Placed at fp tile centers.
     // (map.js may not emit geysers yet — code defensively.)
     for (const g of (this.map.geysers || [])) {
@@ -1693,6 +1701,18 @@ export class Sim {
     const { w, h } = this.map;
     const height = this.map.height;             // Uint8Array or undefined
     const losBlock = this.map.losBlock;         // Uint8Array or undefined
+    // Watchtower claims: exactly one player with a ground unit within 2 tiles
+    // owns the tower's eyes; both (contested) or neither = unclaimed.
+    for (const t of this.entities) {
+      if (!t.watch) continue;
+      const r2 = (FP * 2) * (FP * 2);
+      let p0 = false, p1 = false;
+      for (const e of this.entities) {
+        if (!e.unit || e.hp <= 0 || e.fly) continue;
+        if (dist2(e.x, e.y, t.x, t.y) < r2) { if (e.owner === 0) p0 = true; else if (e.owner === 1) p1 = true; }
+      }
+      t.claimedBy = p0 === p1 ? -1 : (p0 ? 0 : 1);
+    }
     for (let pid = 0; pid < 2; pid++) {
       const f = this.fog[pid];
       for (let i = 0; i < f.length; i++) if (f[i] === 2) f[i] = 1;
@@ -1715,6 +1735,17 @@ export class Sim {
         for (let k = 0; k < revealed.length; k++) f[revealed[k]] = 2;
         e._losTile = tile;
         e._losTiles = revealed;
+      }
+      // claimed watchtowers grant their vision to the claimant (radius 10,
+      // ground LoS — a lowland tower doesn't see up cliffs). Towers never
+      // move, so the reveal set is computed once and cached.
+      for (const t of this.entities) {
+        if (!t.watch || t.claimedBy !== pid) continue;
+        if (!t._losTiles) {
+          t._losTiles = this.raycastVision(fpToTile(t.x), fpToTile(t.y), 10, false, height, losBlock);
+        }
+        const arr = t._losTiles;
+        for (let k = 0; k < arr.length; k++) f[arr[k]] = 2;
       }
       // buildings a player has actually laid eyes on stay drawn under fog
       // (terrain is revealed from the start, but structures must be scouted)
@@ -1796,6 +1827,7 @@ export class Sim {
     for (const e of this.entities) {
       h.mix(e.id); h.mix(e.x); h.mix(e.y); h.mix(e.hp | 0);
       if (e.amount !== undefined) h.mix(e.amount | 0);
+      if (e.watch) h.mix((e.claimedBy | 0) + 2);
       if (e.unit) {
         h.mix(e.abilityCd | 0); h.mix(e.sieged | 0);
         h.mix(e.burrowed | 0);

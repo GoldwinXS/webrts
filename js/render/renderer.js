@@ -15,7 +15,7 @@ import { FP, HALF, fpToTile } from "../core/fixed.js";
 import { makeRng } from "../core/fixed.js";
 import { BUILDINGS, PLAYER_COLORS } from "../core/data.js";
 import { RtsCamera } from "./camera.js";
-import { makeUnitVisual, makeBuildingVisual, makeMineralVisual, makeGeyserVisual, makeShrubVisual, animateVisual, animateShrub, SHARED, propToon, toonGradient, barrierMaterials } from "./models/index.js";
+import { makeUnitVisual, makeBuildingVisual, makeMineralVisual, makeGeyserVisual, makeShrubVisual, makeTowerVisual, animateTower, animateVisual, animateShrub, SHARED, propToon, toonGradient, barrierMaterials } from "./models/index.js";
 import { UNITS } from "../core/data.js";
 import { THEMES } from "../core/map.js";
 import { Effects } from "./fx.js";
@@ -1564,6 +1564,8 @@ export class Renderer {
       group = makeGeyserVisual(e, this.theme.rock);
     } else if (e.type === "mineral") {
       group = makeMineralVisual(e);
+    } else if (e.type === "tower") {
+      group = makeTowerVisual(e);
     } else if (e.unit) {
       group = makeUnitVisual(e, color);
       this.addRingAndBar(group, e, 0.55, 1.25);
@@ -1824,6 +1826,7 @@ export class Renderer {
         const s = 0.55 + 0.45 * (e.amount / 1500);
         g.userData.crystal.scale.setScalar(s);
       }
+      if (e.watch) animateTower(g, e, t, this.playerColors);
 
       if (g.userData.built) {
         const d = BUILDINGS[e.type];
@@ -1908,7 +1911,7 @@ export class Renderer {
 
   entityVisible(e) {
     if (e.owner === this.localPlayer) return true;
-    if (e.type === "mineral" || e.type === "geyser") return true; // map is revealed
+    if (e.type === "mineral" || e.type === "geyser" || e.watch) return true; // map is revealed
     const f = this.sim.fog[this.localPlayer][fpToTile(e.y) * this.sim.map.w + fpToTile(e.x)];
     if (e.building) return f === 2 || (e.seenBy & (1 << this.localPlayer)) !== 0;
     return f === 2;                                         // enemy units: live sight only

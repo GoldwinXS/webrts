@@ -144,7 +144,7 @@ let configs = 0, fallbacks = 0;
 const fails = [];
 const mainDist = [], natDist = [];
 let detOk = true, chokeMax = 0;
-let withChokes = 0, withGolds = 0;
+let withChokes = 0, withGolds = 0, withTowers = 0;
 
 for (const seed of seeds)
   for (const spawns of modes)
@@ -202,6 +202,15 @@ for (const seed of seeds)
           if (wdt < 2 || wdt > 6) fails.push(`ROUTE-CHOKE ${wdt} seed${seed} ${spawns} exp${expansions} @${c.x},${c.y}`);
         }
       }
+      // watchtowers: symmetric pair on open reachable ground
+      if (map.watchtowers?.length) {
+        withTowers++;
+        for (const t of map.watchtowers) {
+          if (map.rock[idx(t.x, t.y)]) fails.push(`TOWER-BLOCKED seed${seed} ${spawns} @${t.x},${t.y}`);
+          else if (!reach[idx(t.x, t.y)]) fails.push(`TOWER-UNREACHABLE seed${seed} ${spawns} @${t.x},${t.y}`);
+        }
+        if (map.watchtowers.length % 2) fails.push(`TOWER-UNPAIRED seed${seed} ${spawns}`);
+      }
       // gold patches: open ground, reachable from both mains
       if (map.golds?.length) {
         withGolds++;
@@ -227,6 +236,7 @@ console.log(`  determinism ok:       ${detOk}`);
 console.log(`  max main-ramp choke:  ${chokeMax}   (require <= 4)`);
 console.log(`  route chokes present: ${withChokes}/${configs} configs`);
 console.log(`  gold pair present:    ${withGolds}/${configs} configs`);
+console.log(`  watchtowers present:  ${withTowers}/${configs} configs`);
 console.log(`  assertion failures:   ${fails.length}`);
 for (const f of fails.slice(0, 30)) console.log("    " + f);
 if (fails.length === 0 && fallbacks === 0) console.log("ALL CHECKS PASSED.");

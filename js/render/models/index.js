@@ -14,9 +14,10 @@ export {
   addLamp, registerUnit, registerBuilding,
 } from "./registry.js";
 
-// Props: minerals, geysers, shrubs, barriers
+// Props: minerals, geysers, shrubs, barriers, watchtowers
 export {
   makeMineralVisual, makeGeyserVisual, makeShrubVisual,
+  makeTowerVisual, animateTower,
   animateShrub, barrierMaterials,
 } from "./props.js";
 

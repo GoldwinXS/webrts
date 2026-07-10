@@ -93,6 +93,50 @@ export function animateMineral(g, e, t) {
 }
 
 // ---------------------------------------------------------------------------
+// Watchtower — a weathered stone obelisk with a floating beacon orb. The orb
+// takes the claimant's team color (renderer reads userData.beacon each frame
+// and tints by e.claimedBy); unclaimed it idles a dim white.
+// ---------------------------------------------------------------------------
+const TOWER_PLINTH = new THREE.CylinderGeometry(0.5, 0.62, 0.22, 8);
+const TOWER_SHAFT  = new THREE.CylinderGeometry(0.16, 0.3, 1.5, 8);
+const TOWER_CROWN  = new THREE.CylinderGeometry(0.3, 0.2, 0.16, 8);
+const TOWER_ORB    = new THREE.SphereGeometry(0.17, 12, 10);
+
+export function makeTowerVisual(e) {
+  const group = new THREE.Group();
+  const stone = propToon({ color: 0x8d94a4 });
+  const plinth = new THREE.Mesh(TOWER_PLINTH, stone);
+  plinth.position.y = 0.11;
+  plinth.castShadow = true;
+  const shaft = new THREE.Mesh(TOWER_SHAFT, stone);
+  shaft.position.y = 0.95;
+  shaft.castShadow = true;
+  const crown = new THREE.Mesh(TOWER_CROWN, propToon({ color: 0x6d7484 }));
+  crown.position.y = 1.75;
+  const orbMat = new THREE.MeshBasicMaterial({ color: 0xcfd6e4 });
+  const orb = new THREE.Mesh(TOWER_ORB, orbMat);
+  orb.position.y = 2.05;
+  group.add(plinth, shaft, crown, orb);
+  liftToGround(group, 0);
+  group.userData.beacon = { orb, mat: orbMat };
+  group.userData.anim = { kind: "tower" };
+  return group;
+}
+
+// Renderer calls this each frame with the entity (claimedBy: -1/0/1) and the
+// two player colors; the orb bobs and glows in the claimant's color.
+export function animateTower(g, e, t, playerColors) {
+  const b = g.userData.beacon;
+  if (!b) return;
+  b.orb.position.y = 2.05 + Math.sin(t * 1.8 + e.id) * 0.08;
+  const claimed = e.claimedBy >= 0;
+  const target = claimed ? playerColors[e.claimedBy] : 0xcfd6e4;
+  b.mat.color.setHex(typeof target === "number" ? target : target.getHex?.() ?? 0xcfd6e4);
+  const s = claimed ? 1 + Math.sin(t * 5) * 0.12 : 1;
+  b.orb.scale.setScalar(s);
+}
+
+// ---------------------------------------------------------------------------
 // Oil derrick — a small pumpjack-ish spout over a dark bubbling oil pool
 // (was: green vespene gas geyser). Same anim contract: userData.anim =
 // { kind:"geyser", throatMat, plume, plumeMat } — the renderer pulses

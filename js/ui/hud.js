@@ -1010,6 +1010,15 @@ export class Hud {
         if (f >= 1) { ctx.fillStyle = e.rich ? "#e0b23a" : "#0e9c8d"; ctx.fillRect(tx * S, ty * S, S, S); }
         continue;
       }
+      if (e.watch) {
+        // watchtower: small diamond in the claimant's color (white unclaimed)
+        ctx.fillStyle = e.claimedBy >= 0 ? PLAYER_COLORS[e.claimedBy] : "#e8ecf4";
+        const cx = tx * S + S / 2, cy = ty * S + S / 2, r = Math.max(3, S * 1.2);
+        ctx.beginPath();
+        ctx.moveTo(cx, cy - r); ctx.lineTo(cx + r, cy); ctx.lineTo(cx, cy + r); ctx.lineTo(cx - r, cy);
+        ctx.closePath(); ctx.fill();
+        continue;
+      }
       if (e.owner === this.pid || f === 2 || (e.building && (e.seenBy & (1 << this.pid)))) {
         ctx.fillStyle = PLAYER_COLORS[e.owner];
         const size = e.building ? S * e.size : Math.max(2, S);
