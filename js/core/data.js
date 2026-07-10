@@ -152,6 +152,10 @@ export const ABILITIES = {
     cd: 200, range: 6, channel: 15, rockets: 5, interval: 3, dmg: 8, radius: 192, // radius fp (0.75 tile)
   },
   // Ooze abilities
+  frenzy: {
+    name: "Frenzy", unit: "nip", requires: null, targeted: false,
+    cd: 120, dur: 40, spdNum: 12, spdDen: 10, cdNum: 65, cdDen: 100,
+  },
   burrow: {
     name: "Burrow", unit: "sluice", requires: "burrowtech", targeted: false, toggle: true,
     cd: 0, transform: 20, range: 7, dmg: 20, minRange: 25, // minRange in tenths (2.5 tiles)

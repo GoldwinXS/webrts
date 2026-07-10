@@ -145,6 +145,11 @@ export class Sim {
       maxShield: d.shield || 0,    // recharge cap (dome may overcharge past it)
       phased: 0,                   // phantom: 1 while phase-shifted
       domeUntil: 0,                // sentinel dome overcharge expiry tick
+      // unit-fun passives/buffs (all checksummed):
+      frenzyUntil: 0,              // nip: frenzy buff active while tick < this
+      slimedUntil: 0,              // corrosive spit slow on this unit
+      feast: 0,                    // wisp: +1 dmg per kill, capped
+      lockId: 0, lockN: 0,         // dart: consecutive-hit target lock ramp
     });
     // FUTURE-unit plating: marines/brutes built after plating completes get +12 maxHp.
     if ((type === "marine" || type === "brute") && (this.upgrades[pid] & UPGRADE_BITS.plating)) {
@@ -888,6 +893,7 @@ export class Sim {
         case "barrage":this.castBarrage(u, a, c.x, c.y); break;
         case "burrow": this.castBurrow(u, a); break;
         case "engulf": this.castEngulf(u, a, c.x, c.y); break;
+        case "frenzy": this.castFrenzy(u, a); break;
         // Tempest
         case "blink":
         case "slipstream": this.castBlink(u, a, c.x, c.y); break;
@@ -1002,6 +1008,14 @@ export class Sim {
     u.stimUntil = this.tick + a.dur;
     u.abilityCd = a.cd;
     this.events.push({ t: "ability", kind: "stim", id: u.id, x: u.x, y: u.y, owner: u.owner });
+  }
+
+  // Nip Frenzy: free stim — the swarm surges (+20% speed, +35% attack rate).
+  castFrenzy(u, a) {
+    if (u.abilityCd > 0) return;
+    u.frenzyUntil = this.tick + a.dur;
+    u.abilityCd = a.cd;
+    this.events.push({ t: "ability", kind: "frenzy", id: u.id, x: u.x, y: u.y, owner: u.owner });
   }
 
   castLeap(u, a, tx, ty) {
@@ -1612,6 +1626,14 @@ export class Sim {
     if (u.type === "phantom" && u.phased) {
       const a = ABILITIES.phase; s = (s * a.spdNum / a.spdDen) | 0;
     }
+    // Nip frenzy surge
+    if (u.type === "nip" && this.tick < u.frenzyUntil) {
+      const a = ABILITIES.frenzy; s = (s * a.spdNum / a.spdDen) | 0;
+    }
+    // Corrosive Spit slime: ground victims wade at 70% speed
+    if (!u.fly && this.tick < u.slimedUntil) {
+      s = (s * 7 / 10) | 0;
+    }
     return s;
   }
 
@@ -1624,6 +1646,9 @@ export class Sim {
     }
     if (u.type === "tank" && u.sieged) c = ABILITIES.siege.cooldown;
     if (u.type === "sluice" && u.burrowed) c = ABILITIES.burrow.cooldown;
+    if (u.type === "nip" && this.tick < u.frenzyUntil) {
+      const a = ABILITIES.frenzy; c = (c * a.cdNum / a.cdDen) | 0;
+    }
     // Ooze Adrenal: +20% attack speed for Nip, Spit, Maw
     if ((u.type === "nip" || u.type === "spit" || u.type === "maw") &&
         (this.upgrades[u.owner] & UPGRADE_BITS.adrenal)) {
@@ -1645,7 +1670,12 @@ export class Sim {
     const d = UNITS[u.type];
     if (u.type === "tank" && u.sieged && !target.fly) return ABILITIES.siege.dmg;
     if (u.type === "sluice" && u.burrowed && !target.fly) return ABILITIES.burrow.dmg;
-    return target.fly ? d.dmgAir : d.dmg;
+    let dmg = target.fly ? d.dmgAir : d.dmg;
+    // Wisp Essence Feast: +1 per kill, capped (see fireAt kill credit)
+    if (u.type === "wisp") dmg += u.feast | 0;
+    // Dart Target Lock: consecutive hits on the same target ramp +2 each
+    if (u.type === "wraith" && u.lockId === target.id) dmg += (u.lockN | 0) * 2;
+    return dmg;
   }
 
   // A sieged tank cannot fire at anything inside its minimum range (2.5 tiles).
@@ -1685,6 +1715,20 @@ export class Sim {
     u.cooldown = this.unitCooldown(u);
     const dmg = this.unitDmg(u, target);
     this.applyDamage(target, dmg);
+    // Corrosive Spit: victims of the Spit wade through slime for 3s
+    if (u.type === "spit" && target.unit && !target.fly) {
+      target.slimedUntil = this.tick + 30;
+    }
+    // Dart Target Lock: ramp on consecutive hits, reset on a new target
+    if (u.type === "wraith") {
+      if (u.lockId === target.id) u.lockN = Math.min(3, u.lockN + 1);
+      else { u.lockId = target.id; u.lockN = 0; }
+    }
+    // Wisp Essence Feast: killing blow feeds the wisp (max +5 dmg)
+    if (u.type === "wisp" && target.hp <= 0) {
+      u.feast = Math.min(5, (u.feast | 0) + 1);
+      this.events.push({ t: "ability", kind: "feast", id: u.id, owner: u.owner, x: u.x, y: u.y });
+    }
     this.events.push({
       t: "shot", fx: u.x, fy: u.y, tx: target.x, ty: target.y,
       owner: u.owner, ranged: this.unitRange(u) > FP, air: !!target.fly,
@@ -2059,6 +2103,8 @@ export class Sim {
         h.mix(e.channelUntil | 0); h.mix(e.noProg | 0);
         h.mix(e.lastDmg | 0);
         h.mix(e.shield | 0); h.mix(e.domeUntil | 0); h.mix(e.phased | 0);
+        h.mix(e.frenzyUntil | 0); h.mix(e.slimedUntil | 0);
+        h.mix(e.feast | 0); h.mix(e.lockId | 0); h.mix(e.lockN | 0);
         h.mix(e.order?.kind?.charCodeAt(0) || 0);
         h.mix(e.order?.targetId || 0);
       }
