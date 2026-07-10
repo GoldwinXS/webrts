@@ -617,13 +617,49 @@ function buildCandidate(seed, opts) {
   for (const g of centerGaps) setRock(g.x, g.y, 0); // keep center gaps open
 
   // ---- 7. geysers -----------------------------------------------------------
+  // Geysers are placed by DETERMINISTIC SEARCH rather than fixed perpendicular
+  // offsets + edge nudges (the old scheme wedged geysers into plateau corners,
+  // hard against the organic cliff, or into the map border margin). For each base
+  // we enumerate every 2x2 footprint that sits ON the base's flat top, score the
+  // candidates by (a) a distance band from the base center, (b) angular flank
+  // separation from the mineral-arc direction, and (c) clearance from ramps, and
+  // commit the best. Geyser A takes one flank; geyser B the best REMAINING spot on
+  // the opposite flank. A base with no valid interior spot (cramped organic roll)
+  // falls back to the old fixed-offset placement so an attempt never fails.
   const geysers = [];
   const geyserTiles = [];
-  const placeGeyser = (tx, ty, ix, iy) => {
+  // Commit a 2x2 geyser whose MIN corner is (tx,ty) (footprint tx..tx+1,ty..ty+1).
+  // Clears rock, levels the four tiles, and emits the paired fp/tile coords —
+  // preserving the partner() symmetry contract. Returns the corner (used as a
+  // cluster resource anchor) or false if the footprint is out of bounds.
+  const commitGeyser2x2 = (tx, ty, lvl) => {
+    if (!inb(tx, ty) || !inb(tx + 1, ty + 1)) return false;
+    for (let gy = ty; gy <= ty + 1; gy++)
+      for (let gx = tx; gx <= tx + 1; gx++) { setRock(gx, gy, 0); setHeight(gx, gy, lvl); }
+    geysers.push({ x: tileToFp(tx), y: tileToFp(ty) });
+    // The partner fp must be the MIN corner of the MIRRORED 2x2, not partner(tx,ty)
+    // (which under rotation maps to the mirrored footprint's MAX corner). Emitting
+    // the max corner would leave downstream consumers — and the harness collar/
+    // level checks — reading a 2x2 offset by one tile into the partner's terrain.
+    const [pax, pay] = partner(tx, ty);
+    const [pbx, pby] = partner(tx + 1, ty + 1);
+    const pmnx = Math.min(pax, pbx), pmny = Math.min(pay, pby);
+    geysers.push({ x: tileToFp(pmnx), y: tileToFp(pmny) });
+    for (let gy = ty; gy <= ty + 1; gy++)
+      for (let gx = tx; gx <= tx + 1; gx++) {
+        geyserTiles.push({ x: gx, y: gy });
+        const [ppx, ppy] = partner(gx, gy);
+        geyserTiles.push({ x: ppx, y: ppy });
+      }
+    return { x: tx, y: ty };
+  };
+  // Legacy fixed-offset placement (fallback only): nudge a 2x2 in from the border
+  // and stamp it. Kept so a base with no valid searched spot still gets a geyser.
+  // `center` (optional) is the base center; when given, the emitted min corner is
+  // pushed outward along (ix,iy) until it clears the validator's d2 >= 16 distance
+  // gate, so the fallback never lands a geyser on top of its own base center.
+  const placeGeyserRaw = (tx, ty, ix, iy, center) => {
     if (!inb(tx, ty) || !inb(tx + ix, ty + iy)) return false;
-    // Edge margin guard: keep 2x2 geyser at least 3 tiles from each border so
-    // geysers never appear in corners or hard against the map edge. Nudge the
-    // entire footprint inward if it violates the margin, then re-check inb.
     const GMARGIN = 3;
     const gMinX = Math.min(tx, tx + ix), gMaxX = Math.max(tx, tx + ix);
     const gMinY = Math.min(ty, ty + iy), gMaxY = Math.max(ty, ty + iy);
@@ -633,38 +669,167 @@ function buildCandidate(seed, opts) {
     if (gMinY < GMARGIN) gdy = GMARGIN - gMinY;
     if (gMaxY >= H - GMARGIN) gdy = -(gMaxY - (H - 1 - GMARGIN));
     tx += gdx; ty += gdy;
-    if (!inb(tx, ty) || !inb(tx + ix, ty + iy)) return false;
-    const lvl = height[idx(tx, ty)];
-    const xs = [tx, tx + ix], ys = [ty, ty + iy];
-    for (const gx of xs)
-      for (const gy of ys) {
-        setRock(gx, gy, 0);
-        setHeight(gx, gy, lvl);
+    let mnx = Math.min(tx, tx + ix), mny = Math.min(ty, ty + iy);
+    if (center) {
+      // push the min corner away from center until d2 >= 16 (bounded, keeps in-bounds/margin).
+      const sxn = Math.sign(mnx - center.x) || (ix ? Math.sign(ix) : 1);
+      const syn = Math.sign(mny - center.y) || (iy ? Math.sign(iy) : 1);
+      for (let g = 0; g < 5 && (mnx - center.x) ** 2 + (mny - center.y) ** 2 < 4 * 4; g++) {
+        if (mnx + sxn >= GMARGIN && mnx + 1 + sxn <= W - 1 - GMARGIN) mnx += sxn;
+        if (mny + syn >= GMARGIN && mny + 1 + syn <= H - 1 - GMARGIN) mny += syn;
       }
-    geysers.push({ x: tileToFp(tx), y: tileToFp(ty) });
-    const [px, py] = partner(tx, ty);
-    geysers.push({ x: tileToFp(px), y: tileToFp(py) });
-    for (const gx of xs) for (const gy of ys) {
-      geyserTiles.push({ x: gx, y: gy });
-      const [ppx, ppy] = partner(gx, gy);
-      geyserTiles.push({ x: ppx, y: ppy });
     }
-    return { x: tx, y: ty };
+    if (!inb(mnx, mny) || !inb(mnx + 1, mny + 1)) return false;
+    return commitGeyser2x2(mnx, mny, height[idx(mnx, mny)]);
   };
 
-  const perpU = { x: -c0.dy, y: c0.dx };
-  const gA = { x: start0.x + perpU.x * 4, y: start0.y + perpU.y * 4 };
-  const gB = { x: start0.x - perpU.x * 4, y: start0.y - perpU.y * 4 };
-  const mainGeyserA = placeGeyser(gA.x, gA.y, -perpU.x || c0.dx, -perpU.y || c0.dy) || null;
-  const mainGeyserB = placeGeyser(gB.x, gB.y, perpU.x || c0.dx, perpU.y || c0.dy) || null;
+  // Is a 2x2 with min corner (tx,ty) a CLEAN geyser pad at `lvl`? Requires all four
+  // tiles + a 1-tile Chebyshev collar to be in-bounds, >= 3 tiles from every
+  // border, all four pad tiles flat at `lvl` and passable, and NO rock/cliff tile
+  // anywhere in the collar (so the pad never hugs a cliff). Resource tiles already
+  // committed are treated as blocking so geysers/minerals don't overlap.
+  const usedGeyser = (x, y) => { for (const g of geyserTiles) if (g.x === x && g.y === y) return true; return false; };
+  const cleanGeyserPad = (tx, ty, lvl) => {
+    if (tx < 3 || ty < 3 || tx + 1 > W - 4 || ty + 1 > H - 4) return false;
+    for (let cy = ty - 1; cy <= ty + 2; cy++)
+      for (let cx = tx - 1; cx <= tx + 2; cx++) {
+        if (!inb(cx, cy)) return false;
+        if (rock[idx(cx, cy)]) return false;              // no cliff/barrier in the collar
+      }
+    for (let gy = ty; gy <= ty + 1; gy++)
+      for (let gx = tx; gx <= tx + 1; gx++) {
+        const i = idx(gx, gy);
+        if (height[i] !== lvl || rampTiles[i]) return false;
+        if (usedGeyser(gx, gy)) return false;
+      }
+    return true;
+  };
 
-  const ng = { x: clampTile(nat0.x - c0.dx * 4, W), y: clampTile(nat0.y - c0.dy * 4, H) };
-  for (let dy = -1; dy <= 2; dy++)
-    for (let dx = -1; dx <= 2; dx++) {
-      const x = ng.x + dx, y = ng.y + dy;
-      if (inb(x, y)) { setRock(x, y, 0); setHeight(x, y, natLvl); }
+  // Deterministically search the flat top of a base for the best geyser corner.
+  //   center   : {x,y} base center     lvl : the base's elevation level
+  //   blob     : organic silhouette params (interior test); null => square inset
+  //   R        : base half-extent (inset reference)
+  //   arcDir   : {x,y} mineral-arc direction (geysers flank ~perpendicular to it)
+  //   flankSign: +1 / -1 — bias toward one side of the arc axis so A and B split.
+  //   forbid   : optional (cornerX,cornerY)=>bool to exclude an already-taken pad.
+  // Scoring rewards a mid distance band (~3.5..5.5 from center), a flank angle
+  // ~70..120deg off the arc direction on the requested side, and ramp clearance.
+  // Returns {x,y} min corner or null. Enumerated in a fixed (dy,dx) order so ties
+  // resolve identically on both peers.
+  const perpU = { x: -c0.dy, y: c0.dx };
+  const searchGeyserCorner = (center, lvl, blob, R, arcDir, flankSign, band, minCornerD2, forbid) => {
+    const ext = blob ? blobExtent(blob) : R;
+    const [bandLo, bandHi, bandPeak] = band;
+    const aLen = Math.hypot(arcDir.x, arcDir.y) || 1;
+    const aux = arcDir.x / aLen, auy = arcDir.y / aLen;   // unit arc dir
+    let best = null, bestScore = -Infinity;
+    for (let dy = -ext; dy <= ext; dy++)
+      for (let dx = -ext; dx <= ext; dx++) {
+        // interior-with-inset test on the 2x2's far corner too, so the whole pad
+        // sits >= 2 tiles inside the blob edge (never half off the organic cliff).
+        if (blob) {
+          if (!inBlob(blob, dx, dy) || !inBlob(blob, dx + 1, dy + 1)) continue;
+          if (onBlobEdge(blob, dx, dy) || onBlobEdge(blob, dx + 1, dy) ||
+              onBlobEdge(blob, dx, dy + 1) || onBlobEdge(blob, dx + 1, dy + 1)) continue;
+          // one extra ring of inset: require the pad's own neighbours to be interior.
+          if (!inBlob(blob, dx - 1, dy - 1) || !inBlob(blob, dx + 2, dy + 2)) continue;
+        } else {
+          if (Math.max(Math.abs(dx), Math.abs(dy)) > R) continue;
+        }
+        const tx = center.x + dx, ty = center.y + dy;
+        if (!cleanGeyserPad(tx, ty, lvl)) continue;
+        if (forbid && forbid(tx, ty)) continue;
+        // validator invariant (line ~1914): the geyser's emitted fp CORNER tile
+        // (the 2x2 MIN corner = (dx,dy)) must be >= 4 tiles (d2 >= 16) from EVERY
+        // start. For a MAIN, pass minCornerD2=16 to guard it (the mirrored corner vs
+        // the partner start is symmetric, so the same bound covers both). NATURALS
+        // sit far from every start, so they pass minCornerD2=0 and can nestle in the
+        // flat core (which keeps their small footprint clear of the cliff ring).
+        if (dx * dx + dy * dy < minCornerD2) continue;    // corner too close to base center
+        // pad center offset from base center (use the 2x2 mid-point)
+        const mx = dx + 0.5, my = dy + 0.5;
+        const dist = Math.hypot(mx, my);
+        if (dist < bandLo || dist > bandHi) continue;     // stay in a sensible band
+        // ---- score ----
+        // (a) distance band: peak at bandPeak, gentle falloff.
+        const sDist = -Math.abs(dist - bandPeak);
+        // (b) flank angle off the arc direction. dot with arc unit gives cos; we
+        // want ~90deg (cos ~0), i.e. small |cos|. Also bias to the requested side
+        // via the perpendicular component's sign.
+        const ux = mx / dist, uy = my / dist;
+        const cosArc = ux * aux + uy * auy;               // -1..1
+        const sAngle = -Math.abs(cosArc) * 3;             // reward perpendicular
+        // side: perpendicular of arcDir is (-auy,aux); project pad dir onto it.
+        const sideProj = ux * (-auy) + uy * (aux);
+        const sSide = (Math.sign(sideProj) === Math.sign(flankSign) ? 1.5 : -1.5);
+        // (c) ramp clearance: farther from any ramp tile is better (cap the bonus).
+        let rampMin = 99;
+        for (let ry = -1; ry <= 2 && rampMin > 0; ry++)
+          for (let rx = -1; rx <= 2; rx++) {
+            const x = tx + rx, y = ty + ry;
+            if (inb(x, y) && rampTiles[idx(x, y)]) { rampMin = 0; break; }
+          }
+        const sRamp = rampMin > 0 ? 0.5 : -0.5;
+        const score = sDist + sAngle + sSide + sRamp;
+        // deterministic tie-break: fixed iteration order already gives a stable
+        // first-best; keep strict > so earlier (top-left) wins ties.
+        if (score > bestScore) { bestScore = score; best = { x: tx, y: ty }; }
+      }
+    return best;
+  };
+
+  // Main geysers: search both flanks. Arc direction (bx,by) is computed just below
+  // for minerals as (-c0.dx,-c0.dy); reuse that here so geysers flank the arc.
+  const arcDirMain = { x: -c0.dx, y: -c0.dy };
+  const mainBand = [3, 6.5, 4.5];
+  let mainGeyserA = null, mainGeyserB = null;
+  {
+    const a = searchGeyserCorner(start0, mainHeight, mainBlob, plateauR, arcDirMain, +1, mainBand, 16, null);
+    if (a) mainGeyserA = commitGeyser2x2(a.x, a.y, mainHeight);
+    const takenA = mainGeyserA;
+    const b = searchGeyserCorner(start0, mainHeight, mainBlob, plateauR, arcDirMain, -1, mainBand, 16,
+      takenA ? (x, y) => Math.abs(x - takenA.x) <= 3 && Math.abs(y - takenA.y) <= 3 : null);
+    if (b) mainGeyserB = commitGeyser2x2(b.x, b.y, mainHeight);
+    // Fallback for any flank the search couldn't seat (rare cramped roll): old
+    // fixed-offset placement so the base still gets its geyser pair.
+    if (!mainGeyserA) {
+      const gA = { x: start0.x + perpU.x * 4, y: start0.y + perpU.y * 4 };
+      mainGeyserA = placeGeyserRaw(gA.x, gA.y, -perpU.x || c0.dx, -perpU.y || c0.dy, start0) || null;
     }
-  const natGeyser = placeGeyser(ng.x, ng.y, c0.dx || 1, c0.dy || 1) || null;
+    if (!mainGeyserB) {
+      const gB = { x: start0.x - perpU.x * 4, y: start0.y - perpU.y * 4 };
+      mainGeyserB = placeGeyserRaw(gB.x, gB.y, perpU.x || c0.dx, perpU.y || c0.dy, start0) || null;
+    }
+  }
+
+  // Natural geyser: search the natural's flat top so the pad sits ON it and never
+  // carves a notch out of its rounded ring. The arc direction points outward (away
+  // from the main) so the geyser flanks the natural's mineral arc; a flank-biased
+  // band (peak 3.5) seats it out of the CP's way, matching where the old fixed
+  // offset put it so downstream CP/mineral placement is undisturbed. Falls back to
+  // the old force-clear placement only if the search finds no clean spot (never
+  // observed across the 240-config matrix, but kept so an attempt can't fail).
+  let natGeyser = null;
+  {
+    const arcDirNat = { x: c0.dx, y: c0.dy };             // nat minerals arc away from main
+    // Square scan of the natural's flat top: the collar-rock guard in cleanGeyserPad
+    // already keeps the pad off the natural's (organic) ring/barrier, so a plain
+    // window scan finds the interior spot without a blob interior test that a small
+    // r=4 footprint can't satisfy. Wide band + no min-corner lets it nestle centrally.
+    const natBand = [2.5, 4.5, 3.5];
+    const g = searchGeyserCorner(nat0, natLvl, null, natR, arcDirNat, +1, natBand, 0, null);
+    if (g) natGeyser = commitGeyser2x2(g.x, g.y, natLvl);
+    if (!natGeyser) {
+      // fallback: old behaviour (force-clear a small pad just inside the natural).
+      const ng = { x: clampTile(nat0.x - c0.dx * 4, W), y: clampTile(nat0.y - c0.dy * 4, H) };
+      for (let dy = -1; dy <= 2; dy++)
+        for (let dx = -1; dx <= 2; dx++) {
+          const x = ng.x + dx, y = ng.y + dy;
+          if (inb(x, y)) { setRock(x, y, 0); setHeight(x, y, natLvl); }
+        }
+      natGeyser = placeGeyserRaw(ng.x, ng.y, c0.dx || 1, c0.dy || 1, nat0) || null;
+    }
+  }
 
   // ---- 8. minerals ----------------------------------------------------------
   const minerals = [];

@@ -132,6 +132,42 @@ function barrierInInterior(map) {
   return null;
 }
 
+// Geyser placement quality (the fix under test): every geyser 2x2 must sit on
+// flat ground at the level of its OWNING base (nearest main/natural center), with
+// NO rock tile inside a 1-tile Chebyshev collar around the footprint (i.e. not
+// hugging a cliff), and at least 3 tiles from the map border. The fp coord is the
+// 2x2's MIN corner, so the footprint is (tx..tx+1, ty..ty+1).
+function geyserPlacementError(map) {
+  const { rock, height, geysers, starts, naturals } = map;
+  const bases = [...starts, ...(naturals || [])];
+  for (const g of geysers) {
+    const tx = (g.x / 256) | 0, ty = (g.y / 256) | 0;
+    // border margin
+    if (tx < 3 || ty < 3 || tx + 1 > W - 4 || ty + 1 > H - 4)
+      return `border @${tx},${ty}`;
+    // owning base = nearest center; its level is the expected pad level
+    let best = bases[0], bd = Infinity;
+    for (const b of bases) { const d = (b.x - tx) ** 2 + (b.y - ty) ** 2; if (d < bd) { bd = d; best = b; } }
+    const baseLvl = height[idx(best.x, best.y)];
+    // 2x2 flat at base level, passable
+    for (let dy = 0; dy <= 1; dy++)
+      for (let dx = 0; dx <= 1; dx++) {
+        const x = tx + dx, y = ty + dy;
+        if (!inb(x, y)) return `oob @${x},${y}`;
+        if (rock[idx(x, y)]) return `pad-rock @${x},${y}`;
+        if (height[idx(x, y)] !== baseLvl) return `pad-level ${height[idx(x, y)]}!=${baseLvl} @${x},${y}`;
+      }
+    // 1-tile Chebyshev collar clear of rock/cliff
+    for (let dy = -1; dy <= 2; dy++)
+      for (let dx = -1; dx <= 2; dx++) {
+        const x = tx + dx, y = ty + dy;
+        if (!inb(x, y)) return `collar-oob @${x},${y}`;
+        if (rock[idx(x, y)]) return `cliff-hug @${x},${y}`;
+      }
+  }
+  return null;
+}
+
 const isFallback = (m) => m.vProfile === undefined && (!m.ramps || m.ramps.length === 0);
 
 // ---- run the matrix: 40 seeds x {cross,close} x {0,1,2} extra expansions ----
@@ -190,6 +226,9 @@ for (const seed of seeds)
 
       const bi = barrierInInterior(map);
       if (bi) fails.push(`BARRIER-INTERIOR seed${seed} ${spawns} exp${expansions} @${bi}`);
+
+      const ge = geyserPlacementError(map);
+      if (ge) fails.push(`GEYSER-PLACEMENT seed${seed} ${spawns} exp${expansions} ${ge}`);
 
       // enforced route chokes: corridor open and 2..6 wide at every pinch
       if (map.chokes?.length) {
