@@ -25,7 +25,14 @@ check("ion spawns with shield", ion.shield === UNITS.ion.shield);
 
 // -- power field placement ---------------------------------------------------
 const cx = core.tx, cy = core.ty;
-check("forge placeable INSIDE power field", a.canPlace("forge", cx + 4, cy, 0) === true);
+// search a ring near the core rather than hardcoding an offset — organic
+// terrain means any fixed spot can legitimately be rock/cliff on some seed
+let powered = false;
+for (let r = 2; r <= 5 && !powered; r++)
+  for (let dy = -r; dy <= r && !powered; dy++)
+    for (let dx = -r; dx <= r && !powered; dx++)
+      if (a.canPlace("forge", cx + dx, cy + dy, 0)) powered = true;
+check("forge placeable INSIDE power field", powered);
 // find an open flat spot far from the core so "in the dark" isn't just rock
 let darkSpot = null;
 outer: for (let y = 2; y < a.map.h - 4; y++)

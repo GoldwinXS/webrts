@@ -232,6 +232,117 @@ function buildCandidate(seed, opts) {
     decos.push({ x: px, y: py, kind });
   };
 
+  // ---- ORGANIC BLOB SILHOUETTE (the shape fix) ------------------------------
+  // A landmass is defined not by a Chebyshev (square) window but by a radius that
+  // varies with angle: r(theta) = R * (1 + sum_k a_k * sin(k*theta + p_k)). A
+  // tile at offset (dx,dy) is INSIDE the blob when its Euclidean distance <=
+  // r(theta). Amplitudes are small (~10-16%) and biased OUTWARD (a positive DC
+  // term is folded into R via `grow`) so interior build area is never bitten in
+  // below the square inscribed radius — bulges add tiles, they don't remove the
+  // core. Deterministic: params derive from integer coords (no rng advance) and
+  // Math.sin runs identically on both peers (same precedent as arcOffsets).
+  //
+  // Radii are precomputed into an ANGLE LUT (BLOB_BUCKETS entries) so per-tile
+  // cost is one atan2 bucket lookup, and the silhouette is a stable function of
+  // the params — this is what lets the plateau top, its cliff ring re-stamp (8c)
+  // and the step-6 re-flatten all trace the IDENTICAL organic edge.
+  const BLOB_BUCKETS = 96;
+  // Derive blob params from a coordinate-folded seed so symmetric partners share
+  // a silhouette and no rng stream is consumed (stable across the 24 retries per
+  // the caller's needs — callers that want variety pass a salt).
+  const blobParams = (cx, cy, R, salt) => {
+    const s = (((cx + 500) * 374761393 + (cy + 500) * 668265263 + R * 2654435761 + (salt | 0) * 40503) | 0) >>> 0;
+    // three harmonics; frequencies 2..5 give lobed-but-not-spiky outlines.
+    const f1 = 2 + (s % 2);                 // 2..3
+    const f2 = 3 + ((s >>> 3) % 2);         // 3..4
+    const f3 = 4 + ((s >>> 6) % 2);         // 4..5
+    // phases spread over 2*pi in 1/64 turns.
+    const TWO_PI = Math.PI * 2;
+    const p1 = ((s >>> 8) & 63) / 64 * TWO_PI;
+    const p2 = ((s >>> 14) & 63) / 64 * TWO_PI;
+    const p3 = ((s >>> 20) & 63) / 64 * TWO_PI;
+    // amplitudes as fractions of R: enough to visibly de-square the outline, sum
+    // kept < ~0.42 so it stays a rounded blob (never self-intersecting / pinched).
+    const a1 = 0.14 + ((s >>> 4) & 7) / 100;   // 0.14..0.21
+    const a2 = 0.09 + ((s >>> 11) & 7) / 100;  // 0.09..0.16
+    const a3 = 0.05 + ((s >>> 17) & 3) / 100;  // 0.05..0.08
+    // Build the per-bucket radius LUT (in tenths of a tile, integer). We add the
+    // full amplitude sum as an OUTWARD DC bias so the MINIMUM radius over all
+    // angles stays >= R (bulges only) — interior tiles at Chebyshev<=R-ish are
+    // never excluded, protecting the free-tile counts.
+    const bias = a1 + a2 + a3;
+    const lut = new Int32Array(BLOB_BUCKETS);
+    let maxR10 = 0;
+    for (let b = 0; b < BLOB_BUCKETS; b++) {
+      const th = b / BLOB_BUCKETS * TWO_PI;
+      const m = 1 + bias
+        + a1 * Math.sin(f1 * th + p1)
+        + a2 * Math.sin(f2 * th + p2)
+        + a3 * Math.sin(f3 * th + p3);
+      const r10 = Math.round(R * m * 10);
+      lut[b] = r10;
+      if (r10 > maxR10) maxR10 = r10;
+    }
+    return { lut, maxR10, R };
+  };
+  // Integer angle bucket for offset (dx,dy). atan2 is deterministic across peers.
+  const blobBucket = (dx, dy) => {
+    let a = Math.atan2(dy, dx);              // -pi..pi
+    if (a < 0) a += Math.PI * 2;
+    let b = (a / (Math.PI * 2) * BLOB_BUCKETS) | 0;
+    if (b >= BLOB_BUCKETS) b = BLOB_BUCKETS - 1;
+    return b;
+  };
+  // Is offset (dx,dy) INSIDE the blob? Compares squared distance (x100 to match
+  // the tenths-of-a-tile LUT) against the angle's radius. Center tile is always in.
+  const inBlob = (params, dx, dy) => {
+    if (dx === 0 && dy === 0) return true;
+    const r10 = params.lut[blobBucket(dx, dy)];
+    return (dx * dx + dy * dy) * 100 <= r10 * r10;
+  };
+  // Is offset (dx,dy) ON the blob's outer edge ring? (inside, but at least one
+  // 4-neighbour is outside.) Used to stamp cliff faces / barrier walls exactly on
+  // the organic silhouette instead of a square ring.
+  const onBlobEdge = (params, dx, dy) => {
+    if (!inBlob(params, dx, dy)) return false;
+    return !inBlob(params, dx + 1, dy) || !inBlob(params, dx - 1, dy) ||
+           !inBlob(params, dx, dy + 1) || !inBlob(params, dx, dy - 1);
+  };
+  // Max integer offset we must scan to cover a blob (ceil of max radius).
+  const blobExtent = (params) => Math.ceil(params.maxR10 / 10) + 1;
+  // Flatten a ROUNDED pocket to lowland (height 0, no ramp): a blob-shaped region
+  // instead of a hard square, so expansion pads don't read as stamped boxes from
+  // the air. Purely cosmetic (these pockets sit in open lowland), so no cliff/
+  // level-skip risk. The core `guaranteeR` Chebyshev square is always flattened
+  // so the CP footprint is never bitten into by the blob's inward curve.
+  const flattenBlobPocket = (cx, cy, R, guaranteeR, salt) => {
+    const blob = blobParams(cx, cy, R, salt | 0);
+    const ext = blobExtent(blob);
+    for (let dy = -ext; dy <= ext; dy++)
+      for (let dx = -ext; dx <= ext; dx++) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) <= guaranteeR || inBlob(blob, dx, dy)) {
+          setHeight(cx + dx, cy + dy, 0);
+          setRamp(cx + dx, cy + dy, 0);
+        }
+      }
+  };
+  // Flatten the blob radius to exactly R (its square inscribed radius) in the
+  // angular sector facing (dirx,diry), so a straight ramp cut on that side meets
+  // the wall at exactly R+1. HALF is the half-angle of the flattened sector.
+  const flattenBlobSector = (params, dirx, diry, R) => {
+    const cb = blobBucket(dirx, diry);
+    const half = Math.round(BLOB_BUCKETS * 0.14);   // ~ +-50 degrees
+    const flat = R * 10;
+    for (let d = -half; d <= half; d++) {
+      let b = (cb + d) % BLOB_BUCKETS; if (b < 0) b += BLOB_BUCKETS;
+      if (params.lut[b] > flat) params.lut[b] = flat;
+    }
+    // recompute maxR10 (only lowered values, so it can only shrink or hold).
+    let mx = 0;
+    for (let b = 0; b < BLOB_BUCKETS; b++) if (params.lut[b] > mx) mx = params.lut[b];
+    params.maxR10 = mx;
+  };
+
   // ---- base placement style (variation axis #1) -----------------------------
   // Left at 6..11: with the enlarged plateauR=7, only the outermost cliff-ring
   // row can clip off a low-inset edge and the step-6 re-flatten keeps the top
@@ -306,9 +417,20 @@ function buildCandidate(seed, opts) {
   // (225 tiles) leaves ~115+ genuinely-free build tiles after the mineral line,
   // geysers and ramp are counted out (see validate()).
   const plateauR = 7;                               // plateau half-extent (15x15 top)
-  raisePlateau(start0, plateauR, mainHeight);
-
   const c0 = toCenter(start0);
+  // Organic silhouette params for the MAIN plateau, computed ONCE and reused by
+  // raisePlateau, the step-6 re-flatten, and the 8c cliff-ring re-assert so all
+  // three trace the SAME rounded edge (the old code re-stamped a perfect square
+  // ring in 8c, erasing the organic top — this is the reconciliation).
+  //
+  // The blob is FLATTENED (bulge suppressed) in the angular sector facing the
+  // ramp direction c0, so the cliff wall on the ramp side sits at exactly r+1 and
+  // the straight stepped ramp meets the plateau edge cleanly (no bulge tile left
+  // stranded between the top and the ramp lip).
+  const mainBlob = blobParams(start0.x, start0.y, plateauR, 0x1a1);
+  flattenBlobSector(mainBlob, c0.dx, c0.dy, plateauR);
+  raisePlateau(start0, plateauR, mainHeight, mainBlob);
+
   const laneCount = 1 + (rng() % 3);                // 1, 2 or 3 routes
 
   // Main ramp: 3-wide, STEPPED from the plateau top (mainHeight) down to lowland
@@ -351,9 +473,9 @@ function buildCandidate(seed, opts) {
       if (placed >= extraPairs) break;
       const ex = findExpansionPocket(rc, starts, nat0, expansions, plateauR, natR, partner, rng);
       if (!ex) continue;
-      // extra expansions sit on lowland (flatten a pocket) so their CP is easy.
-      for (let dy = -5; dy <= 5; dy++)
-        for (let dx = -5; dx <= 5; dx++) { setHeight(ex.x + dx, ex.y + dy, 0); setRamp(ex.x + dx, ex.y + dy, 0); }
+      // extra expansions sit on lowland (flatten a ROUNDED pocket) so their CP is
+      // easy AND the pad doesn't read as a stamped square from the air.
+      flattenBlobPocket(ex.x, ex.y, 5, 3, (ex.x * 131 + ex.y * 977) | 0);
       clearArea3(ex, 3);
       expansions.push(ex);
       placed++;
@@ -368,8 +490,7 @@ function buildCandidate(seed, opts) {
         x: clampTile(start0.x + c0.dx * reach + perp.x, W),
         y: clampTile(start0.y + c0.dy * reach + perp.y, H),
       };
-      for (let dy = -5; dy <= 5; dy++)
-        for (let dx = -5; dx <= 5; dx++) { setHeight(ex.x + dx, ex.y + dy, 0); setRamp(ex.x + dx, ex.y + dy, 0); }
+      flattenBlobPocket(ex.x, ex.y, 5, 3, (ex.x * 131 + ex.y * 977) | 0);
       clearArea3(ex, 3);
       expansions.push(ex);
     }
@@ -470,21 +591,25 @@ function buildCandidate(seed, opts) {
   laneClear(reserved);
 
   // Re-assert build areas (later steps may have intruded).
-  // Re-flatten the ENTIRE plateau top (full radius plateauR) to mainHeight (not
+  // Re-flatten the ORGANIC plateau top (the mainBlob interior) to mainHeight (not
   // just clear rock): a neighbouring terrace/mesa/center-skirt can otherwise
-  // leave a wedge of the 15x15 top at the wrong elevation, which the radius-7
-  // validator counts OUT and can drop the guaranteed build area below 115.
-  // Restamping the FULL top keeps it uniform and level with the start, and — by
-  // covering the whole ±plateauR window — avoids introducing a passable
-  // level-step at the top's own edge. rampTiles inside the top are cleared (the
-  // ramp proper is re-cut just below via rampMain); the cliff ring at ±(plateauR+1)
-  // is re-stamped in step 8c.
-  for (let dy = -plateauR; dy <= plateauR; dy++)
-    for (let dx = -plateauR; dx <= plateauR; dx++) {
-      setHeight(start0.x + dx, start0.y + dy, mainHeight);
-      setRamp(start0.x + dx, start0.y + dy, 0);
-    }
-  clearArea3(start0, plateauR - 1);
+  // leave a wedge of the top at the wrong elevation, which the radius-7 validator
+  // counts OUT and can drop the guaranteed build area below 115. Restamping the
+  // FULL blob interior keeps it uniform and level with the start; rampTiles inside
+  // the top are cleared (the ramp proper is re-cut just below via rampMain); the
+  // cliff wall along the organic silhouette is re-stamped in step 8c via
+  // stampBlobWall. Using the blob (not a square window) keeps the rounded outline
+  // — the old square re-stamp is exactly what made mains read as boxes.
+  {
+    const ext = blobExtent(mainBlob);
+    for (let dy = -ext; dy <= ext; dy++)
+      for (let dx = -ext; dx <= ext; dx++)
+        if (inBlob(mainBlob, dx, dy)) {
+          setHeight(start0.x + dx, start0.y + dy, mainHeight);
+          setRamp(start0.x + dx, start0.y + dy, 0);
+          setRock(start0.x + dx, start0.y + dy, 0);
+        }
+  }
   ringExpansion(nat0, natR, c0, natWidth, natLvl);
   if (natLvl > 0) carveStepRamp(nat0, natR, c0, natWidth, natLvl, 0);
   for (const ex of expansions) if (ex !== nat0) clearArea3(ex, 3);
@@ -593,21 +718,22 @@ function buildCandidate(seed, opts) {
     if (ei === 0 && natGeyser) exCluster.res.push(natGeyser);
   }
 
-  // ---- 8c. re-assert main plateau cliff ring ------------------------------
+  // ---- 8c. re-assert main plateau cliff wall (ORGANIC) --------------------
   // Resource clearing (geysers/minerals) may have punched holes in the cliff
-  // ring, creating alternate entrances. Re-stamp the ring to seal the base
-  // perimeter, preserving only ramp tiles and resource tiles.
-  for (let y = start0.y - plateauR - 1; y <= start0.y + plateauR + 1; y++)
-    for (let x = start0.x - plateauR - 1; x <= start0.x + plateauR + 1; x++) {
-      const edge = (x < start0.x - plateauR || x > start0.x + plateauR ||
-                    y < start0.y - plateauR || y > start0.y + plateauR);
-      if (!edge || !inb(x, y)) continue;
-      if (rampTiles[idx(x, y)]) continue;             // keep ramp opening
-      const hasRes = geyserTiles.some(gt => gt.x === x && gt.y === y) ||
-                     minerals.some(m => ((m.x / 256) | 0) === x && ((m.y / 256) | 0) === y);
-      if (hasRes) continue;
-      setRock(x, y, 1); setHeight(x, y, mainHeight);
-    }
+  // wall, creating alternate entrances. Re-stamp the wall to seal the base
+  // perimeter — but along the SAME organic silhouette raisePlateau built (via the
+  // shared mainBlob), preserving only ramp tiles and resource tiles. This is the
+  // reconciliation: the re-assert now follows the rounded edge instead of a
+  // perfect square window, so the organic outline survives.
+  {
+    const keepMain = (x, y) => {
+      if (rampTiles[idx(x, y)]) return true;          // keep ramp opening
+      if (geyserTiles.some(gt => gt.x === x && gt.y === y)) return true;
+      if (minerals.some(m => ((m.x / 256) | 0) === x && ((m.y / 256) | 0) === y)) return true;
+      return false;
+    };
+    stampBlobWall(start0, mainBlob, mainHeight, keepMain);
+  }
 
   // ---- 8d. GOLD expansion pair (contested rich minerals mid-map) -------------
   // One symmetric pair of "gold" clusters: 4 rich patches in an open mid-map
@@ -677,16 +803,18 @@ function buildCandidate(seed, opts) {
       const perpM = { x: -c0.dy, y: c0.dx };
       const mx = clampTile(start0.x + c0.dx * along + perpM.x * side * (7 + (rng() % 3)), W);
       const my = clampTile(start0.y + c0.dy * along + perpM.y * side * (7 + (rng() % 3)), H);
-      // Keep the mesa's FULL footprint (its top radius mr + 1 cliff ring) clear of
-      // the main plateau's radius-7 validation window and the natural. Guard on
-      // EITHER axis (box overlap), and account for the mesa radius — a
-      // clampTile() near a map edge can otherwise pull a mesa's skirt back onto
-      // the enlarged plateau top and shave the guaranteed build area below 115.
-      const mesaReach = mr + 1;
-      if (Math.abs(mx - start0.x) <= plateauR + 1 + mesaReach &&
-          Math.abs(my - start0.y) <= plateauR + 1 + mesaReach) continue;
-      if (Math.abs(mx - nat0.x) <= natR + 1 + mesaReach &&
-          Math.abs(my - nat0.y) <= natR + 1 + mesaReach) continue;
+      // Keep the mesa's FULL ORGANIC footprint clear of the main plateau and the
+      // natural. Both those landmasses AND the mesa are now rounded blobs that
+      // bulge beyond their base radius, so the guard uses each blob's true extent
+      // (blobExtent) plus slack — a clampTile() near a map edge could otherwise
+      // pull a mesa's skirt onto the plateau top and shave build area below 115,
+      // or abut a wall and create a level skip.
+      const mesaReach = blobExtent(blobParams(mx, my, mr, 0x3e5 + 3)) + 1;
+      const mainReach = blobExtent(mainBlob) + 1;
+      if (Math.abs(mx - start0.x) <= mainReach + mesaReach &&
+          Math.abs(my - start0.y) <= mainReach + mesaReach) continue;
+      if (Math.abs(mx - nat0.x) <= natR + 3 + mesaReach &&
+          Math.abs(my - nat0.y) <= natR + 3 + mesaReach) continue;
       raiseMesa({ x: mx, y: my }, mr, 3, minerals.concat(golds), geyserTiles); // tall level-3 mesa
     }
   }
@@ -849,6 +977,30 @@ function buildCandidate(seed, opts) {
   const [natPx, natPy] = partner(nat0.x, nat0.y);
   const naturals = [{ x: nat0.x, y: nat0.y }, { x: natPx, y: natPy }];
 
+  // ---- global freckle cleanup ----------------------------------------------
+  // Any downstream eraser (lane carve, resource clear, choke stamp, ramp) can
+  // punch a rounded barrier wall into a 4-DISCONNECTED remnant — a single barrier
+  // tile with no barrier 4-neighbour reads as a FRECKLE and fails validation.
+  // Sweep once in fixed order and OPEN every such isolated barrier via the paired
+  // setter (deterministic; symmetric). Repeated until stable (a de-freckle can
+  // expose a new one on a thin diagonal tail) with a small bounded pass count.
+  // Cliff faces (barrierKind 0) are untouched — only tagged barriers can freckle.
+  for (let pass = 0; pass < 3; pass++) {
+    let changed = false;
+    for (let y = 0; y < H; y++)
+      for (let x = 0; x < W; x++) {
+        const i = idx(x, y);
+        if (!barrierKind[i]) continue;
+        let bn = 0;
+        if (x + 1 < W && barrierKind[idx(x + 1, y)]) bn++;
+        if (x - 1 >= 0 && barrierKind[idx(x - 1, y)]) bn++;
+        if (y + 1 < H && barrierKind[idx(x, y + 1)]) bn++;
+        if (y - 1 >= 0 && barrierKind[idx(x, y - 1)]) bn++;
+        if (bn === 0) { setRock(x, y, 0); changed = true; }   // clears rock+barrierKind+partner
+      }
+    if (!changed) break;
+  }
+
   // Final gold sweep: if any later feature (mesa, barrier blob, choke wall)
   // sealed the gold pockets off after placement, drop the golds entirely —
   // a missing bonus beats an unreachable one.
@@ -873,59 +1025,48 @@ function buildCandidate(seed, opts) {
 
   // ---- local terrain-shaping helpers (close over rock/height writers) ------
 
-  function raisePlateau(s, r, lvl) {
-    for (let y = s.y - r; y <= s.y + r; y++)
-      for (let x = s.x - r; x <= s.x + r; x++) setHeight(x, y, lvl);
-    for (let y = s.y - r - 1; y <= s.y + r + 1; y++)
-      for (let x = s.x - r - 1; x <= s.x + r + 1; x++) {
-        const edge = (x < s.x - r || x > s.x + r || y < s.y - r || y > s.y + r);
-        if (edge && inb(x, y)) { setHeight(x, y, lvl); setRock(x, y, 1); }
-      }
-    // ---- organic edge jitter (medium strength) ----
-    // Parameter-derived seed so no rng advance; fold coords for symmetry.
-    const jSeed = ((s.x * 374761393 + s.y * 668265263 + r * 295075153 + lvl * 1276523) | 0) >>> 0;
-    for (let y = s.y - r - 1; y <= s.y + r + 1; y++)
-      for (let x = s.x - r - 1; x <= s.x + r + 1; x++) {
-        const dx = x - s.x, dy = y - s.y;
-        const dist = Math.max(Math.abs(dx), Math.abs(dy));
-        if (dist !== r + 1) continue;          // ring tiles only
+  // Raise the main plateau as an ORGANIC ROUNDED landmass. The top is the blob
+  // interior (setHeight lvl, passable); the cliff wall is the tiles ON the blob's
+  // outer edge (setRock 1). Because the silhouette comes from `blob` (a radius-
+  // modulated outline biased OUTWARD from the r-square), every interior tile of
+  // the old r-square top is still on the top — free build area is preserved — but
+  // the perimeter is a rounded, corner-free curve instead of a hard square.
+  function raisePlateau(s, r, lvl, blob) {
+    const ext = blobExtent(blob);
+    // interior top
+    for (let dy = -ext; dy <= ext; dy++)
+      for (let dx = -ext; dx <= ext; dx++)
+        if (inBlob(blob, dx, dy)) setHeight(s.x + dx, s.y + dy, lvl);
+    // cliff wall: the outer edge ring of the blob (tiles just outside also get a
+    // wall so the face is closed to lowland with no 1-tile leaks).
+    for (let dy = -ext - 1; dy <= ext + 1; dy++)
+      for (let dx = -ext - 1; dx <= ext + 1; dx++) {
+        const x = s.x + dx, y = s.y + dy;
         if (!inb(x, y)) continue;
-        if (!rock[idx(x, y)]) continue;         // already passable (ramp corridor)
-        // Fold to canonical half — same hash for both symmetric partners.
-        let sx = x, sy = y;
-        if (mode === "rotate") { sx = Math.min(x, W - 1 - x); sy = Math.min(y, H - 1 - y); }
-        else if (reflectAxis === 0) { sx = Math.min(x, W - 1 - x); }
-        else { sy = Math.min(y, H - 1 - y); }
-        const h = (((sx + 500) * 374761393 + (sy + 500) * 668265263 + jSeed) | 0) >>> 0;
-        const roll = h % 100;
-        // Dominant-axis outward normal for protrusions.
-        const ax = Math.abs(dx) >= Math.abs(dy) ? Math.sign(dx) : 0;
-        const ay = Math.abs(dy) > Math.abs(dx) ? Math.sign(dy) : 0;
-        if (roll < 14) {
-          // outward protrusion: extend cliff face one tile outward
-          const px = x + (ax || Math.sign(dx)), py = y + (ay || Math.sign(dy));
-          if (inb(px, py) && !rock[idx(px, py)] && !rampTiles[idx(px, py)]) {
-            setHeight(px, py, lvl); setRock(px, py, 1);
-          }
-        } else if (roll < 28) {
-          // inward erosion: open ring tile (only safe for single-level step)
-          if (lvl === 1) { setRock(x, y, 0); }
-          else {
-            // For lvl>=2, check if any outward 4-neighbour is passable at lvl-1.
-            for (const [sdx, sdy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-              const nx2 = x + sdx, ny2 = y + sdy;
-              if (!inb(nx2, ny2) || rock[idx(nx2, ny2)]) continue;
-              if (height[idx(nx2, ny2)] === lvl - 1) { setRock(x, y, 0); break; }
-            }
-          }
-        } else if (roll < 35) {
-          // corner softening: at corner-adjacent positions, step down or open
-          const cornerish = Math.abs(dx) >= r - 1 && Math.abs(dy) >= r - 1;
-          if (cornerish) {
-            if (lvl === 1) { setRock(x, y, 0); }
-            else if (lvl >= 2) { setHeight(x, y, lvl - 1); /* keep rock=1 — stepped corner */ }
-          }
+        if (inBlob(blob, dx, dy)) continue;           // interior handled above
+        // an "outside" tile that is 4-adjacent to an interior tile is the wall.
+        if (inBlob(blob, dx + 1, dy) || inBlob(blob, dx - 1, dy) ||
+            inBlob(blob, dx, dy + 1) || inBlob(blob, dx, dy - 1)) {
+          setHeight(x, y, lvl); setRock(x, y, 1);
         }
+      }
+  }
+
+  // Stamp the CLIFF WALL of an organic plateau blob at level `lvl`, skipping ramp
+  // and resource tiles. Shared by the 8c re-assert so the perimeter it re-seals
+  // follows the SAME rounded silhouette raisePlateau built (not a square window).
+  // `keep(x,y)` returns true for a tile that must stay passable (ramp/resource).
+  function stampBlobWall(s, blob, lvl, keep) {
+    const ext = blobExtent(blob);
+    for (let dy = -ext - 1; dy <= ext + 1; dy++)
+      for (let dx = -ext - 1; dx <= ext + 1; dx++) {
+        const x = s.x + dx, y = s.y + dy;
+        if (!inb(x, y)) continue;
+        if (inBlob(blob, dx, dy)) continue;
+        if (!(inBlob(blob, dx + 1, dy) || inBlob(blob, dx - 1, dy) ||
+              inBlob(blob, dx, dy + 1) || inBlob(blob, dx, dy - 1))) continue;
+        if (keep && keep(x, y)) continue;
+        setRock(x, y, 1); setHeight(x, y, lvl);
       }
   }
 
@@ -933,66 +1074,40 @@ function buildCandidate(seed, opts) {
   // pure scenery and never needs to be reachable). Only stamps where it won't
   // collide with resources so it never walls a patch in.
   function raiseMesa(s, r, lvl, minerals, geyserTiles) {
-    // bail if any resource sits under the mesa footprint (incl. cliff ring)
-    for (let y = s.y - r - 1; y <= s.y + r + 1; y++)
-      for (let x = s.x - r - 1; x <= s.x + r + 1; x++) {
+    // ORGANIC rounded mesa: blob top at `lvl`, cliff wall on the blob edge, NO
+    // ramp (pure scenery). Cliffs are exempt from the freckle check and no inward
+    // erosion is done (a mesa sits at lvl=3 on lowland; opening a face would skip
+    // levels), so this is a clean rounded hill with no square corners.
+    const blob = blobParams(s.x, s.y, r, 0x3e5 + lvl);
+    const ext = blobExtent(blob);
+    // bail if any resource sits under the FULL organic footprint (top + wall).
+    for (let dy = -ext - 1; dy <= ext + 1; dy++)
+      for (let dx = -ext - 1; dx <= ext + 1; dx++) {
+        const x = s.x + dx, y = s.y + dy;
         if (!inb(x, y)) continue;
+        // only guard tiles the mesa would actually occupy (interior or wall).
+        const occ = inBlob(blob, dx, dy) ||
+          inBlob(blob, dx + 1, dy) || inBlob(blob, dx - 1, dy) ||
+          inBlob(blob, dx, dy + 1) || inBlob(blob, dx, dy - 1);
+        if (!occ) continue;
         for (const m of minerals) if (((m.x / 256) | 0) === x && ((m.y / 256) | 0) === y) return;
         for (const g of geyserTiles) if (g.x === x && g.y === y) return;
       }
-    for (let y = s.y - r; y <= s.y + r; y++)
-      for (let x = s.x - r; x <= s.x + r; x++) setHeight(x, y, lvl);
-    for (let y = s.y - r - 1; y <= s.y + r + 1; y++)
-      for (let x = s.x - r - 1; x <= s.x + r + 1; x++) {
-        const edge = (x < s.x - r || x > s.x + r || y < s.y - r || y > s.y + r);
-        if (edge && inb(x, y)) { setHeight(x, y, lvl); setRock(x, y, 1); }
+    // interior top
+    for (let dy = -ext; dy <= ext; dy++)
+      for (let dx = -ext; dx <= ext; dx++)
+        if (inBlob(blob, dx, dy)) setHeight(s.x + dx, s.y + dy, lvl);
+    // cliff wall on the organic edge (skip ramp tiles defensively)
+    for (let dy = -ext - 1; dy <= ext + 1; dy++)
+      for (let dx = -ext - 1; dx <= ext + 1; dx++) {
+        const x = s.x + dx, y = s.y + dy;
+        if (!inb(x, y)) continue;
+        if (inBlob(blob, dx, dy)) continue;
+        if (!(inBlob(blob, dx + 1, dy) || inBlob(blob, dx - 1, dy) ||
+              inBlob(blob, dx, dy + 1) || inBlob(blob, dx, dy - 1))) continue;
+        if (rampTiles[idx(x, y)]) continue;
+        setHeight(x, y, lvl); setRock(x, y, 1);
       }
-    // ---- organic edge jitter (medium strength, mesa-safe: NO inward erosion) ----
-    // Mesas sit at lvl=3 on lowland; opening a cliff face would skip 3 levels.
-    // Only outward protrusions + corner height-lowering are safe.
-    {
-      const jSeed = ((s.x * 374761393 + s.y * 668265263 + r * 295075153 + lvl * 1276523 + 0x1e5a) | 0) >>> 0;
-      for (let y = s.y - r - 1; y <= s.y + r + 1; y++)
-        for (let x = s.x - r - 1; x <= s.x + r + 1; x++) {
-          const dx = x - s.x, dy = y - s.y;
-          const dist = Math.max(Math.abs(dx), Math.abs(dy));
-          if (dist !== r + 1) continue;
-          if (!inb(x, y)) continue;
-          if (!rock[idx(x, y)]) continue;
-          // Skip near ramp tiles (mesas are placed away from ramps, but be safe).
-          if (rampTiles[idx(x, y)]) continue;
-          // Symmetric hash.
-          let sx = x, sy = y;
-          if (mode === "rotate") { sx = Math.min(x, W - 1 - x); sy = Math.min(y, H - 1 - y); }
-          else if (reflectAxis === 0) { sx = Math.min(x, W - 1 - x); }
-          else { sy = Math.min(y, H - 1 - y); }
-          const h = (((sx + 500) * 374761393 + (sy + 500) * 668265263 + jSeed) | 0) >>> 0;
-          const roll = h % 100;
-          const ax = Math.abs(dx) >= Math.abs(dy) ? Math.sign(dx) : 0;
-          const ay = Math.abs(dy) > Math.abs(dx) ? Math.sign(dy) : 0;
-          if (roll < 14) {
-            // outward protrusion — always safe, just extends the cliff one tile
-            const px = x + (ax || Math.sign(dx)), py = y + (ay || Math.sign(dy));
-            if (inb(px, py) && !rock[idx(px, py)] && !rampTiles[idx(px, py)]) {
-              // Also check the protrusion won't bury a resource.
-              let hitsRes = false;
-              for (const m of minerals) if (((m.x / 256) | 0) === px && ((m.y / 256) | 0) === py) { hitsRes = true; break; }
-              if (!hitsRes) for (const g of geyserTiles) if (g.x === px && g.y === py) { hitsRes = true; break; }
-              if (!hitsRes) { setHeight(px, py, lvl); setRock(px, py, 1); }
-            }
-          } else if (roll < 30) {
-            // corner softening: lower height on corner-adjacent cliff faces
-            const cornerish = Math.abs(dx) >= r - 1 && Math.abs(dy) >= r - 1;
-            if (cornerish && lvl >= 2) {
-              // Step the corner down by one level (still impassable cliff).
-              setHeight(x, y, lvl - 1);
-              // For lvl==2 corners, opening at lvl-1 (=1) may be safe if outside is 0.
-              // But we stay conservative: keep rock=1, just lower the height.
-            }
-          }
-          // NO inward erosion branch — never open a mesa cliff face to lowland.
-        }
-    }
   }
 
   // Carve a `width`-wide STEPPED ramp through the cliff ring on the side facing
@@ -1093,87 +1208,64 @@ function buildCandidate(seed, opts) {
   // When lvl>0 the ring is a genuine cliff face (raised interior vs lowland).
   function ringExpansion(s, r, dir, gapWidth, lvl) {
     clearArea3(s, r);
-    for (let y = s.y - r; y <= s.y + r; y++)
-      for (let x = s.x - r; x <= s.x + r; x++) setHeight(x, y, lvl);
+    // ORGANIC natural outline: interior is the blob at `lvl`, the wall follows the
+    // rounded blob edge (not a square ring), and a wide GAP toward `dir` stays
+    // open for the lane. Params derive from (s,r,lvl) deterministically so the
+    // step-6 re-assert (which calls ringExpansion again with the same args) traces
+    // the identical shape. The blob is flattened in the gap sector so the opening
+    // is a clean straight mouth the ramp/lane meets squarely.
+    const blob = blobParams(s.x, s.y, r, 0x2c7 + lvl);
+    flattenBlobSector(blob, dir.dx, dir.dy, r);
+    const ext = blobExtent(blob);
     const half = gapWidth >> 1;
-    for (let y = s.y - r - 1; y <= s.y + r + 1; y++)
-      for (let x = s.x - r - 1; x <= s.x + r + 1; x++) {
-        const edge = (x < s.x - r || x > s.x + r || y < s.y - r || y > s.y + r);
-        if (!edge || !inb(x, y)) continue;
-        let inGap;
-        if (Math.abs(dir.dx) >= Math.abs(dir.dy)) {
-          inGap = Math.sign(x - s.x) === dir.dx && Math.abs(y - s.y) <= half;
-        } else {
-          inGap = Math.sign(y - s.y) === dir.dy && Math.abs(x - s.x) <= half;
-        }
-        if (inGap) continue;
-        if (lvl > 0) { setHeight(x, y, lvl); setRock(x, y, 1); }   // cliff face
-        else { setHeight(x, y, 0); setBarrier(x, y, 4); }           // outcrop wall
+    // interior at lvl
+    for (let dy = -ext; dy <= ext; dy++)
+      for (let dx = -ext; dx <= ext; dx++)
+        if (inBlob(blob, dx, dy)) setHeight(s.x + dx, s.y + dy, lvl);
+    // gap test on offset-from-center (matches the original semantics).
+    const inGapOff = (dx, dy) => {
+      if (Math.abs(dir.dx) >= Math.abs(dir.dy)) {
+        return Math.sign(dx) === dir.dx && Math.abs(dy) <= half;
       }
-    // ---- organic edge jitter (medium strength) — only on cliff-face rings (lvl>0) ----
+      return Math.sign(dy) === dir.dy && Math.abs(dx) <= half;
+    };
     if (lvl > 0) {
-      const jSeed = ((s.x * 374761393 + s.y * 668265263 + r * 295075153 + lvl * 1276523 + 0x0ff1) | 0) >>> 0;
-      for (let y = s.y - r - 1; y <= s.y + r + 1; y++)
-        for (let x = s.x - r - 1; x <= s.x + r + 1; x++) {
-          const dx = x - s.x, dy = y - s.y;
-          const dist = Math.max(Math.abs(dx), Math.abs(dy));
-          if (dist !== r + 1) continue;
+      // CLIFF-face ring: stamp the OUTER edge of the blob (tiles outside, adjacent
+      // to interior). Cliffs are exempt from the freckle check (they are height
+      // walls, not barriers), so no 4-connectivity fill is needed.
+      for (let dy = -ext - 1; dy <= ext + 1; dy++)
+        for (let dx = -ext - 1; dx <= ext + 1; dx++) {
+          const x = s.x + dx, y = s.y + dy;
           if (!inb(x, y)) continue;
-          if (!rock[idx(x, y)]) continue;         // already passable (gap / ramp)
-          // In-gap check (mirrors the gap test above).
-          let inGap;
-          if (Math.abs(dir.dx) >= Math.abs(dir.dy)) {
-            inGap = Math.sign(x - s.x) === dir.dx && Math.abs(y - s.y) <= half;
-          } else {
-            inGap = Math.sign(y - s.y) === dir.dy && Math.abs(x - s.x) <= half;
+          if (inBlob(blob, dx, dy)) continue;
+          if (!(inBlob(blob, dx + 1, dy) || inBlob(blob, dx - 1, dy) ||
+                inBlob(blob, dx, dy + 1) || inBlob(blob, dx, dy - 1))) continue;
+          if (inGapOff(dx, dy)) continue;
+          setHeight(x, y, lvl); setRock(x, y, 1);
+        }
+    } else {
+      // LOWLAND barrier ring (kind 4): stamp a 2-tile-thick INNER band of the
+      // blob — every interior tile with any EXTERIOR tile in its 8-neighbourhood
+      // (Chebyshev distance 1). A 2-thick band is always 4-CONNECTED even where the
+      // rounded outline makes a diagonal staircase (a 1-thick inner boundary can
+      // leave diagonal-only tiles that read as barrier FRECKLES and fail
+      // validation). The gap sector stays open for the lane.
+      const nearExterior = (dx, dy) => {
+        for (let oy = -1; oy <= 1; oy++)
+          for (let ox = -1; ox <= 1; ox++) {
+            if (!ox && !oy) continue;
+            if (!inBlob(blob, dx + ox, dy + oy)) return true;
           }
-          if (inGap) continue;
-          // Skip tiles 4-adjacent to the gap so the corridor stays crisp.
-          let nearGap = false;
-          for (const [sdx, sdy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-            let ng;
-            const nx = x + sdx, ny = y + sdy;
-            if (Math.abs(dir.dx) >= Math.abs(dir.dy)) {
-              ng = Math.sign(nx - s.x) === dir.dx && Math.abs(ny - s.y) <= half;
-            } else {
-              ng = Math.sign(ny - s.y) === dir.dy && Math.abs(nx - s.x) <= half;
-            }
-            if (ng) { nearGap = true; break; }
-          }
-          if (nearGap) continue;
-          // Symmetric hash.
-          let sx = x, sy = y;
-          if (mode === "rotate") { sx = Math.min(x, W - 1 - x); sy = Math.min(y, H - 1 - y); }
-          else if (reflectAxis === 0) { sx = Math.min(x, W - 1 - x); }
-          else { sy = Math.min(y, H - 1 - y); }
-          const h = (((sx + 500) * 374761393 + (sy + 500) * 668265263 + jSeed) | 0) >>> 0;
-          const roll = h % 100;
-          const ax = Math.abs(dx) >= Math.abs(dy) ? Math.sign(dx) : 0;
-          const ay = Math.abs(dy) > Math.abs(dx) ? Math.sign(dy) : 0;
-          if (roll < 14) {
-            // outward protrusion
-            const px = x + (ax || Math.sign(dx)), py = y + (ay || Math.sign(dy));
-            if (inb(px, py) && !rock[idx(px, py)] && !rampTiles[idx(px, py)]) {
-              setHeight(px, py, lvl); setRock(px, py, 1);
-            }
-          } else if (roll < 28) {
-            // inward erosion: only for lvl==1; for lvl>=2 check neighbour
-            if (lvl === 1) { setRock(x, y, 0); }
-            else {
-              for (const [sdx, sdy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-                const nx2 = x + sdx, ny2 = y + sdy;
-                if (!inb(nx2, ny2) || rock[idx(nx2, ny2)]) continue;
-                if (height[idx(nx2, ny2)] === lvl - 1) { setRock(x, y, 0); break; }
-              }
-            }
-          } else if (roll < 35) {
-            // corner softening
-            const cornerish = Math.abs(dx) >= r - 1 && Math.abs(dy) >= r - 1;
-            if (cornerish) {
-              if (lvl === 1) { setRock(x, y, 0); }
-              else if (lvl >= 2) { setHeight(x, y, lvl - 1); }
-            }
-          }
+        return false;
+      };
+      for (let dy = -ext; dy <= ext; dy++)
+        for (let dx = -ext; dx <= ext; dx++) {
+          const x = s.x + dx, y = s.y + dy;
+          if (!inb(x, y)) continue;
+          if (!inBlob(blob, dx, dy)) continue;
+          if (!nearExterior(dx, dy)) continue;
+          if (inGapOff(dx, dy)) continue;
+          setHeight(x, y, 0); setBarrier(x, y, 4);
         }
     }
   }
@@ -1208,9 +1300,19 @@ function buildCandidate(seed, opts) {
           if (protectedNear(cx + dx, cy + dy)) return false;
       return true;
     };
-    while (topR >= 2 && !footFits(topR)) topR--;
+    // The footprint must clear protected zones ALSO where the organic outline
+    // bulges (up to ~30% beyond topR). Shrink topR until the blob's true extent
+    // fits. We overallocate the fit check by a rounded outer margin.
+    while (topR >= 2 && !footFits(Math.ceil(topR * 1.32) + 1)) topR--;
     if (topR < 2) return gaps;                        // no room: skip the feature (rare)
-    const outer = topR + faceDepth;
+
+    // ORGANIC island silhouette. Terraces are concentric bands OUTWARD of this
+    // one rounded outline (radial distance beyond the blob edge -> step down one
+    // level per ring), so the island top + every terrace follow the SAME curved
+    // shape instead of nested squares. Bands step one level at a time (radial
+    // integer rings), so no passable level-skip is ever introduced.
+    const islandBlob = blobParams(cx, cy, topR, (r() ^ 0x5eed) | 0);
+    const outer = blobExtent(islandBlob) + faceDepth;
 
     // ramp directions: pick `lanes` of the 4 cardinal sides to punch ramps.
     const sides = [[1, 0], [-1, 0], [0, 1], [0, -1]];
@@ -1235,10 +1337,17 @@ function buildCandidate(seed, opts) {
       return false;
     };
 
-    const outDist = (dx, dy) => Math.max(
-      Math.max(0, Math.abs(dx) - topR),
-      Math.max(0, Math.abs(dy) - topR),
-    );
+    // RADIAL terrace step: how many level-rings out of the island blob is this
+    // tile? 0 = on the organic top; k>=1 = k rings down the staircase. Computed
+    // from Euclidean distance minus the blob's per-angle radius so the terraces
+    // hug the rounded outline. Integer rings guarantee single-level adjacency.
+    const outDist = (dx, dy) => {
+      if (dx === 0 && dy === 0) return 0;
+      const br = islandBlob.lut[blobBucket(dx, dy)] / 10;   // radius at this angle
+      const d = Math.sqrt(dx * dx + dy * dy);
+      const beyond = d - br;
+      return beyond <= 0 ? 0 : Math.ceil(beyond);
+    };
 
     for (let dy = -outer; dy <= outer; dy++)
       for (let dx = -outer; dx <= outer; dx++) {
