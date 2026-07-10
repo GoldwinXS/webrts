@@ -97,9 +97,15 @@ export class AI {
     const hq = hqs[0];
     const own = this.pid;
 
-    // 1. idle workers go mine
+    // 1. idle workers go mine. Skip the expansion escort (expandMoteId): its
+    // move order can legitimately go idle for a single tick between waypoints
+    // while walking to a distant deposit site (e.g. it reaches a nearestFree
+    // spot that isn't quite adjacent yet), and sending it off to mine here —
+    // before tryExpand (1b, below) gets a chance to re-issue its move — resets
+    // the whole escort journey from wherever it got pulled to. That repeated
+    // reset was blowing the expansion's saving-timeout race in testing.
     for (const w of workers) {
-      if (w.order.kind === "idle") {
+      if (w.order.kind === "idle" && w.id !== this.expandMoteId) {
         const patch = sim.nearestEntity(w.x, w.y, FP * 16, (e) => e.type === "mineral" && e.amount > 0);
         if (patch) cmds.push({ t: "gather", ids: [w.id], targetId: patch.id });
       }
@@ -316,12 +322,13 @@ export class AI {
           sim.canAfford(this.pid, BUILDINGS.extractor.cost)) {
         this.tryBuildRefinery(sim, cmds, workers, "extractor");
       }
-      // adopt orphaned construction sites (same rationale as the Cog branch)
+      // adopt orphaned construction sites (same rationale as the Cog branch;
+      // same expandMoteId exclusion — don't hijack the expansion escort)
       const adoptedS = new Set();
       for (const site of sites) {
         const hasBuilder = workers.some((w) => w.order.kind === "build" && w.order.targetId === site.id);
         if (hasBuilder) continue;
-        const w = workers.find((x) => !adoptedS.has(x.id) &&
+        const w = workers.find((x) => !adoptedS.has(x.id) && x.id !== this.expandMoteId &&
           (x.order.kind === "idle" ||
            (x.order.kind === "gather" && x.order.resource !== "gas")));
         if (w) { adoptedS.add(w.id); cmds.push({ t: "resume", ids: [w.id], targetId: site.id }); }
@@ -474,11 +481,17 @@ export class AI {
       // "<type>Coming", it permanently blocks that whole build branch AND makes the
       // AI bank minerals it can't spend. So: any site with no live builder gets an
       // idle/mining worker sent to resume it. (Was refinery-only; now all types.)
+      // EXCLUDE the expansion escort (expandMoteId): its move order legitimately
+      // goes idle for a tick between waypoints while walking to a distant deposit
+      // site, and grabbing it here to resume some other site restarts its whole
+      // journey from wherever it got pulled to — which cost the expansion the
+      // saving-timeout race in testing. tryExpand re-issues its own move/build
+      // next cycle, so this worker doesn't need rescuing.
       const adopted = new Set();
       for (const site of sites) {
         const hasBuilder = workers.some((w) => w.order.kind === "build" && w.order.targetId === site.id);
         if (hasBuilder) continue;
-        const w = workers.find((x) => !adopted.has(x.id) &&
+        const w = workers.find((x) => !adopted.has(x.id) && x.id !== this.expandMoteId &&
           (x.order.kind === "idle" ||
            (x.order.kind === "gather" && x.order.resource !== "gas")));
         if (w) { adopted.add(w.id); cmds.push({ t: "resume", ids: [w.id], targetId: site.id }); }
@@ -898,9 +911,21 @@ export class AI {
       startY = mfree ? tileToFp(mfree.y) : main.y;
     }
 
+    // A deposit sits alone out at a fresh mineral cluster — unlike depot/
+    // barracks spam it isn't packed against other buildings, so self-walling
+    // is a much smaller risk here. Still prefer a clear-margin spot (so later
+    // mineral-line buildings have room), but CAP how much farther we'll walk
+    // for it: scan ring-by-ring and take the first reachable site (margin or
+    // not); only prefer a margin-clear site over a plain one if it turns up
+    // at the SAME ring distance, so the margin preference never turns into a
+    // multi-ring detour that starves an already-tight expansion timing race.
+    // Falls back naturally to margin-agnostic once no margin site exists at
+    // any ring (fallbackSite carries the closest reachable spot found).
+    let fallbackSite = null;
     for (const cl of clusters) {
       const ctx = fpToTile(cl.cx), cty = fpToTile(cl.cy);
       for (let r = 5; r <= 8; r++) {
+        let ringFallback = null;
         for (let dy = -r; dy <= r; dy++) {
           for (let dx = -r; dx <= r; dx++) {
             if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
@@ -914,12 +939,18 @@ export class AI {
             // the (soon-to-be-blocked) center instead lets findPath thread the
             // path through where the building will sit, then the real builder
             // stalls forever. This mirrors build-time and kills pocket sites.
-            if (this.reachableSite(sim, startX, startY, tx, ty, size)) return { tx, ty };
+            if (!this.reachableSite(sim, startX, startY, tx, ty, size)) continue;
+            if (this.hasClearMargin(sim, tx, ty, size)) return { tx, ty }; // best case: same ring, clear margin
+            if (!ringFallback) ringFallback = { tx, ty };
           }
         }
+        // no margin-clear site at this ring for this cluster, but we found a
+        // reachable one — remember it as the fallback and keep scanning
+        // (a later ring/cluster might still yield a margin-clear pick).
+        if (ringFallback && !fallbackSite) fallbackSite = ringFallback;
       }
     }
-    return null;
+    return fallbackSite;
   }
 
   // Can a builder standing on our landmass reach a tile ADJACENT to the
@@ -994,23 +1025,54 @@ export class AI {
     if (!worker) return;
     const size = BUILDINGS[type].size;
     const htx = fpToTile(hq.x), hty = fpToTile(hq.y);
-    // scan outward rings around the HQ for a free spot, deterministic order
-    for (let r = 3; r < 10; r++) {
-      for (let dy = -r; dy <= r; dy++) {
-        for (let dx = -r; dx <= r; dx++) {
-          if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
-          const tx = htx + dx - (size >> 1), ty = hty + dy - (size >> 1);
-          if (sim.canPlace(type, tx, ty, this.pid)) {
+    // Pass 1: strict margin (spread buildings out so the AI can't wall itself
+    // in). Pass 2 (only if pass 1 finds nothing across the whole scan): fall
+    // back to the old no-margin rule so a cramped map never hard-stalls the
+    // build order.
+    for (const margin of [true, false]) {
+      // widen the scan a couple of rings when demanding margin, since fewer
+      // spots pass the stricter test on cramped maps.
+      for (let r = 3; r < (margin ? 12 : 10); r++) {
+        for (let dy = -r; dy <= r; dy++) {
+          for (let dx = -r; dx <= r; dx++) {
+            if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+            const tx = htx + dx - (size >> 1), ty = hty + dy - (size >> 1);
+            if (!sim.canPlace(type, tx, ty, this.pid)) continue;
             // avoid plugging the mineral line: stay off patch-adjacent tiles
             const cx = tx * FP + (size * FP >> 1), cy = ty * FP + (size * FP >> 1);
             const nearPatch = sim.nearestEntity(cx, cy, FP * 2, (e) => e.type === "mineral");
             if (nearPatch) continue;
+            if (margin && !this.hasClearMargin(sim, tx, ty, size)) continue;
             cmds.push({ t: "build", workerId: worker.id, building: type, tx, ty });
             return;
           }
         }
       }
     }
+  }
+
+  // Does the 1-tile border ring around [tx,ty]+size have a clear margin? "Clear"
+  // means passable: not sim.blocked (buildings/terrain) and not a ramp tile
+  // (blocking a ramp mouth is the classic self-trap). Off-map tiles count as
+  // blocked. Allows AT MOST ONE blocked ring tile — that lets the AI tuck a
+  // building against a single cliff wall without demanding fully open ground,
+  // while still refusing to seal a pocket on two or more sides.
+  hasClearMargin(sim, tx, ty, size) {
+    const { w, h } = sim.map;
+    const blocked = sim.blocked;
+    const ramps = sim.map.rampTiles;
+    let blockedCount = 0;
+    for (let y = ty - 1; y <= ty + size; y++) {
+      for (let x = tx - 1; x <= tx + size; x++) {
+        const onRing = (x === tx - 1 || x === tx + size || y === ty - 1 || y === ty + size);
+        if (!onRing) continue;
+        if (x < 0 || y < 0 || x >= w || y >= h) { blockedCount++; continue; }
+        const idx = y * w + x;
+        if (blocked[idx] || (ramps && ramps[idx])) blockedCount++;
+        if (blockedCount > 1) return false;
+      }
+    }
+    return true;
   }
 
   // Ooze ooze_build: consumes a Mote at the site, auto-completes.
@@ -1021,18 +1083,22 @@ export class AI {
   tryBuildOoze(sim, cmds, type, hq) {
     const size = BUILDINGS[type].size;
     const htx = fpToTile(hq.x), hty = fpToTile(hq.y);
-    for (let r = 3; r < 10; r++) {
-      for (let dy = -r; dy <= r; dy++) {
-        for (let dx = -r; dx <= r; dx++) {
-          if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
-          const tx = htx + dx - (size >> 1), ty = hty + dy - (size >> 1);
-          if (sim.canPlace(type, tx, ty, this.pid)) {
+    // Same two-pass margin preference as tryBuild: strict margin first (wider
+    // scan), then fall back to the old no-margin rule so the AI never stalls.
+    for (const margin of [true, false]) {
+      for (let r = 3; r < (margin ? 12 : 10); r++) {
+        for (let dy = -r; dy <= r; dy++) {
+          for (let dx = -r; dx <= r; dx++) {
+            if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+            const tx = htx + dx - (size >> 1), ty = hty + dy - (size >> 1);
+            if (!sim.canPlace(type, tx, ty, this.pid)) continue;
             const cx = tx * FP + (size * FP >> 1), cy = ty * FP + (size * FP >> 1);
             const nearPatch = sim.nearestEntity(cx, cy, FP * 2, (e) => e.type === "mineral");
             if (nearPatch) continue;
             const moteNear = sim.nearestEntity(cx, cy, FP * 4, (e) =>
               e.owner === this.pid && e.unit && e.type === "mote" && e.hp > 0);
             if (!moteNear) continue;
+            if (margin && !this.hasClearMargin(sim, tx, ty, size)) continue;
             cmds.push({ t: "ooze_build", building: type, tx, ty });
             return;
           }
