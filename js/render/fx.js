@@ -140,6 +140,12 @@ export class Effects {
     this.flashGeo = new THREE.SphereGeometry(0.11, 8, 6);
     this.ringGeo = new THREE.RingGeometry(0.28, 0.42, 26);
     this.decalGeo = new THREE.CircleGeometry(1, 20);
+    // thin unit-radius ring (r 1) scaled to arbitrary field radii for ability
+    // boundaries (dome pop, shockwave). Additive, shares the ring update path.
+    this.thinRingGeo = new THREE.RingGeometry(0.9, 1.0, 40);
+    // hemisphere shell for the Shield Dome bubble (top half of a sphere,
+    // open bottom so it reads as a dome sitting on the ground).
+    this.domeGeo = new THREE.SphereGeometry(1, 24, 12, 0, Math.PI * 2, 0, Math.PI * 0.5);
     // optional terrain height sampler (set by the renderer). When present,
     // effects are lifted onto the terrain surface. Call signatures unchanged.
     this.heightAt = null;
@@ -250,6 +256,104 @@ export class Effects {
     this.sparks.burst(x, 0.2 + this.gy(x, z), z, 10, color, 1.6, 0.4, 2);
   }
 
+  // A thin bright expanding ring on the ground (like shockRing but a crisp hoop
+  // instead of the thick default ring). start..end are world radii.
+  hoop(x, z, color, start, end, dur = 0.4, opacity = 0.9) {
+    const r = new THREE.Mesh(this.thinRingGeo, this.basic(color, opacity));
+    r.rotation.x = -Math.PI / 2;
+    r.position.set(x, 0.06 + this.gy(x, z), z);
+    r.scale.setScalar(start);
+    this.add(r, { kind: "hoop", t: 0, dur, from: start, to: end, startA: opacity });
+  }
+
+  // A ground-hugging ring of small dust puffs (settle plume) — reused by
+  // siege/burrow transitions and heavy landings.
+  dustRing(x, z, n = 8, scale = 0.8, rad = 0.9) {
+    const y = this.gy(x, z);
+    for (let k = 0; k < n; k++) {
+      const a = (k / n) * Math.PI * 2 + Math.random() * 0.4;
+      const rr = rad * (0.7 + Math.random() * 0.5);
+      this.smoke.puff(x + Math.cos(a) * rr, 0.15 + y, z + Math.sin(a) * rr, scale, 1.1);
+    }
+  }
+
+  // --- ability fx ------------------------------------------------------------
+
+  // Marine Overclock (stim): a snappy amber glow burst + upward speed-lines.
+  stim(x, z, color = 0xffb733) {
+    const y = this.gy(x, z);
+    // tight upward jet of amber sparks (speed-lines), little lateral spread
+    this.sparks.burst(x, 0.4 + y, z, 16, color, 1.4, 0.45, 4.5);
+    this.sparks.burst(x, 0.3 + y, z, 6, 0xfff0c8, 1.0, 0.35, 3.5);
+    this.hoop(x, z, color, 0.5, 1.6, 0.35, 0.85);
+  }
+
+  // Nip Frenzy: a bile-green burst + a quick low green hoop (visual "shake").
+  frenzy(x, z, color = 0x8ff23a) {
+    const y = this.gy(x, z);
+    this.sparks.burst(x, 0.35 + y, z, 20, color, 3.2, 0.5, 3);
+    this.sparks.burst(x, 0.3 + y, z, 8, 0xd8ff8a, 2.0, 0.4, 2);
+    this.hoop(x, z, color, 0.4, 1.8, 0.35, 0.8);
+  }
+
+  // Siege / burrow settle: dust puff ring + a low thump hoop that reads as the
+  // machine planting itself. `up` true = deploying (bigger), false = packing.
+  settle(x, z, color = 0xcbb58c, big = true) {
+    this.dustRing(x, z, big ? 10 : 7, big ? 0.9 : 0.7, big ? 1.0 : 0.75);
+    this.hoop(x, z, color, 0.5, big ? 2.2 : 1.6, 0.4, 0.7);
+    this.sparks.burst(x, 0.25 + this.gy(x, z), z, big ? 8 : 5, color, 1.6, 0.4, 1.2);
+  }
+
+  // Heavy landing slam (leap_land / engulf): shockwave hoop + dust + amber grit.
+  slam(x, z, color = 0xffd58a) {
+    const y = this.gy(x, z);
+    this.hoop(x, z, color, 0.5, 2.6, 0.4, 0.95);
+    this.dustRing(x, z, 9, 0.85, 1.0);
+    this.sparks.burst(x, 0.25 + y, z, 14, color, 3, 0.45, 1.6);
+  }
+
+  // Sentinel Shield Dome: a translucent cyan hemisphere that pops in over the
+  // field radius and fades out (~0.5s), plus a bright edge hoop so the ground
+  // footprint reads. `r` is the world radius.
+  dome(x, z, r, color = 0x66d8ff) {
+    const y = this.gy(x, z);
+    const m = new THREE.Mesh(this.domeGeo, this.basic(color, 0.32));
+    m.material.side = THREE.DoubleSide;
+    m.position.set(x, 0.02 + y, z);
+    m.scale.set(r, r * 0.62, r);   // slightly squashed dome
+    this.add(m, { kind: "dome", t: 0, dur: 0.55, r });
+    this.hoop(x, z, color, r * 0.85, r, 0.5, 0.85);
+  }
+
+  // Phantom phase blink: a quick refraction-ish flash + an afterimage hoop that
+  // shrinks inward, marking the shimmer as the model fades its opacity.
+  shimmer(x, z, color = 0xbfe6ff) {
+    const y = this.gy(x, z);
+    const f = new THREE.Mesh(this.flashGeo, this.basic(color, 0.8));
+    f.position.set(x, 0.7 + y, z);
+    f.scale.setScalar(2.4);
+    this.add(f, { kind: "flash", t: 0, dur: 0.22 });
+    // inward afterimage: ring collapsing toward the unit
+    const r = new THREE.Mesh(this.thinRingGeo, this.basic(color, 0.6));
+    r.rotation.x = -Math.PI / 2;
+    r.position.set(x, 0.5 + y, z);
+    r.scale.setScalar(1.4);
+    this.add(r, { kind: "hoop", t: 0, dur: 0.3, from: 1.4, to: 0.2, startA: 0.6 });
+    this.sparks.burst(x, 0.6 + y, z, 8, color, 1.4, 0.35, 1.5);
+  }
+
+  // Wisp Essence Feast: a small red-green soul wisp that drifts UP off the kill
+  // point (the event carries the wisp's own position). Tiny additive flash that
+  // rises and fades, tinted between crimson and toxic green.
+  soul(x, z, color = 0xff5a6e) {
+    const y = this.gy(x, z);
+    const s = new THREE.Mesh(this.flashGeo, this.basic(color, 0.9));
+    s.position.set(x + (Math.random() - 0.5) * 0.4, 0.4 + y, z + (Math.random() - 0.5) * 0.4);
+    s.scale.setScalar(1.6);
+    this.add(s, { kind: "soul", t: 0, dur: 0.7, x: s.position.x, y0: 0.4 + y, z: s.position.z });
+    this.sparks.burst(x, 0.4 + y, z, 6, 0x9bff6b, 1.2, 0.4, 2.5);
+  }
+
   // Jagged lightning polyline between two world points: 8 segments with random
   // perpendicular jitter, additive line, re-jittered every few frames so it
   // crackles, dead in ~0.15-0.25s. fromY/toY are ABSOLUTE world heights (like
@@ -352,6 +456,28 @@ export class Effects {
           fx.obj.scale.setScalar(0.4 + p * fx.maxScale * 2.4);
           fx.obj.material.opacity = 0.9 * (1 - p);
           break;
+        case "hoop": {
+          // thin ring lerped from `from` to `to` world radius, fading out
+          const s = fx.from + (fx.to - fx.from) * (1 - (1 - p) * (1 - p)); // ease-out
+          fx.obj.scale.setScalar(s);
+          fx.obj.material.opacity = (fx.startA ?? 0.9) * (1 - p);
+          break;
+        }
+        case "dome": {
+          // pop in fast (first 25%), hold, then swell slightly and fade
+          const pop = Math.min(1, p / 0.25);
+          const swell = 1 + p * 0.12;
+          fx.obj.scale.set(fx.r * swell, fx.r * 0.62 * swell, fx.r * swell);
+          fx.obj.material.opacity = 0.32 * pop * (1 - p * p);
+          break;
+        }
+        case "soul": {
+          // drift up and fade, gently swelling then shrinking
+          fx.obj.position.y = fx.y0 + p * 1.6;
+          fx.obj.scale.setScalar(1.6 * (1 - p * 0.5));
+          fx.obj.material.opacity = 0.9 * (1 - p * p);
+          break;
+        }
         case "ping":
           fx.obj.scale.setScalar(2.2 * (1 - p * 0.75));
           fx.obj.material.opacity = 0.95 * (1 - p * p);

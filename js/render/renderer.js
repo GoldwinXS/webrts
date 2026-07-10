@@ -780,49 +780,76 @@ export class Renderer {
       ctx.fillStyle = outline; // restore for any later passes
     }
 
-    // ---- 5. cliff FACE fill: warm painted rock derived from cliffTop --------
-    // The face is a deeper, slightly MORE SATURATED cousin of the plateau top:
-    // multiplied down less than before (0.66/0.84 vs the old 0.58/0.78 — the
-    // bright palette needs less push to read as a wall) and hue-shifted toward
-    // a per-biome rock-shadow color so cliffs read as sunlit painted rock, not
-    // gray gloom. Chunky two-step bevel + full cliffTop lip = toy-block cliff.
+    // ---- 5. cliff FACE fill: ONE continuous painted rock wall ---------------
+    // Reworked for ORGANIC silhouettes + LINEAR texture sampling. The old pass
+    // framed every face tile with an inset border + chunky bevel + 4-sided lip,
+    // which on a curved edge read as a necklace of bordered squares. Instead we
+    // paint each face tile with a CONTINUOUS stratified band that flows across
+    // tile borders: a vertical gradient (dark rock-shadow at the base, warmer
+    // mid up the wall, bright cliffTop lip at the plateau edge) oriented toward
+    // whichever side drops away, with soft ROUND speckles (matching the ground
+    // dabs) instead of hard chips. The only ink is the thin dark TOP line at the
+    // plateau edge (section 4 already inked the drop-side silhouette).
     const cliffTone = th.cliffTop;
     const rockShadowHue = tName === "verdant" ? [96, 104, 78]     // mossy olive
                         : tName === "ashen"   ? [172, 96, 58]     // canyon red
                         :                       [126, 152, 190];  // glacial blue
-    const cliffDark = mixT([cliffTone[0] * 0.66, cliffTone[1] * 0.66, cliffTone[2] * 0.66].map(CH), rockShadowHue, 0.30);
-    const cliffMid = mixT([cliffTone[0] * 0.84, cliffTone[1] * 0.84, cliffTone[2] * 0.84].map(CH), rockShadowHue, 0.18);
-    const chipDark = rgbStr(mixT(cliffDark, rockShadowHue, 0.45));
-    const chipLight = rgbStr(lift(cliffMid, 0.10));
-    const lipW = Math.max(2, (OW / 2) | 0);
-    const chipSpan = PX - 2 * OW - 6;               // keep chips inside the bevel
+    const cliffDark = mixT([cliffTone[0] * 0.66, cliffTone[1] * 0.66, cliffTone[2] * 0.66].map(CH), rockShadowHue, 0.32);
+    const cliffMid = mixT([cliffTone[0] * 0.86, cliffTone[1] * 0.86, cliffTone[2] * 0.86].map(CH), rockShadowHue, 0.16);
+    const speckDark = mixT(cliffDark, rockShadowHue, 0.45);
+    const speckLight = lift(cliffMid, 0.14);
+    // Round soft speckle dab (a filled arc, imageSmoothing on) — the cliff
+    // cousin of the ground's fillDab, so rock detail reads as painted stipple
+    // rather than pixel chips under LINEAR sampling.
+    ctx.imageSmoothingEnabled = true;
+    const speck = (cx, cy, r, css, alpha) => {
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = css;
+      ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
+      ctx.globalAlpha = 1;
+    };
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
         if (!isCliffFace(x, y)) continue;
         const px = x * PX, py = y * PX;
         const l = lvlAt(x, y);
-        ctx.fillStyle = rgbStr(cliffDark);
-        ctx.fillRect(px + OW, py + OW, PX - 2 * OW, PX - 2 * OW);
-        ctx.fillStyle = rgbStr(cliffMid);
-        ctx.fillRect(px + OW + 1, py + OW + 1, PX - 2 * OW - 2, PX - 2 * OW - 2);
-        // deterministic rock chips (texRnd): two shadow dabs + one sun glint
-        // per face so cliffs aren't flat slabs — drawn inside the inset so the
-        // outline and lip stay crisp. Integer coords keep the pixel-art edge.
-        ctx.fillStyle = chipDark;
+        const drops = (nx, ny) => lvlAt(nx, ny) < l && !isCliffFace(nx, ny) || !rockAt(nx, ny);
+        // Which cardinal side drops away? Sum drop directions into a vector so
+        // the gradient axis follows the local curve of the edge (blends across
+        // tiles into one flowing wall). Default to "down" (toward +y / camera).
+        let dxs = 0, dys = 0;
+        if (drops(x - 1, y)) dxs -= 1;
+        if (drops(x + 1, y)) dxs += 1;
+        if (drops(x, y - 1)) dys -= 1;
+        if (drops(x, y + 1)) dys += 1;
+        if (dxs === 0 && dys === 0) dys = 1;             // isolated: fall toward +y
+        const dl = Math.hypot(dxs, dys) || 1;
+        const ux = dxs / dl, uy = dys / dl;
+        // gradient endpoints: plateau edge (lip) -> drop edge (base), spanning
+        // the whole tile so neighbours line up into a continuous strat band.
+        const cx0 = px + PX / 2, cy0 = py + PX / 2;
+        const gx0 = cx0 - ux * PX * 0.5, gy0 = cy0 - uy * PX * 0.5;   // lip side
+        const gx1 = cx0 + ux * PX * 0.5, gy1 = cy0 + uy * PX * 0.5;   // base side
+        const grad = ctx.createLinearGradient(gx0, gy0, gx1, gy1);
+        grad.addColorStop(0.0, rgbStr(cliffTone));            // bright plateau lip
+        grad.addColorStop(0.22, rgbStr(lift(cliffMid, 0.06)));
+        grad.addColorStop(0.6, rgbStr(cliffMid));            // warm mid wall
+        grad.addColorStop(1.0, rgbStr(cliffDark));           // shadowed base
+        ctx.fillStyle = grad;
+        ctx.fillRect(px, py, PX, PX);
+        // soft round rock speckles: two shadow dabs + one sun glint, jittered
+        // deterministically (texRnd), sized like the ground dabs. Round + AA so
+        // they melt into the wall under LINEAR sampling instead of reading as
+        // framed chips.
         for (let i = 0; i < 2; i++)
-          ctx.fillRect(px + OW + 2 + ((texRnd() * chipSpan) | 0),
-                       py + OW + 2 + ((texRnd() * chipSpan) | 0),
-                       2 + ((texRnd() * 3) | 0), 1 + ((texRnd() * 2) | 0));
-        ctx.fillStyle = chipLight;
-        ctx.fillRect(px + OW + 2 + ((texRnd() * chipSpan) | 0),
-                     py + OW + 2 + ((texRnd() * chipSpan) | 0),
-                     2 + ((texRnd() * 2) | 0), 1);
-        ctx.fillStyle = rgbStr(cliffTone);
-        if (lvlAt(x, y - 1) >= l) ctx.fillRect(px, py, PX, lipW);
-        if (lvlAt(x, y + 1) >= l) ctx.fillRect(px, py + PX - lipW, PX, lipW);
-        if (lvlAt(x - 1, y) >= l) ctx.fillRect(px, py, lipW, PX);
-        if (lvlAt(x + 1, y) >= l) ctx.fillRect(px + PX - lipW, py, lipW, PX);
-        ctx.fillStyle = "rgba(255,255,255,0.14)";
+          speck(px + 4 + texRnd() * (PX - 8), py + 4 + texRnd() * (PX - 8),
+                1.6 + texRnd() * 1.6, rgbStr(speckDark), 0.5);
+        speck(px + 4 + texRnd() * (PX - 8), py + 4 + texRnd() * (PX - 8),
+              1.2 + texRnd() * 1.2, rgbStr(speckLight), 0.55);
+        // thin dark ink only at the TOP (plateau) edge — the crisp line where
+        // the wall meets the flat top, hugging the silhouette. Drawn on each
+        // side that borders equal/higher ground (the plateau side).
+        ctx.fillStyle = outline;
         if (lvlAt(x, y - 1) >= l) ctx.fillRect(px, py, PX, 1);
         if (lvlAt(x, y + 1) >= l) ctx.fillRect(px, py + PX - 1, PX, 1);
         if (lvlAt(x - 1, y) >= l) ctx.fillRect(px, py, 1, PX);
@@ -1164,10 +1191,16 @@ export class Renderer {
 
     // kind 3: tall shrubs (LoS blockers) — animated groups, subtle sway.
     // The raw deco tint rendered close to BLACK under toon lighting (read as
-    // burnt trees on the bright palette); lift it halfway toward a leafy
-    // green so they stay visibly darker than terrain (their vision-blocker
-    // identity) without looking scorched.
-    const shrubTint = new THREE.Color(c2).lerp(new THREE.Color(0x4d8a52), 0.55).getHex();
+    // burnt trees on the bright palette); lift it toward a per-biome foliage
+    // tone so shrubs stay visibly darker than terrain (their vision-blocker
+    // identity) without looking scorched. Frozen's deco palette is deep navy
+    // and needs both a cooler target and a stronger lift.
+    const foliage = this.theme.name === "ashen" ? 0x8a7a3c
+                  : this.theme.name === "frozen" ? 0x6fa3a8
+                  : 0x4d8a52;
+    const shrubTint = new THREE.Color(c2)
+      .lerp(new THREE.Color(foliage), this.theme.name === "frozen" ? 0.75 : 0.55)
+      .getHex();
     this.shrubs = [];
     for (const d of buckets[3]) {
       const wx = d.x + 0.5, wz = d.y + 0.5;
@@ -1282,8 +1315,21 @@ export class Renderer {
       case "attack":
       case "gather":
       case "build": {
-        const t = sim.byId.get(o.targetId);
-        return t ? [W2(t.x), W2(t.y)] : null;
+        // prefer the live target entity (site/patch/refinery/enemy); fall back
+        // to an explicit x/y the order may carry (e.g. a build order placed by
+        // coords before its site entity exists).
+        const t = o.targetId != null ? sim.byId.get(o.targetId) : null;
+        if (t) return [W2(t.x), W2(t.y)];
+        if (o.x != null && o.y != null) return [W2(o.x), W2(o.y)];
+        return null;
+      }
+      case "ability": {
+        // Queued ability cast: targeted casts carry x/y (or a targetId); an
+        // untargeted self-cast (e.g. stim) carries neither -> no leg.
+        const t = o.targetId != null ? sim.byId.get(o.targetId) : null;
+        if (t) return [W2(t.x), W2(t.y)];
+        if (o.x != null && o.y != null) return [W2(o.x), W2(o.y)];
+        return null;
       }
       default:               // "hold" / "idle" and anything else stop the chain
         return null;
@@ -1309,6 +1355,9 @@ export class Renderer {
       patrol: [0.06, 0.18, 0.45],
       gather: [0.02, 0.34, 0.31],
       build: [0.45, 0.26, 0.03],
+      // queued ability cast: bright ability-cyan so "then cast here" reads
+      // distinctly from the deep-ink "then move here" green.
+      ability: [0.20, 0.85, 0.98],
     };
 
     // follow the terrain: each endpoint sits at ground height + a small lift
@@ -1330,6 +1379,14 @@ export class Renderer {
       const next = e.next || [];
       if (e.order.kind === "idle" && next.length === 0) continue;
 
+      // small on-ground marker (a 4-line diamond) drawn from short segments —
+      // used for an untargeted self-cast ability that has no destination leg.
+      const marker = (mx, mz, c) => {
+        const s = 0.42;
+        return push(mx - s, mz, mx, mz - s, c) && push(mx, mz - s, mx + s, mz, c) &&
+               push(mx + s, mz, mx, mz + s, c) && push(mx, mz + s, mx - s, mz, c);
+      };
+
       let px = W2(e.x), pz = W2(e.y);              // start at the unit
       const orders = [e.order, ...next];
       for (const o of orders) {
@@ -1339,7 +1396,12 @@ export class Renderer {
           if (!push(W2(o.ox), W2(o.oy), W2(o.x), W2(o.y), c)) break outer;
         }
         const pt = this.orderPoint(o);
-        if (!pt) break;                            // hold/idle stop the chain
+        if (!pt) {
+          // an untargeted self-cast ability (no x/y): mark the current waypoint
+          // with a small ability-cyan diamond, then keep following the chain.
+          if (o.kind === "ability") { if (!marker(px, pz, c)) break outer; continue; }
+          break;                                   // hold/idle stop the chain
+        }
         if (!push(px, pz, pt[0], pt[1], c)) break outer;
         px = pt[0]; pz = pt[1];
       }
@@ -1445,38 +1507,107 @@ export class Renderer {
   clearPlacementGrid() {
     this.placementGrid = null;
     for (const q of this.gridPool) q.visible = false;
-    if (this.powerDiscs) for (const disc of this.powerDiscs) disc.visible = false;
+    if (this.powerFields) for (const f of this.powerFields) {
+      f.disc.visible = f.ring.visible = f.ticks.visible = false;
+    }
+    this.powerFieldCount = 0;
   }
 
-  // While placing a Tempest building, show translucent cyan discs over every
-  // finished power source so the player can see where the field reaches.
+  // Build the shared geometry for one power-field boundary: a thin bright ring
+  // at POWER_RADIUS plus a dashed hoop of short arc "tick" segments just inside
+  // it, so the field edge reads crisply on the ground without cranking the disc
+  // opacity. Built once (radius POWER_RADIUS = 6), cached, reused per source.
+  buildPowerFieldGeo() {
+    const R = 6;                       // POWER_RADIUS
+    // 1) thin solid ring (0.1 wide) exactly at the field edge
+    this.powerRingGeo = new THREE.RingGeometry(R - 0.06, R + 0.06, 96);
+    // 2) dashed tick ring: 24 short arc segments, each a slim ring slice, sitting
+    //    a touch inside the edge. One merged geometry so it's a single draw.
+    const TICKS = 24, arc = (Math.PI * 2 / TICKS) * 0.42;   // ~42% duty dash
+    const ri = R - 0.42, ro = R - 0.14;
+    const verts = [], idx = [];
+    let base = 0;
+    for (let k = 0; k < TICKS; k++) {
+      const a0 = (k / TICKS) * Math.PI * 2 - arc / 2;
+      const a1 = a0 + arc;
+      // quad: (inner a0, outer a0, outer a1, inner a1) in the XY plane
+      verts.push(Math.cos(a0) * ri, Math.sin(a0) * ri, 0);
+      verts.push(Math.cos(a0) * ro, Math.sin(a0) * ro, 0);
+      verts.push(Math.cos(a1) * ro, Math.sin(a1) * ro, 0);
+      verts.push(Math.cos(a1) * ri, Math.sin(a1) * ri, 0);
+      idx.push(base, base + 1, base + 2, base, base + 2, base + 3);
+      base += 4;
+    }
+    this.powerTickGeo = new THREE.BufferGeometry();
+    this.powerTickGeo.setAttribute("position", new THREE.Float32BufferAttribute(verts, 3));
+    this.powerTickGeo.setIndex(idx);
+  }
+
+  // While placing a Tempest building (or with a storm construction site up), show
+  // the reach of every finished power source: a faint filled disc for area PLUS a
+  // crisp cyan boundary ring and a rotating dashed tick-hoop at the field edge,
+  // so the field is readable without a heavy translucent bubble.
   refreshPowerDiscs(type) {
     const isStorm = BUILDINGS[type]?.faction === "storm";
-    if (!this.powerDiscs) this.powerDiscs = [];
+    if (!this.powerFields) this.powerFields = [];
     let i = 0;
     if (isStorm) {
       if (!this.powerDiscGeo) this.powerDiscGeo = new THREE.CircleGeometry(6, 48); // POWER_RADIUS
+      if (!this.powerRingGeo) this.buildPowerFieldGeo();
       for (const e of this.sim.entities) {
         if (!e.building || !e.done || e.owner !== this.localPlayer || e.hp <= 0) continue;
         if (!BUILDINGS[e.type]?.powers) continue;
-        let disc = this.powerDiscs[i];
-        if (!disc) {
-          disc = new THREE.Mesh(this.powerDiscGeo, new THREE.MeshBasicMaterial({
-            color: 0x58c8ff, transparent: true, opacity: 0.13,
+        let f = this.powerFields[i];
+        if (!f) {
+          // faint filled area
+          const disc = new THREE.Mesh(this.powerDiscGeo, new THREE.MeshBasicMaterial({
+            color: 0x58c8ff, transparent: true, opacity: 0.11,
             depthWrite: false, polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -3,
           }));
-          disc.rotation.x = -Math.PI / 2;
-          disc.renderOrder = 2;
-          this.scene.add(disc);
-          this.powerDiscs.push(disc);
+          // crisp bright boundary ring
+          const ring = new THREE.Mesh(this.powerRingGeo, new THREE.MeshBasicMaterial({
+            color: 0x8ff0ff, transparent: true, opacity: 0.95,
+            blending: THREE.AdditiveBlending, depthWrite: false,
+            polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4,
+          }));
+          // rotating dashed tick-hoop just inside the edge
+          const ticks = new THREE.Mesh(this.powerTickGeo, new THREE.MeshBasicMaterial({
+            color: 0xbdf6ff, transparent: true, opacity: 0.85,
+            blending: THREE.AdditiveBlending, depthWrite: false,
+            polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4,
+          }));
+          for (const m of [disc, ring, ticks]) { m.rotation.x = -Math.PI / 2; m.renderOrder = 2; this.scene.add(m); }
+          f = { disc, ring, ticks };
+          this.powerFields.push(f);
         }
         const wx = W2(e.x), wz = W2(e.y);
-        disc.position.set(wx, this.heightAt(wx, wz) + 0.07, wz);
-        disc.visible = true;
+        const gy = this.heightAt(wx, wz);
+        f.disc.position.set(wx, gy + 0.07, wz);
+        f.ring.position.set(wx, gy + 0.09, wz);
+        f.ticks.position.set(wx, gy + 0.09, wz);
+        f.disc.visible = f.ring.visible = f.ticks.visible = true;
         i++;
       }
     }
-    for (; i < this.powerDiscs.length; i++) this.powerDiscs[i].visible = false;
+    for (; i < this.powerFields.length; i++) {
+      const f = this.powerFields[i];
+      f.disc.visible = f.ring.visible = f.ticks.visible = false;
+    }
+    this.powerFieldCount = isStorm ? i : 0;
+  }
+
+  // Per-frame animation of visible power fields: gently pulse the ring opacity
+  // and slowly rotate the dashed tick-hoop so the boundary reads as "active".
+  animatePowerFields(t) {
+    if (!this.powerFields) return;
+    const pulse = 0.7 + Math.sin(t * 3) * 0.25;
+    for (const f of this.powerFields) {
+      if (!f.ring.visible) continue;
+      f.ring.material.opacity = 0.6 + Math.sin(t * 3) * 0.2;
+      f.ticks.material.opacity = pulse;
+      // tick-hoop spins about its own up axis (Z in its local, pre-rotate plane)
+      f.ticks.rotation.z = t * 0.5;
+    }
   }
 
   // Recompute cell positions + validity colors. SC2 semantics: each CELL
@@ -1983,6 +2114,9 @@ export class Renderer {
     // faint ember pulse on lava-barrier crack decals
     if (this.emberMat) this.emberMat.opacity = 0.55 + Math.sin(t * 2.2) * 0.35;
 
+    // pulse/rotate visible Tempest power-field boundary rings
+    this.animatePowerFields(t);
+
     this.fx.update(dt);
     this.composer.render();
   }
@@ -2071,9 +2205,81 @@ export class Renderer {
             this.fx.spawnArc(wx, wz, wx, wz, 0xdff6ff, gy + 6, gy + 0.08);
             this.fx.sparks.burst(wx, gy + 0.3, wz, 12, 0x9fefff, 3, 0.4, 2.5);
             this.fx.shockRing(wx, wz, 0x9fefff, 1.4, 0.3);
+          } else if (ev.kind === "leap" || ev.kind === "engulf") {
+            // lunge/leap: arc the traveling unit from -> to (a high hop) so the
+            // jump reads even before it lands (leap_land handles the slam).
+            const fog = this.sim.fog[this.localPlayer], w = this.sim.map.w;
+            const vFrom = fog[fpToTile(ev.fromY) * w + fpToTile(ev.fromX)] === 2;
+            const vTo = fog[fpToTile(ev.toY) * w + fpToTile(ev.toX)] === 2;
+            if (!vFrom && !vTo) break;
+            const ax = W2(ev.fromX), az = W2(ev.fromY);
+            const bx = W2(ev.toX), bz = W2(ev.toY);
+            const col = ev.kind === "engulf" ? 0x8ff23a : PLAYER_COLORS[ev.owner];
+            this.fx.spawnArc(ax, az, bx, bz, col,
+              this.heightAt(ax, az) + 1.6, this.heightAt(bx, bz) + 0.5);
+            this.fx.spawnPoof(ax, az, col);
+          } else if (ev.kind === "leap_land") {
+            if (!vis) break;
+            this.fx.slam(W2(ev.x), W2(ev.y),
+              PLAYER_COLORS[ev.owner] ?? 0xffd58a);
+          } else if (ev.kind === "stim") {
+            if (!vis) break;
+            this.fx.stim(W2(ev.x), W2(ev.y));
+          } else if (ev.kind === "frenzy") {
+            if (!vis) break;
+            this.fx.frenzy(W2(ev.x), W2(ev.y));
+          } else if (ev.kind === "siege_up" || ev.kind === "burrow_up") {
+            if (!vis) break;
+            this.fx.settle(W2(ev.x), W2(ev.y), 0xcbb58c, true);
+          } else if (ev.kind === "siege_down" || ev.kind === "burrow_down") {
+            if (!vis) break;
+            this.fx.settle(W2(ev.x), W2(ev.y), 0xcbb58c, false);
+          } else if (ev.kind === "burners") {
+            if (!vis) break;
+            // Hellion burners: a quick amber jet + speed-lines (like stim, warmer)
+            this.fx.stim(W2(ev.x), W2(ev.y), 0xff8a3a);
+          } else if (ev.kind === "dome") {
+            if (!vis) break;
+            // Shield Dome bubble; event radius r is in fp units -> world radius.
+            this.fx.dome(W2(ev.x), W2(ev.y), W2(ev.r), 0x66d8ff);
+          } else if (ev.kind === "phase_out" || ev.kind === "phase_in") {
+            if (!vis) break;
+            this.fx.shimmer(W2(ev.x), W2(ev.y), 0xbfe6ff);
+          } else if (ev.kind === "feast") {
+            if (!vis) break;
+            // Essence Feast: soul wisp drifts up off the kill point.
+            this.fx.soul(W2(ev.x), W2(ev.y), 0xff5a6e);
+          } else if (ev.kind === "tempest") {
+            // Fulminar cast windup: an amber ground poof + upward crackle at the
+            // caster before the strike lands (tempest_hit does the impact).
+            if (!vis) break;
+            const wx = W2(ev.x), wz = W2(ev.y);
+            this.fx.hoop(wx, wz, 0x9fefff, 0.5, 2.2, 0.4, 0.75);
+            this.fx.sparks.burst(wx, this.heightAt(wx, wz) + 0.4, wz, 8, 0x9fefff, 1.6, 0.4, 3);
+          } else if (ev.kind === "barrage") {
+            // Barrage windup marker at the target zone
+            if (!vis) break;
+            this.fx.hoop(W2(ev.x), W2(ev.y), 0xffb347, 0.5, 2.4, 0.4, 0.7);
+          } else if (ev.kind === "barrage_hit") {
+            if (!vis) break;
+            const wx = W2(ev.x), wz = W2(ev.y);
+            this.fx.sparks.burst(wx, this.heightAt(wx, wz) + 0.3, wz, 14, 0xffb347, 4, 0.5, 2);
+            this.fx.shockRing(wx, wz, 0xff8a3a, 1.2, 0.3);
           }
           break;
         }
+        case "morph": {
+          // Unit morph (e.g. Nip -> Maw): a green-tinted poof + settle hoop.
+          if (!vis && ev.owner !== this.localPlayer) break;
+          this.fx.spawnPoof(W2(ev.x), W2(ev.y), 0x8ff23a);
+          this.fx.hoop(W2(ev.x), W2(ev.y), 0x8ff23a, 0.4, 1.8, 0.4, 0.7);
+          break;
+        }
+        case "research":
+          // Research complete: a bright confirming flash at the local player's
+          // starting position is overkill (no location); handled by HUD. Only a
+          // subtle audio-less cue would apply — skip ground fx (no coords).
+          break;
         case "trained":
           break; // spawn poof handled on mesh creation
       }
