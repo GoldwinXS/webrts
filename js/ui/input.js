@@ -125,7 +125,7 @@ export class Input {
       return;
     }
     if (e.button === 0) {
-      if (this.placing) { this.confirmPlace(); return; }
+      if (this.placing) { this.confirmPlace(e.shiftKey); return; }
       if (this.targetMode) {
         const g = this.groundAt(e.clientX, e.clientY);
         if (g) this.issueTargetedAbility(g.x, g.y, g.wx, g.wz);
@@ -510,7 +510,7 @@ export class Input {
     this.ghost = new THREE.Mesh(geo, this.ghostMat);
     this.renderer.scene.add(this.ghost);
     this.updateGhost();
-    this.hud.setHint(`Place ${d.name} (left-click to confirm, right-click / Esc to cancel)`);
+    this.hud.setHint(`Place ${d.name} (left-click to confirm, shift-click to queue more, right-click / Esc to cancel)`);
   }
 
   updateGhost() {
@@ -546,21 +546,33 @@ export class Input {
     this.renderer.setPlacementGrid?.(this.placing, fpToTile(g.x), fpToTile(g.y));
   }
 
-  confirmPlace() {
+  // `queue` (shift held): issue the build with q:1 so the worker QUEUES this
+  // structure behind its current order, AND stay in placement mode so the
+  // player can chain-place more buildings (SC2 shift-build). A plain click
+  // places once (q:0, replaces the order) and exits placement.
+  confirmPlace(queue) {
     const d = BUILDINGS[this.placing];
     const { tx, ty } = this.ghostTile || {};
     const worker = this.mySelectedWorkers()[0];
     if (!worker) { this.hud.toast("Select a worker first"); this.audio.error(); return; }
     if (!this.sim.canAfford(this.pid, d.cost)) { this.hud.toast("Not enough scrap"); this.audio.error(); return; }
     if (!this.sim.canPlace(this.placing, tx, ty, this.pid)) { this.hud.toast("Can't build there"); this.audio.error(); return; }
-    // Ooze faction: the worker (Mote) melts into the building site
+    // Ooze faction: the worker (Mote) melts into the building site (no queue —
+    // the Mote is consumed, so a shift-chain isn't meaningful; still stays
+    // placing for convenience).
     const cmd = d.faction === "ooze" ? "ooze_build" : "build";
     const buildCmd = cmd === "ooze_build"
       ? { t: "ooze_build", building: this.placing, tx, ty }
-      : { t: "build", workerId: worker.id, building: this.placing, tx, ty };
+      : { t: "build", workerId: worker.id, building: this.placing, tx, ty, q: queue ? 1 : 0 };
     this.game.issue(buildCmd);
     this.audio.place();
-    this.cancelPlace();
+    if (queue) {
+      // stay in placement mode: refresh the ghost under the cursor so the next
+      // shift-click queues another of the same building. Plain click exits.
+      this.updateGhost();
+    } else {
+      this.cancelPlace();
+    }
   }
 
   cancelPlace() {

@@ -703,8 +703,12 @@ export class Sim {
           if (geo) site.geyserId = geo.id;
         }
         site.builderId = worker.id;
-        worker.order = { kind: "build", targetId: site.id };
-        worker.path = null;
+        // Queue-aware: a shift-build (q:1) APPENDS to the worker's order queue
+        // (build A, then build B) instead of replacing its current order. The
+        // site itself still spawned immediately above (resources deducted now);
+        // only the walk-and-build order is queued. setOrder handles path=null
+        // and the idle-worker-starts-now case.
+        this.setOrder(worker, { kind: "build", targetId: site.id }, c.q);
         break;
       }
       case "ooze_build": {
@@ -1349,7 +1353,14 @@ export class Sim {
 
       case "build": {
         const site = this.byId.get(o.targetId);
-        if (!site || site.done) { u.order = { kind: "idle" }; u.path = null; break; }
+        // Site gone or already finished by someone else: advance the worker's
+        // queue if it has one (build A, then build B / move here), so an
+        // interrupted build doesn't strand the rest of the chain. Otherwise idle.
+        if (!site || site.done) {
+          if (u.next.length) this.popNext(u);
+          else { u.order = { kind: "idle" }; u.path = null; }
+          break;
+        }
         const bd = BUILDINGS[site.type];
         const gap = this.gapTo(u, site);
         if (gap <= (FP * 0.75) | 0) {
@@ -1361,8 +1372,10 @@ export class Sim {
             site.hp = site.maxHp;
             site.shield = site.maxShield;
             this.events.push({ t: "complete", id: site.id, x: site.x, y: site.y, owner: site.owner });
-            u.order = { kind: "idle" };
-            this.autoGather(u);
+            // Finished: run the next queued order (build/move/gather chain) if
+            // the player shift-queued one; else fall back to auto-gathering.
+            if (u.next.length) this.popNext(u);
+            else { u.order = { kind: "idle" }; this.autoGather(u); }
           }
         } else {
           this.travelTo(u, site.x, site.y, d.speed); // static target: always pathfind
@@ -1943,8 +1956,12 @@ export class Sim {
                 px = ((ddx * push) / dd) | 0;
                 py = ((ddy * push) / dd) | 0;
               }
-              a.x = this.clampX(a.x + px); a.y = this.clampY(a.y + py);
-              b.x = this.clampX(b.x - px); b.y = this.clampY(b.y - py);
+              // Clamp the push so it can't shove a GROUND unit off a free tile
+              // straight onto a blocked one in a single tick — that overshoot
+              // is what lets a crowd bull a unit through a 1-tile-thick wall
+              // before the ejection pass can react. Flyers ignore the grid.
+              this.pushGround(a, px, py);
+              this.pushGround(b, -px, -py);
             }
           }
         }
@@ -1954,10 +1971,89 @@ export class Sim {
     for (const u of this.entities) {
       if (!u.unit || u.fly) continue;
       if (this.blocked[fpToTile(u.y) * w + fpToTile(u.x)]) {
-        const free = nearestFree(this.blocked, w, this.map.h, fpToTile(u.x), fpToTile(u.y));
+        // Eject toward where the unit CAME FROM this tick (px,py — its pre-tick,
+        // pre-separation position, which was on a free tile it legitimately
+        // walked from), not the plain outward ring search. A ring search around
+        // the pushed position can pick a free tile on the FAR side of a 1-tile
+        // barrier and teleport the unit through the wall; scoring candidates by
+        // distance-to-previous-position keeps the ejection on the near side.
+        const free = this.nearestFreeToward(fpToTile(u.x), fpToTile(u.y), u.px, u.py);
         if (free) { u.x = tileToFp(free.x); u.y = tileToFp(free.y); }
       }
     }
+  }
+
+  // Move a ground unit by (px,py), but cancel the push if it would carry the
+  // unit from a free tile onto a blocked one (anti-tunnel). Per-axis so a
+  // diagonal push that only clips a wall on one axis still slides along it.
+  // Deterministic, integer-only.
+  pushGround(u, px, py) {
+    if (u.fly) { u.x = this.clampX(u.x + px); u.y = this.clampY(u.y + py); return; }
+    const { w } = this.map;
+    const ox = u.x, oy = u.y;
+    // Already standing on a blocked tile (shouldn't normally happen — the
+    // ejection pass clears it every tick). Do NOT apply a separation push: it
+    // could carry the unit clean across a 1-tile wall onto a free FAR-side
+    // tile, where the ejection pass then leaves it (ejection only relocates
+    // units that are STILL on a blocked tile). Leave it put; ejection handles it.
+    if (this.blocked[fpToTile(oy) * w + fpToTile(ox)]) return;
+    let nx = this.clampX(ox + px), ny = this.clampY(oy + py);
+    // Started on a free tile: don't let this push land us on a blocked one.
+    // Try the full move; if blocked, try each axis alone; else stay put.
+    if (this.blocked[fpToTile(ny) * w + fpToTile(nx)]) {
+      const xOnly = this.clampX(ox + px);
+      const yOnly = this.clampY(oy + py);
+      if (!this.blocked[fpToTile(oy) * w + fpToTile(xOnly)]) { nx = xOnly; ny = oy; }
+      else if (!this.blocked[fpToTile(yOnly) * w + fpToTile(ox)]) { nx = ox; ny = yOnly; }
+      else { nx = ox; ny = oy; }
+    }
+    u.x = nx; u.y = ny;
+  }
+
+  // Eject a stuck unit to a free tile that is REACHABLE from where it came from
+  // (refFx,refFy — its pre-tick position) WITHOUT crossing a wall. A plain
+  // outward ring search (nearestFree) can hand back a free tile on the far side
+  // of a 1-tile-thick barrier — teleporting the unit through the wall,
+  // especially inside a "pocket" where every near-side neighbor is blocked and
+  // the only close free tiles are across the wall. Instead we BFS outward over
+  // FREE tiles from the previous tile: the first frontier tile that isn't the
+  // blocked start is by construction wall-connected to the origin side, so the
+  // unit can never be ejected across a barrier. 4-neighbour, integer-only,
+  // FIFO order => deterministic. Falls back to nearestFree only if the previous
+  // tile is itself invalid (shouldn't happen for a unit that just moved).
+  nearestFreeToward(tx, ty, refFx, refFy) {
+    const { w, h } = this.map;
+    if (tx >= 0 && ty >= 0 && tx < w && ty < h && !this.blocked[ty * w + tx]) return { x: tx, y: ty };
+    const sx = fpToTile(refFx), sy = fpToTile(refFy);
+    if (sx < 0 || sy < 0 || sx >= w || sy >= h || this.blocked[sy * w + sx]) {
+      // previous tile unusable — fall back to the plain ring search
+      const f = nearestFree(this.blocked, w, h, tx, ty);
+      return f;
+    }
+    // BFS from the previous tile across free tiles; return the free tile closest
+    // (in tile steps) to the stuck position, so the unit barely un-sticks
+    // rather than snapping all the way back. Cap the search so a fully walled
+    // pocket can't scan the whole map.
+    const seen = this._ejSeen || (this._ejSeen = new Uint8Array(w * h));
+    seen.fill(0);
+    const queue = [sy * w + sx];
+    seen[sy * w + sx] = 1;
+    let best = null, bestD = 0x7fffffff, bestIdx = 0;
+    let scanned = 0;
+    for (let qi = 0; qi < queue.length; qi++) {
+      if (++scanned > 400) break;               // bounded work per stuck unit
+      const i = queue[qi];
+      const x = i % w, y = (i / w) | 0;
+      // candidate: a reachable free tile that is not the (blocked) stuck tile
+      const dx = x - tx, dy = y - ty;
+      const d = dx * dx + dy * dy;
+      if (d < bestD || (d === bestD && i < bestIdx)) { best = { x, y }; bestD = d; bestIdx = i; }
+      if (x > 0 && !seen[i - 1] && !this.blocked[i - 1]) { seen[i - 1] = 1; queue.push(i - 1); }
+      if (x < w - 1 && !seen[i + 1] && !this.blocked[i + 1]) { seen[i + 1] = 1; queue.push(i + 1); }
+      if (y > 0 && !seen[i - w] && !this.blocked[i - w]) { seen[i - w] = 1; queue.push(i - w); }
+      if (y < h - 1 && !seen[i + w] && !this.blocked[i + w]) { seen[i + w] = 1; queue.push(i + w); }
+    }
+    return best;
   }
 
   // ---------- fog of war ----------
