@@ -18,7 +18,7 @@ export const PATCH_AMOUNT = 1500;
 // line: its footprint CENTER must be at least this many tiles (center-to-
 // center) from every mineral patch and geyser. Keeps mining from being
 // trivially over-efficient. Refineries are exempt (they sit ON a geyser).
-export const HQ_RESOURCE_CLEARANCE = 4;
+export const HQ_RESOURCE_CLEARANCE = 5;
 
 // Vespene gas economy. A refinery built over a geyser lets workers harvest gas
 // on a mineral-like cycle. Depleted geysers still trickle a little (SC-style).

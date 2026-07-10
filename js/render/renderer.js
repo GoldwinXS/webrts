@@ -13,7 +13,7 @@ import { LineSegments2 } from "three/addons/lines/LineSegments2.js";
 import { LineSegmentsGeometry } from "three/addons/lines/LineSegmentsGeometry.js";
 import { FP, HALF, fpToTile } from "../core/fixed.js";
 import { makeRng } from "../core/fixed.js";
-import { BUILDINGS, PLAYER_COLORS } from "../core/data.js";
+import { BUILDINGS, PLAYER_COLORS, HQ_RESOURCE_CLEARANCE } from "../core/data.js";
 import { RtsCamera } from "./camera.js";
 import { makeUnitVisual, makeBuildingVisual, makeMineralVisual, makeGeyserVisual, makeShrubVisual, makeTowerVisual, animateTower, animateVisual, animateShrub, SHARED, propToon, toonGradient, barrierMaterials } from "./models/index.js";
 import { UNITS } from "../core/data.js";
@@ -1483,7 +1483,9 @@ export class Renderer {
   // shows whether THAT TILE is buildable ground (the ghost's own green/red
   // still communicates whether the whole footprint fits). For deposit
   // buildings the resource-clearance zone shows red so the "no-CP ring"
-  // around minerals/geysers is visible.
+  // around minerals/geysers is visible. Invalid cells STAY VISIBLE and turn
+  // red instead of vanishing — a vanishing grid reads as a rendering glitch,
+  // not as "you can't build here."
   refreshPlacementGrid() {
     const g = this.placementGrid;
     if (!g) return;
@@ -1491,7 +1493,12 @@ export class Renderer {
     const sim = this.sim;
     const { w, h } = sim.map;
     const span = this.gridSpan;
-    const clearFp = (d?.deposit ? 6 : 0) * FP; // HQ_RESOURCE_CLEARANCE
+    // Mirror sim.canPlace's deposit-clearance check exactly: same constant,
+    // same footprint-center math (size*FP>>1, not a fixed per-tile HALF), so
+    // the ring the player sees matches what canPlace will actually reject.
+    const size = d?.size ?? 1;
+    const half = (size * FP) >> 1;
+    const clearFp = d?.deposit ? HQ_RESOURCE_CLEARANCE * FP : 0;
     let i = 0;
     for (let dz = -span; dz <= span; dz++) {
       for (let dx = -span; dx <= span; dx++) {
@@ -1506,16 +1513,19 @@ export class Renderer {
           const gey = sim.geyserInFootprint?.(cellX, cellY, 1);
           if (d?.onGeyser) { /* refinery: geyser tiles are the point */ }
           else if (gey) ok = false;
-          // deposit clearance ring: tile too close to any resource
+          // deposit clearance ring: footprint center too close to any resource
           if (ok && clearFp) {
-            const cx = cellX * FP + HALF, cy = cellY * FP + HALF;
+            const cx = cellX * FP + half, cy = cellY * FP + half;
             const near = sim.nearestEntity(cx, cy, clearFp,
               (e) => e.type === "mineral" || e.type === "geyser");
             if (near) ok = false;
           }
         }
-        q.material.color.setHex(0x2e9e57);
-        q.visible = ok;
+        // invalid needs to read RED at a glance — low alpha muddied to olive
+        // over bright grass, so it gets a deeper red and MORE opacity, not less
+        q.material.color.setHex(ok ? 0x2e9e57 : 0xc22e2e);
+        q.material.opacity = ok ? 0.3 : 0.45;
+        q.visible = true;
       }
     }
   }
