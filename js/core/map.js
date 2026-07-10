@@ -406,15 +406,31 @@ function buildCandidate(seed, opts) {
     }
   };
   // central spine (nat0 -> center -> nat1), plus perpendicular flanking copies.
+  // Each half-spine BENDS through a waypoint pushed off the straight line so
+  // routes read as gentle S-curves instead of ruler-straight corridors. The
+  // l=0 bend waypoints are remembered as anchors for the enforced chokes.
   const spinePerp = { x: -c0.dy, y: c0.dx };
+  const bendPts = [];
+  const reserveBent = (ax, ay, bx, by, hw, record) => {
+    const mx = (ax + bx) >> 1, my = (ay + by) >> 1;
+    const pxs = -Math.sign(by - ay) || 1, pys = Math.sign(bx - ax) || 0;
+    const amp = (3 + (rng() % 3)) * ((rng() & 1) ? 1 : -1);   // ±3..5 tiles
+    const wx = clampTile(mx + pxs * amp, W), wy = clampTile(my + pys * amp, H);
+    reserveSeg(ax, ay, wx, wy, hw);
+    reserveSeg(wx, wy, bx, by, hw);
+    if (record) bendPts.push({
+      x: wx, y: wy,
+      dir: { x: Math.sign(bx - ax), y: Math.sign(by - ay) },
+    });
+  };
   for (let l = 0; l < laneCount; l++) {
     // flank offset: 0, +sep, -sep, ... so lanes fan out symmetrically.
     const k = (l + 1) >> 1;
     const sgn = (l & 1) ? -1 : 1;
     const off = l === 0 ? 0 : sgn * k * (laneHalf * 2 + 3);
     const ox = spinePerp.x * off, oy = spinePerp.y * off;
-    reserveSeg(nat0.x + ox, nat0.y + oy, cx0 + ox, cy0 + oy, laneHalf);
-    reserveSeg(cx0 + ox, cy0 + oy, nat1x + ox, nat1y + oy, laneHalf);
+    reserveBent(nat0.x + ox, nat0.y + oy, cx0 + ox, cy0 + oy, laneHalf, true);
+    reserveBent(cx0 + ox, cy0 + oy, nat1x + ox, nat1y + oy, laneHalf, true);
   }
   // spokes: connect each extra expansion to the nearest point on the spine so it
   // is never stranded. We link toward the map center (a spine point always on it).
@@ -593,6 +609,60 @@ function buildCandidate(seed, opts) {
       setRock(x, y, 1); setHeight(x, y, mainHeight);
     }
 
+  // ---- 8d. GOLD expansion pair (contested rich minerals mid-map) -------------
+  // One symmetric pair of "gold" clusters: 4 rich patches in an open mid-map
+  // pocket, far from every base, sitting on the lane network so the new chokes
+  // make them fights. Sim spawns these with a bigger payout; skipped cleanly
+  // when the geometry offers no safe pocket (rare — validated by stats).
+  const golds = [];
+  {
+    const goldCandidates = [];
+    for (const side of [1, -1])
+      for (let r = 9; r <= 18; r += 3)
+        goldCandidates.push({ x: cx0 + spinePerp.x * side * r, y: cy0 + spinePerp.y * side * r });
+    for (let k = 8; k <= 14; k += 3)
+      goldCandidates.push({ x: cx0 - c0.dx * k, y: cy0 - c0.dy * k });
+    // only consider pockets reachable from the mains RIGHT NOW — a rim pocket
+    // behind the center island's cliffs is a dead pocket no corridor can save
+    const reachableNow = bfs(rock, W, H, start0.x, start0.y);
+    for (const c of goldCandidates) {
+      if (!inb(c.x, c.y)) continue;
+      if (!reachableNow[idx(c.x, c.y)]) continue;
+      // flat open lowland pocket (9x9) with room for a CP next to the patches
+      let ok = true;
+      for (let dy = -4; dy <= 4 && ok; dy++)
+        for (let dx = -4; dx <= 4 && ok; dx++) {
+          const x = c.x + dx, y = c.y + dy;
+          if (!inb(x, y) || rock[idx(x, y)] || height[idx(x, y)] !== 0 || rampTiles[idx(x, y)]) ok = false;
+        }
+      if (!ok) continue;
+      for (const s of starts) if (tdist2(c.x, c.y, s.x, s.y) < 14 * 14) ok = false;
+      const [pn2x, pn2y] = partner(nat0.x, nat0.y);
+      if (tdist2(c.x, c.y, nat0.x, nat0.y) < 11 * 11 || tdist2(c.x, c.y, pn2x, pn2y) < 11 * 11) ok = false;
+      for (const ex of expansions) if (ex !== nat0 && tdist2(c.x, c.y, ex.x, ex.y) < 11 * 11) ok = false;
+      const [gpx, gpy] = partner(c.x, c.y);
+      if (tdist2(c.x, c.y, gpx, gpy) < 10 * 10) ok = false;   // clear of own mirror
+      if (!ok) continue;
+      const awx = Math.sign(c.x - cx0) || 1, awy = Math.sign(c.y - cy0) || 1;
+      let placedPatches = 0;
+      for (const [ox, oy] of arcOffsets(awx, awy, 5, arcStyle)) {
+        if (placedPatches >= 4) break;
+        const tx = c.x + ox, ty = c.y + oy;
+        if (!inb(tx, ty) || rock[idx(tx, ty)] || rampTiles[idx(tx, ty)] ||
+            height[idx(tx, ty)] !== 0 || nearGeyser(tx, ty)) continue;
+        golds.push({ x: tileToFp(tx), y: tileToFp(ty) });
+        const [px2, py2] = partner(tx, ty);
+        golds.push({ x: tileToFp(px2), y: tileToFp(py2) });
+        placedPatches++;
+      }
+      if (placedPatches < 3) { golds.length = 0; continue; }   // too cramped, try next pocket
+      // reserve a corridor from the pocket to the lane network so barrier
+      // growth (step 9) never seals the golds into a dead pocket
+      reserveSeg(c.x, c.y, cx0, cy0, laneHalf);
+      break;
+    }
+  }
+
   // ---- 8b. decorative mesas (extra vertical drama, per profile) -------------
   // flat/mesa profiles drop a tall standalone mesa pair off a flank so the
   // skyline isn't monotone. Purely decorative high ground (walled, no ramp) — it
@@ -617,7 +687,7 @@ function buildCandidate(seed, opts) {
           Math.abs(my - start0.y) <= plateauR + 1 + mesaReach) continue;
       if (Math.abs(mx - nat0.x) <= natR + 1 + mesaReach &&
           Math.abs(my - nat0.y) <= natR + 1 + mesaReach) continue;
-      raiseMesa({ x: mx, y: my }, mr, 3, minerals, geyserTiles); // tall level-3 mesa
+      raiseMesa({ x: mx, y: my }, mr, 3, minerals.concat(golds), geyserTiles); // tall level-3 mesa
     }
   }
 
@@ -632,8 +702,106 @@ function buildCandidate(seed, opts) {
   growBarriers(rng, palette, {
     W, H, idx, inb, partner, rock, height, rampTiles, losBlock,
     setBarrier, starts, expansions, naturalsR: natR, plateauR,
-    geyserTiles, c0, minerals, addDeco, reserved,
+    geyserTiles, c0, minerals: minerals.concat(golds), addDeco, reserved,
   });
+
+  // ---- 9b. ENFORCED CHOKES ---------------------------------------------------
+  // Pinch the primary route at its bend waypoints down to a 3-4 tile corridor
+  // with organic barrier walls on both flanks, so armies actually have to
+  // funnel somewhere between the naturals and the center. partner() mirroring
+  // keeps it balanced; the connectivity validator + retry loop guard against
+  // an overzealous pinch. Only open flat lowland gets pinched — never ramps,
+  // bases, or resource pockets.
+  const chokes = [];
+  {
+    const nearRes = (x, y, r) => {
+      for (const gt of geyserTiles) if (Math.abs(x - gt.x) <= r && Math.abs(y - gt.y) <= r) return true;
+      for (const m of minerals.concat(golds)) {
+        if (Math.abs(x - ((m.x / 256) | 0)) <= r && Math.abs(y - ((m.y / 256) | 0)) <= r) return true;
+      }
+      return false;
+    };
+    const [pnat0x, pnat0y] = partner(nat0.x, nat0.y);
+    // pad=0 keeps walls out of the bases' inner build room only; the corridor
+    // uses a bigger pad so the open lane never hugs a base edge.
+    const baseClear = (x, y, pad) => {
+      for (const s of starts) if (Math.abs(x - s.x) <= plateauR + 1 + pad && Math.abs(y - s.y) <= plateauR + 1 + pad) return false;
+      if (Math.abs(x - nat0.x) <= natR - 1 + pad && Math.abs(y - nat0.y) <= natR - 1 + pad) return false;
+      if (Math.abs(x - pnat0x) <= natR - 1 + pad && Math.abs(y - pnat0y) <= natR - 1 + pad) return false;
+      for (const ex of expansions) if (ex !== nat0 && Math.abs(x - ex.x) <= 4 + pad && Math.abs(y - ex.y) <= 4 + pad) return false;
+      return true;
+    };
+    const flatOpen = (x, y) =>
+      inb(x, y) && height[idx(x, y)] === 0 && !rampTiles[idx(x, y)] && !nearRes(x, y, 2);
+    const corridorOk = (x, y) => flatOpen(x, y) && baseClear(x, y, 1);
+    const wallOk = (x, y) => flatOpen(x, y) && baseClear(x, y, 0);
+    let stamped = 0;
+    for (const bp of bendPts) {
+      if (stamped >= 2) break;
+      const d = bp.dir;
+      const p = { x: -d.y, y: d.x };                  // route-perpendicular
+      if (!p.x && !p.y) continue;
+      const diag = p.x !== 0 && p.y !== 0;
+      const chokeW = 3 + (rng() & 1);                 // 3 or 4 wide corridor
+      const clearA = (chokeW - 1) >> 1, clearB = chokeW - 1 - clearA;
+      const wallDepth = 3;
+      // slide along the route to find a spot where corridor AND wall tiles are
+      // all stampable open lowland
+      let anchor = null;
+      for (const k of [0, 2, -2, 4, -4, 6, -6, 8, -8, 10, -10]) {
+        const px0 = bp.x + d.x * k, py0 = bp.y + d.y * k;
+        let ok = true;
+        for (let a = -1; a <= 1 && ok; a++) {
+          for (let t = -clearA; t <= clearB && ok; t++)
+            if (!corridorOk(px0 + p.x * t + d.x * a, py0 + p.y * t + d.y * a)) ok = false;
+          for (let t = 1; t <= wallDepth && ok; t++) {
+            if (!wallOk(px0 + p.x * (clearB + t) + d.x * a, py0 + p.y * (clearB + t) + d.y * a)) ok = false;
+            if (!wallOk(px0 - p.x * (clearA + t) + d.x * a, py0 - p.y * (clearA + t) + d.y * a)) ok = false;
+          }
+        }
+        if (ok) { anchor = { x: px0, y: py0 }; break; }
+      }
+      if (!anchor) continue;
+      // snapshot so a pinch that severs anything can be rolled back wholesale
+      const rockBackup = rock.slice(), bkBackup = barrierKind.slice();
+      // stamp: clear the corridor, wall the flanks. For diagonal routes the
+      // p-steps skip lattice cells, so each wall tile also stamps a filler
+      // neighbor — otherwise units zigzag straight through the "wall".
+      const stampWall = (x, y) => {
+        if (!wallOk(x, y)) return;
+        const kind = (rng() % palette.secondaryChance) === 0 ? palette.secondary : palette.primary;
+        setBarrier(x, y, kind);
+        if (diag && wallOk(x + p.x, y)) setBarrier(x + p.x, y, kind);
+      };
+      for (let a = -1; a <= 1; a++) {
+        for (let t = -clearA; t <= clearB; t++) {
+          const x = anchor.x + p.x * t + d.x * a, y = anchor.y + p.y * t + d.y * a;
+          setRock(x, y, 0);
+          if (diag) setRock(x + p.x, y, 0);
+        }
+        for (let t = 1; t <= wallDepth; t++) {
+          stampWall(anchor.x + p.x * (clearB + t) + d.x * a, anchor.y + p.y * (clearB + t) + d.y * a);
+          stampWall(anchor.x - p.x * (clearA + t) + d.x * a, anchor.y - p.y * (clearA + t) + d.y * a);
+        }
+      }
+      // the pinch must not sever ANYTHING: both mains, every expansion pocket
+      // and every gold patch must stay mutually reachable, or we roll back
+      const reach = bfs(rock, W, H, start0.x, start0.y);
+      let intact = reach[idx(start1.x, start1.y)] !== 0;
+      for (const g of golds) if (intact && !reach[idx((g.x / 256) | 0, (g.y / 256) | 0)]) intact = false;
+      for (const ex of expansions) if (intact && !reach[idx(ex.x, ex.y)]) intact = false;
+      if (!intact) { rock.set(rockBackup); barrierKind.set(bkBackup); continue; }
+      const [cpx, cpy] = partner(anchor.x, anchor.y);
+      // partner perp must mirror with the map so validation scans along the
+      // mirrored corridor, not across its walls
+      const mp = mode === "rotate" ? p
+               : reflectAxis === 0 ? { x: -p.x, y: p.y }
+               :                     { x: p.x, y: -p.y };
+      chokes.push({ x: anchor.x, y: anchor.y, px: p.x, py: p.y, w: chokeW });
+      chokes.push({ x: cpx, y: cpy, px: mp.x, py: mp.y, w: chokeW });
+      stamped++;
+    }
+  }
 
   // ---- 10. line-of-sight blockers -------------------------------------------
   if (opts.losBlockers) {
@@ -648,9 +816,21 @@ function buildCandidate(seed, opts) {
   const [natPx, natPy] = partner(nat0.x, nat0.y);
   const naturals = [{ x: nat0.x, y: nat0.y }, { x: natPx, y: natPy }];
 
+  // Final gold sweep: if any later feature (mesa, barrier blob, choke wall)
+  // sealed the gold pockets off after placement, drop the golds entirely —
+  // a missing bonus beats an unreachable one.
+  if (golds.length) {
+    const finalReach = bfs(rock, W, H, start0.x, start0.y);
+    for (const g of golds) {
+      if (!finalReach[idx((g.x / 256) | 0, (g.y / 256) | 0)]) { golds.length = 0; break; }
+    }
+  }
+
   return {
     w: W, h: H, rock, height, rampTiles, barrierKind,
     starts, minerals, geysers, losBlock, decos,
+    golds,                                           // rich contested patches (fp coords)
+    chokes,                                          // enforced route pinches (validation)
     naturals, clusters,                              // clusters/naturals: internal only
     ramps: [{ tiles: rampMain, alongX: Math.abs(c0.dx) >= Math.abs(c0.dy) }],
     vProfile,                                        // internal: variety logging
@@ -1758,6 +1938,35 @@ function validateVerbose(map) {
   if (map.ramps && map.ramps[0] && map.ramps[0].tiles.length) {
     const width = measureChoke(map.ramps[0].tiles, rock, w, h, map.ramps[0].alongX);
     if (width > 4) return "choke width " + width;      // hard ceiling widened to 4
+  }
+
+  // (g) enforced route chokes: the corridor at every recorded pinch must be
+  // open and 2..6 tiles wide along its perpendicular (3-4 by construction;
+  // slack tolerates a neighboring blob merging into a wall).
+  if (map.chokes) {
+    for (const c of map.chokes) {
+      if (!inb(c.x, c.y) || rock[idx(c.x, c.y)]) return "choke center blocked @" + c.x + "," + c.y;
+      let wdt = 1;
+      for (let t = 1; t <= 8; t++) {
+        const x = c.x + c.px * t, y = c.y + c.py * t;
+        if (!inb(x, y) || rock[idx(x, y)]) break;
+        wdt++;
+      }
+      for (let t = 1; t <= 8; t++) {
+        const x = c.x - c.px * t, y = c.y - c.py * t;
+        if (!inb(x, y) || rock[idx(x, y)]) break;
+        wdt++;
+      }
+      if (wdt < 2 || wdt > 6) return "route choke width " + wdt + " @" + c.x + "," + c.y;
+    }
+  }
+
+  // (h) gold patches must sit on open passable ground
+  if (map.golds) {
+    for (const g of map.golds) {
+      const gx = (g.x / 256) | 0, gy = (g.y / 256) | 0;
+      if (!inb(gx, gy) || rock[idx(gx, gy)]) return "gold patch blocked @" + gx + "," + gy;
+    }
   }
 
   return null;

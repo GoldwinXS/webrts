@@ -4,6 +4,7 @@
 // what makes lockstep multiplayer possible.
 import { FP, HALF, tileToFp, fpToTile, isqrt, dist, dist2, makeHash } from "./fixed.js";
 import { UNITS, BUILDINGS, FACTIONS, START_MINERALS, START_GAS, CARRY_AMOUNT, GATHER_TICKS, PATCH_AMOUNT, MAX_QUEUE,
+  GOLD_PATCH_AMOUNT, GOLD_CARRY_BONUS,
   GAS_CARRY, GAS_GATHER_TICKS, GAS_AMOUNT, GAS_DEPLETED, HQ_RESOURCE_CLEARANCE,
   UPGRADES, UPGRADE_BITS, ABILITIES, PLATING_HP, SERVOS_SPEED_NUM, SERVOS_SPEED_DEN,
   GOO_GROW_INTERVAL, GOO_RECEDE_INTERVAL, GOO_NOISE, GOO_MAX_RADIUS, GOO_SPEED_NUM, GOO_SPEED_DEN,
@@ -62,6 +63,10 @@ export class Sim {
 
     for (const m of this.map.minerals) {
       this.addEntity({ type: "mineral", owner: -1, x: m.x, y: m.y, hp: 0, maxHp: 0, amount: PATCH_AMOUNT, radius: (FP * 0.4) | 0 });
+    }
+    // Gold patches: contested mid-map minerals — smaller pool, richer trips.
+    for (const m of (this.map.golds || [])) {
+      this.addEntity({ type: "mineral", rich: true, owner: -1, x: m.x, y: m.y, hp: 0, maxHp: 0, amount: GOLD_PATCH_AMOUNT, radius: (FP * 0.4) | 0 });
     }
     // Vespene geysers: non-blocking resource nodes. Placed at fp tile centers.
     // (map.js may not emit geysers yet — code defensively.)
@@ -1315,7 +1320,7 @@ export class Sim {
           u.carry = take;
           u.carryKind = 1;         // 1 = gas
         } else {
-          const take = Math.min(CARRY_AMOUNT, node.amount);
+          const take = Math.min(CARRY_AMOUNT + (node.rich ? GOLD_CARRY_BONUS : 0), node.amount);
           node.amount -= take;
           u.carry = take;
           u.carryKind = 0;         // 0 = minerals

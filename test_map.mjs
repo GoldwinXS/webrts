@@ -144,6 +144,7 @@ let configs = 0, fallbacks = 0;
 const fails = [];
 const mainDist = [], natDist = [];
 let detOk = true, chokeMax = 0;
+let withChokes = 0, withGolds = 0;
 
 for (const seed of seeds)
   for (const spawns of modes)
@@ -190,6 +191,27 @@ for (const seed of seeds)
       const bi = barrierInInterior(map);
       if (bi) fails.push(`BARRIER-INTERIOR seed${seed} ${spawns} exp${expansions} @${bi}`);
 
+      // enforced route chokes: corridor open and 2..6 wide at every pinch
+      if (map.chokes?.length) {
+        withChokes++;
+        for (const c of map.chokes) {
+          if (map.rock[idx(c.x, c.y)]) { fails.push(`CHOKE-BLOCKED seed${seed} ${spawns} @${c.x},${c.y}`); continue; }
+          let wdt = 1;
+          for (let t = 1; t <= 8; t++) { const x = c.x + c.px * t, y = c.y + c.py * t; if (!inb(x, y) || map.rock[idx(x, y)]) break; wdt++; }
+          for (let t = 1; t <= 8; t++) { const x = c.x - c.px * t, y = c.y - c.py * t; if (!inb(x, y) || map.rock[idx(x, y)]) break; wdt++; }
+          if (wdt < 2 || wdt > 6) fails.push(`ROUTE-CHOKE ${wdt} seed${seed} ${spawns} exp${expansions} @${c.x},${c.y}`);
+        }
+      }
+      // gold patches: open ground, reachable from both mains
+      if (map.golds?.length) {
+        withGolds++;
+        for (const g of map.golds) {
+          const gx = (g.x / 256) | 0, gy = (g.y / 256) | 0;
+          if (map.rock[idx(gx, gy)]) fails.push(`GOLD-BLOCKED seed${seed} ${spawns} @${gx},${gy}`);
+          else if (!reach[idx(gx, gy)]) fails.push(`GOLD-UNREACHABLE seed${seed} ${spawns} @${gx},${gy}`);
+        }
+      }
+
       if (spawns === "close") {
         const s0 = map.starts[0], s1 = map.starts[1];
         if (Math.abs(s0.x - s1.x) <= 14 && Math.abs(s0.y - s1.y) <= 14) fails.push(`PLATEAU-OVERLAP seed${seed} close exp${expansions}`);
@@ -203,6 +225,8 @@ console.log(`  MAIN free @r7:        ${stat(mainDist)}   (require >= 115)`);
 console.log(`  NATURAL free @r6:     ${stat(natDist)}   (require >= 80)`);
 console.log(`  determinism ok:       ${detOk}`);
 console.log(`  max main-ramp choke:  ${chokeMax}   (require <= 4)`);
+console.log(`  route chokes present: ${withChokes}/${configs} configs`);
+console.log(`  gold pair present:    ${withGolds}/${configs} configs`);
 console.log(`  assertion failures:   ${fails.length}`);
 for (const f of fails.slice(0, 30)) console.log("    " + f);
 if (fails.length === 0 && fallbacks === 0) console.log("ALL CHECKS PASSED.");

@@ -9,6 +9,8 @@ export const MAP_H = 56;
 export const START_MINERALS = 50;
 export const START_GAS = 0;
 export const CARRY_AMOUNT = 8;       // minerals per worker trip
+export const GOLD_PATCH_AMOUNT = 1000; // rich contested patches: smaller pool...
+export const GOLD_CARRY_BONUS = 4;     // ...but +4 per trip (12 vs 8)
 export const GATHER_TICKS = 18;      // time spent mining at a patch
 export const PATCH_AMOUNT = 1500;
 

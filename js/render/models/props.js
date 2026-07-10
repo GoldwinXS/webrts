@@ -31,11 +31,13 @@ export function makeMineralVisual(e) {
   const group = new THREE.Group();
   // `mat` keeps the depletion-tint contract: a single shared material whose
   // emissive the renderer pulses/fades. Warm rust-copper glow reads as
-  // "salvage worth grabbing" without looking like a crystal.
-  const mat = new THREE.MeshToonMaterial({
-    color: 0x9aa1a8, gradientMap: toonGradient(),
-    emissive: 0xc9853f, emissiveIntensity: 0.55,
-  });
+  // "salvage worth grabbing" without looking like a crystal. RICH (gold)
+  // patches trade the gunmetal for gleaming brass so they read from orbit.
+  const mat = new THREE.MeshToonMaterial(e.rich
+    ? { color: 0xd4af37, gradientMap: toonGradient(),
+        emissive: 0xffc94d, emissiveIntensity: 0.85 }
+    : { color: 0x9aa1a8, gradientMap: toonGradient(),
+        emissive: 0xc9853f, emissiveIntensity: 0.55 });
   // Main chunk: a stack of two chunky scrap cubes (the piece the renderer
   // scales down as the patch depletes -- must stay userData.crystal).
   const main = new THREE.Group();
@@ -78,7 +80,7 @@ export function makeMineralVisual(e) {
   group.add(baseRock, main, plate, slab, slab2, bolt, bolt2);
   liftToGround(group, -0.06);
   group.userData.crystal = main;
-  group.userData.anim = { kind: "mineral", mat };
+  group.userData.anim = { kind: "mineral", mat, base: e.rich ? 0.7 : 0.4 };
   return group;
 }
 
@@ -87,7 +89,7 @@ export function makeMineralVisual(e) {
 export function animateMineral(g, e, t) {
   const a = g.userData.anim;
   if (!a || a.kind !== "mineral") return;
-  a.mat.emissiveIntensity = 0.4 + Math.sin(t * 1.5 + e.id) * 0.18;
+  a.mat.emissiveIntensity = (a.base ?? 0.4) + Math.sin(t * 1.5 + e.id) * 0.18;
 }
 
 // ---------------------------------------------------------------------------

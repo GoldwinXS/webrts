@@ -146,12 +146,19 @@ export class Renderer {
     const geo = new THREE.SphereGeometry(R, 24, 16);
     const horizon = new THREE.Color(this.theme.fog);
     const zenith = new THREE.Color(this.theme.sky).lerp(new THREE.Color(0xffffff), 0.10);
+    // per-theme warm horizon glow band: golden over verdant fields, ember over
+    // ash, cold peach sun over ice — gives the skyline a time-of-day feel
+    const glow = new THREE.Color(this.theme.name === "ashen" ? 0xffb27a
+               : this.theme.name === "frozen" ? 0xffd9c2 : 0xffe9b0);
     const pos = geo.attributes.position;
     const col = new Float32Array(pos.count * 3);
     const c = new THREE.Color();
     for (let i = 0; i < pos.count; i++) {
       const t = Math.max(0, Math.min(1, (pos.getY(i) / R + 0.12) / 0.85));
       c.copy(horizon).lerp(zenith, t);
+      // low-band glow, strongest right at the horizon, gone by mid-sky
+      const g = Math.max(0, 0.35 - t) / 0.35;
+      c.lerp(glow, g * g * 0.55);
       col[i * 3] = c.r; col[i * 3 + 1] = c.g; col[i * 3 + 2] = c.b;
     }
     geo.setAttribute("color", new THREE.BufferAttribute(col, 3));
@@ -706,34 +713,54 @@ export class Renderer {
       ctx.restore();
     }
 
-    // ---- 4. crisp dark outline along cliff edges + around barrier blobs -----
-    // Draw a 2-3 texel dark band on the ground-side of every cliff face, and a
-    // border around flat-ground barrier tiles so stands/outcrops read as blobs.
+    // ---- 4. crisp dark outline along cliff edges ----------------------------
+    // Draw a dark band on the ground-side of every cliff face so walls read.
     // Toon outlines stay DARK (that is the look), but hue-tied to the biome —
     // deep forest green / burnt umber / deep slate blue — the way a painter
     // inks with a dark cousin of the local color instead of neutral black.
-    const outline = tName === "verdant" ? "rgba(28,52,34,0.60)"
-                  : tName === "ashen"   ? "rgba(94,44,24,0.62)"
-                  :                       "rgba(40,60,92,0.60)";
+    // Barrier blobs (forest/lava/ice/rock doodad stands) get NO inked border —
+    // they already carry 3D props, and the box outline under them read as an
+    // ugly perimeter fence. They get a soft pool of shade below instead.
+    const outline = tName === "verdant" ? "rgba(28,52,34,0.50)"
+                  : tName === "ashen"   ? "rgba(94,44,24,0.52)"
+                  :                       "rgba(40,60,92,0.50)";
     const OW = Math.max(2, (PX / 6) | 0);             // outline band width
     ctx.fillStyle = outline;
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
-        const cliff = isCliffFace(x, y);
-        const kind = barrierKind ? barrierKind[y * w + x] : (rockAt(x, y) && !cliff ? 4 : 0);
-        const isBarrier = rockAt(x, y) && !cliff && kind;
-        if (!cliff && !isBarrier) continue;
+        if (!isCliffFace(x, y)) continue;
         // draw an inset border on the sides that face open/lower ground
         const px = x * PX, py = y * PX;
-        const lowerOrOpen = (nx, ny) => {
-          if (cliff) return lvlAt(nx, ny) < lvlAt(x, y) && !isCliffFace(nx, ny) || (!rockAt(nx, ny));
-          return !(rockAt(nx, ny) && !isCliffFace(nx, ny) && (barrierKind ? barrierKind[ny * w + nx] : 4));
-        };
+        const lowerOrOpen = (nx, ny) =>
+          lvlAt(nx, ny) < lvlAt(x, y) && !isCliffFace(nx, ny) || (!rockAt(nx, ny));
         if (lowerOrOpen(x - 1, y)) ctx.fillRect(px, py, OW, PX);
         if (lowerOrOpen(x + 1, y)) ctx.fillRect(px + PX - OW, py, OW, PX);
         if (lowerOrOpen(x, y - 1)) ctx.fillRect(px, py, PX, OW);
         if (lowerOrOpen(x, y + 1)) ctx.fillRect(px, py + PX - OW, PX, OW);
       }
+    }
+
+    // ---- 4b. barrier blobs: soft feathered ground shade (like losBlock) -----
+    // The prop clusters sit in an organic pool of shadow that overlaps tile
+    // bounds, instead of an inked rectangle fence.
+    {
+      const tint = tName === "verdant" ? "22,52,32"
+                 : tName === "ashen"  ? "96,42,22"
+                 :                      "40,68,104";
+      const r = PX * 0.85;
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          if (!rockAt(x, y) || isCliffFace(x, y)) continue;
+          if (barrierKind && !barrierKind[y * w + x]) continue;
+          const cx = x * PX + PX / 2, cy = y * PX + PX / 2;
+          const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
+          grad.addColorStop(0, `rgba(${tint},0.20)`);
+          grad.addColorStop(1, `rgba(${tint},0)`);
+          ctx.fillStyle = grad;
+          ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
+        }
+      }
+      ctx.fillStyle = outline; // restore for any later passes
     }
 
     // ---- 5. cliff FACE fill: warm painted rock derived from cliffTop --------

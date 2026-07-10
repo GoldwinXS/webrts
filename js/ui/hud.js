@@ -1007,7 +1007,7 @@ export class Hud {
       const tx = fpToTile(e.x), ty = fpToTile(e.y);
       const f = fog[ty * w + tx];
       if (e.type === "mineral") {
-        if (f >= 1) { ctx.fillStyle = "#0e9c8d"; ctx.fillRect(tx * S, ty * S, S, S); }
+        if (f >= 1) { ctx.fillStyle = e.rich ? "#e0b23a" : "#0e9c8d"; ctx.fillRect(tx * S, ty * S, S, S); }
         continue;
       }
       if (e.owner === this.pid || f === 2 || (e.building && (e.seenBy & (1 << this.pid)))) {
