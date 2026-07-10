@@ -9,6 +9,7 @@ import { GameAudio } from "./audio.js";
 import { rebind } from "./ui/keys.js";
 import { TICK_MS, UNITS, BUILDINGS, FACTIONS } from "./core/data.js";
 import { FP, HALF, tileToFp } from "./core/fixed.js";
+import { CampaignRunner, mountCampaign } from "./campaign/campaign.js";
 
 const audio = new GameAudio();
 document.addEventListener("pointerdown", () => audio.init(), { once: true });
@@ -201,10 +202,16 @@ function makeLabel(scene, text, wx, wz, y, color = "#e6edf3") {
   return spr;
 }
 
-function startGame(mode, seed, netConn, opts, showcase) {
+function startGame(mode, seed, netConn, opts, showcase, campaignMission) {
   menu.classList.add("hidden");
+  document.getElementById("campaign-select")?.classList.add("hidden");
   const game = new Game(mode, seed, netConn, opts);
   if (showcase) prepShowcase(game);
+  // Campaign: run the mission's setup BEFORE the Renderer is built (so its
+  // height grid / entity meshes reflect the scripted state), exactly like
+  // prepShowcase. runSetup returns mission scratch state carried into the runner.
+  let campaignState = null;
+  if (campaignMission) campaignState = CampaignRunner.runSetup(campaignMission, game);
   const renderer = new Renderer($("game"), game.sim, game.localPlayer);
   if (showcase) buildShowcase(game, renderer);
   const hud = new Hud(game, renderer, audio);
@@ -212,6 +219,19 @@ function startGame(mode, seed, netConn, opts, showcase) {
   hud.input = input;
   // debug/verification handle (read-only use only — the sim is lockstep)
   window.webrts = { game, renderer, hud, input };
+
+  // Campaign runner: constructed after the Renderer/HUD exist so it can drive
+  // the dialogue bar, objective tracker, and end panel. Its update() is called
+  // each frame below. Only ever set for campaign missions — skirmish/MP is
+  // completely unaffected.
+  let campaign = null;
+  if (campaignMission) {
+    // ai:false missions are pure scripted-spawn levels — strip the AI brain so
+    // player 1 does nothing on its own (the runner spawns waves via triggers).
+    if (campaignMission.ai === false) game.ai = null;
+    campaign = new CampaignRunner(campaignMission, { game, renderer, hud, audio }, campaignState);
+    window.webrts && (window.webrts.campaign = campaign); // debug/verification handle
+  }
 
   game.onEvents = (events) => {
     renderer.consumeEvents(events);
@@ -251,6 +271,9 @@ function startGame(mode, seed, netConn, opts, showcase) {
   function frame(now) {
     const alpha = game.update(now);
     input.update(1 / 60);
+    // campaign layer: evaluate triggers/objectives/win-lose off the live sim
+    // (after the sim has stepped this frame). Cheap; only runs in campaign.
+    if (campaign) campaign.update();
     renderer.render(Math.min(1, alpha));
     if (now - hudTimer > 100) { hud.update(); hudTimer = now; }
     requestAnimationFrame(frame);
@@ -335,6 +358,22 @@ $("btn-join").addEventListener("click", async () => {
     if (!window.RTS) say("No response from host - check the code", true);
   }, 8000);
 });
+
+// ---------- campaign wiring ----------
+// The campaign is entirely self-contained: it only constructs a Game when the
+// player picks a mission. Mission sims run as local single-player ("ai" mode,
+// but the runner may null the AI or script waves itself). Skirmish/MP untouched.
+function startCampaignMission(mission) {
+  // Force the mission's faction matchup + fixed seed/opts for a hand-tuned feel.
+  const opts = Object.assign({}, mission.mapOpts || {});
+  opts.factions = mission.factions || ["cogs", "cogs"];
+  if (mission.aiDifficulty) opts.aidifficulty = mission.aiDifficulty;
+  // mode "ai" gives us player 0 = local, player 1 = AI. Missions with ai:false
+  // still use "ai" mode but the runner strips the AI so player 1 stays scripted.
+  const seed = mission.mapSeed | 0;
+  startGame("ai", seed, null, opts, false, mission);
+}
+mountCampaign(startCampaignMission);
 
 $("btn-again")?.addEventListener("click", () => location.reload());
 $("btn-replay")?.addEventListener("click", () => {

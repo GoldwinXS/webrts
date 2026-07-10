@@ -1058,3 +1058,220 @@ input[type="range"]::-moz-range-thumb {
   font-size: var(--fs-xs);
   color: var(--bad-deep);
 }
+
+/* ============================================================
+   9. Campaign — mission select, dialogue bar, objective
+      tracker, intro + end cards. Porcelain, matches the HUD.
+      Only visible during campaign missions / the select panel.
+   ============================================================ */
+
+/* ---- mission select overlay ---- */
+#campaign-select {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 22;
+  background:
+    radial-gradient(ellipse 70% 55% at 50% 16%, rgba(255, 232, 168, 0.55), transparent 65%),
+    linear-gradient(180deg, #8ecdf2 0%, #c6e7fb 48%, #e7f5e3 100%);
+}
+.cmp-select-box { min-width: 460px; max-width: 620px; text-align: left; }
+.cmp-select-box .menu-hero { text-align: center; margin-bottom: 20px; }
+
+.cmp-mission-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 18px; }
+
+.cmp-act { margin: 14px 2px 6px; }
+.cmp-act:first-child { margin-top: 0; }
+.cmp-act-title {
+  font-size: var(--fs-md);
+  font-weight: 800;
+  color: var(--accent-deep);
+  letter-spacing: 0.3px;
+}
+.cmp-act-sub { font-size: var(--fs-xs); color: var(--muted); margin-top: 1px; }
+
+.cmp-mission {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 14px;
+  border: 1px solid var(--edge);
+  border-radius: 13px;
+  background: linear-gradient(180deg, #ffffff, #f7f2e9);
+  box-shadow: var(--inner-hi), var(--bevel);
+  transition: background 0.15s, border-color 0.15s, transform 0.12s, box-shadow 0.15s;
+}
+.cmp-mission.ready { cursor: pointer; }
+.cmp-mission.done { cursor: pointer; }
+.cmp-mission.ready:hover,
+.cmp-mission.done:hover {
+  border-color: rgba(233, 138, 21, 0.55);
+  transform: translateY(-1px);
+  box-shadow: var(--inner-hi), var(--bevel), 0 6px 16px rgba(255, 156, 32, 0.22);
+}
+.cmp-mission.locked,
+.cmp-mission.stub {
+  opacity: 0.6;
+  background: linear-gradient(180deg, #f3f1ec, #eae6dd);
+  cursor: default;
+}
+
+.cmp-mission-mark {
+  flex: none;
+  width: 26px; height: 26px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 50%;
+  border: 1px solid var(--edge);
+}
+.cmp-mission.ready .cmp-mission-mark { color: var(--accent-deep); background: var(--accent-soft); }
+.cmp-mission.done .cmp-mission-mark { color: #fff; background: var(--good); border-color: var(--good-deep); }
+.cmp-mission.locked .cmp-mission-mark,
+.cmp-mission.stub .cmp-mission-mark { color: var(--muted); }
+
+.cmp-mission-body { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.cmp-mission-title { font-size: var(--fs-md); font-weight: 700; color: var(--ink); }
+.cmp-mission-blurb { font-size: var(--fs-xs); color: var(--ink-dim); }
+
+/* ---- in-mission campaign layer ---- */
+#campaign-layer { position: fixed; inset: 0; pointer-events: none; z-index: 14; }
+#campaign-layer.hidden { display: none; }
+
+/* objective tracker: top-right, clear of the top-left pill + bottom bar */
+.cmp-objectives {
+  position: absolute;
+  top: 12px; right: 12px;
+  min-width: 200px; max-width: 280px;
+  padding: 10px 12px;
+  background: var(--glass);
+  border: 1px solid var(--edge);
+  border-radius: 14px;
+  box-shadow: var(--inner-hi), var(--shadow);
+  -webkit-backdrop-filter: blur(14px) saturate(1.15);
+  backdrop-filter: blur(14px) saturate(1.15);
+}
+.cmp-obj-title {
+  font-size: var(--fs-xs);
+  font-weight: 800;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--accent-deep);
+  margin-bottom: 7px;
+}
+.cmp-obj {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: var(--fs-sm);
+  color: var(--ink-dim);
+  transition: color 0.2s;
+}
+.cmp-obj-mark { flex: none; color: var(--muted); margin-top: 1px; }
+.cmp-obj.done { color: var(--good-deep); }
+.cmp-obj.done .cmp-obj-mark { color: var(--good); }
+.cmp-obj.done .cmp-obj-text { text-decoration: line-through; text-decoration-color: rgba(47, 158, 79, 0.5); }
+.cmp-obj.optional .cmp-obj-text { font-style: italic; }
+
+/* dialogue bar: top-center, below the top pill, above the battlefield middle */
+.cmp-dialogue {
+  position: absolute;
+  top: 16px; left: 50%;
+  transform: translateX(-50%);
+  width: min(620px, 70vw);
+  padding: 12px 18px 14px;
+  background: var(--glass-strong);
+  border: 1px solid var(--edge);
+  border-radius: 16px;
+  box-shadow: var(--inner-hi), var(--shadow-lg);
+  -webkit-backdrop-filter: blur(16px) saturate(1.15);
+  backdrop-filter: blur(16px) saturate(1.15);
+  pointer-events: auto;
+  cursor: pointer;
+  animation: cmp-dlg-in 0.28s cubic-bezier(0.2, 0.9, 0.3, 1.1);
+}
+@keyframes cmp-dlg-in {
+  from { opacity: 0; transform: translate(-50%, -8px); }
+  to   { opacity: 1; transform: translate(-50%, 0); }
+}
+.cmp-dlg-speaker {
+  font-size: var(--fs-xs);
+  font-weight: 800;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--accent-deep);
+  margin-bottom: 4px;
+}
+.cmp-dlg-text {
+  font-size: var(--fs-md);
+  line-height: 1.4;
+  color: var(--ink);
+  min-height: 1.4em;
+}
+
+/* mission intro card: centered, brief, click-to-begin */
+.cmp-card {
+  position: absolute;
+  top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(560px, 82vw);
+  padding: 30px 36px;
+  text-align: center;
+  background: var(--glass-strong);
+  border: 1px solid var(--edge);
+  border-radius: 22px;
+  box-shadow: var(--inner-hi), var(--shadow-lg);
+  -webkit-backdrop-filter: blur(16px) saturate(1.15);
+  backdrop-filter: blur(16px) saturate(1.15);
+  pointer-events: auto;
+  cursor: pointer;
+  animation: pop-in 0.35s cubic-bezier(0.2, 0.9, 0.3, 1.15);
+}
+.cmp-card.out { animation: cmp-card-out 0.4s ease forwards; }
+@keyframes cmp-card-out {
+  to { opacity: 0; transform: translate(-50%, -54%) scale(0.97); }
+}
+.cmp-card-kicker {
+  font-size: var(--fs-xs);
+  font-weight: 800;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  color: var(--accent-deep);
+  margin-bottom: 8px;
+}
+.cmp-card-title {
+  font-size: var(--fs-xl);
+  font-weight: 800;
+  letter-spacing: 1px;
+  color: var(--ink);
+  text-shadow: 0 2px 0 rgba(255, 255, 255, 0.7);
+  margin-bottom: 12px;
+}
+.cmp-card-blurb {
+  font-size: var(--fs-md);
+  line-height: 1.5;
+  color: var(--ink-dim);
+  margin-bottom: 18px;
+}
+.cmp-card-hint {
+  font-size: var(--fs-xs);
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+/* end panel: reuses .menu-box, sits above everything */
+.cmp-end {
+  position: fixed;
+  inset: 0;
+  z-index: 24;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(96, 118, 140, 0.30);
+  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px);
+}
+.cmp-end-box { min-width: 360px; }
+.cmp-end-sub { color: var(--ink-dim); font-size: var(--fs-sm); margin: 4px 0 18px; }
