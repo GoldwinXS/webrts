@@ -51,9 +51,11 @@ registerUnit("worker", {
     m.add(part(G.rivet, CHEEK).pos(-0.17, -0.04, 0.26));
     m.add(part(G.rivet, CHEEK).pos(0.17, -0.04, 0.26));
 
-    // antenna + team bobble on top
+    // antenna + team bobble capping the tip. G.antenna grows 0.9 up from its
+    // base: 0.24 + 0.9*0.38 = 0.582 tip — the old y=0.43 left the ball
+    // impaled two-thirds up the whip with bare antenna above it.
     m.add(part(G.antenna, GUNMETAL).pos(0, 0.24, -0.04).scl(0.6, 0.38, 0.6));
-    m.add(part(G.lamp, glowMat(color, 1.5)).pos(0, 0.43, -0.04).scl(0.8));
+    m.add(part(G.lamp, glowMat(color, 1.5)).pos(0, 0.58, -0.04).scl(0.8));
 
     // amber hover thrusters
     m.add(part(G.droneThruster, TIN).pos(0.27, -0.16, -0.02).rot(0, 0, 0.18));

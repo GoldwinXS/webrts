@@ -151,10 +151,12 @@ registerUnit("nip", {
     m.add(part(OG.eye, glowMat(color, 1.5)).pos(0, 0.1, 0.2).scl(1.1), "eye");
     m.add(part(OG.eye, OOZE_DARK).pos(0, 0.1, 0.3).scl(0.5));
 
-    // toothy underbite: a dark mouth gash rimmed with bone fangs
+    // toothy underbite: a dark mouth gash with bone fangs jutting UP from the
+    // lower lip (an underbite points up — the old flipped fangs hung down
+    // scattered in front of the face, bases floating in the open)
     m.add(part(OG.blob, OOZE_DARK).pos(0, -0.08, 0.26).scl(0.18, 0.09, 0.12));
     for (const fx of [-0.1, -0.033, 0.033, 0.1]) {
-      m.add(part(OG.fang, OOZE_BONE).pos(fx, -0.04, 0.3).rot(Math.PI, 0, 0).scl(0.7));
+      m.add(part(OG.fang, OOZE_BONE).pos(fx, -0.085, 0.28).scl(0.7));
     }
 
     // two stubby scuttle legs (tendrils) that patter when moving
@@ -283,18 +285,23 @@ registerUnit("maw", {
     // Upper jaw + lower jaw are separate groups so it can chomp.
     m.add(part(OG.blob, OOZE_DARK).pos(0, 0.06, 0.42).scl(0.5, 0.36, 0.24)); // throat
 
+    // Jaw alignment: the throat ellipsoid spans y -0.12..0.24, so upper fang
+    // BASES bury at the top lip (~0.25) with tips hanging into the cavity,
+    // and lower bases bury at the bottom lip with tips biting up. (The old
+    // y=0.22/-0.12 group origins left the top row towering 0.13 above the
+    // mouth and the bottom row spilling down the chin, bases exposed.)
     const jawU = new THREE.Group();
     for (const fx of [-0.34, -0.2, -0.07, 0.07, 0.2, 0.34]) {
-      jawU.add(part(OG.fang, OOZE_BONE).pos(fx, 0, 0.02).rot(Math.PI, 0, 0).scl(1.15, 1.4, 1.15).mesh);
+      jawU.add(part(OG.fang, OOZE_BONE).pos(fx, 0, 0.02).rot(Math.PI, 0, 0).scl(1.15, 1.2, 1.15).mesh);
     }
-    jawU.position.set(0, 0.22, 0.46);
+    jawU.position.set(0, 0.12, 0.46);
     m.addGroup(jawU, "jawU");
 
     const jawL = new THREE.Group();
-    for (const fx of [-0.3, -0.16, -0.03, 0.1, 0.24]) {
+    for (const fx of [-0.27, -0.135, 0, 0.135, 0.27]) {
       jawL.add(part(OG.fang, OOZE_BONE).pos(fx, 0, 0.02).scl(1.0, 1.2, 1.0).mesh);
     }
-    jawL.position.set(0, -0.12, 0.46);
+    jawL.position.set(0, -0.05, 0.46);
     m.addGroup(jawL, "jawL");
 
     // tiny team eyes perched high on the crown
@@ -685,14 +692,16 @@ registerBuilding("den", {
     built.add(blobMesh(OOZE_DARK, 0, 0.5, 0.5, 0.75, 0.5, 0.5));   // cavity
     const womb = blobMesh(glowMat(BILE, 1.0), 0, 0.46, 0.2, 0.5, 0.4, 0.4);
     built.add(womb);
-    // fang ring around the mouth's lip
+    // fang ring around the mouth's lip. A cone's apex is +Y; to aim it at the
+    // ring center from arc angle `a` the z-rotation is PI/2 + a — the old
+    // PI - a was only right at 45°, so most fangs pointed sideways off the lip.
     const jaw = new THREE.Group();
     for (let i = 0; i < 10; i++) {
       const a = (i / 10) * Math.PI - Math.PI * 0.05; // upper arc
       const fx = Math.cos(a) * 0.7, fy = Math.sin(a) * 0.5;
       const f = new THREE.Mesh(OG.fangBig, OOZE_BONE);
       f.position.set(fx, 0.5 + fy, 0.86);
-      f.rotation.z = Math.PI - a;               // point inward around the arc
+      f.rotation.z = Math.PI / 2 + a;           // apex points inward
       f.scale.setScalar(0.7);
       jaw.add(f);
     }

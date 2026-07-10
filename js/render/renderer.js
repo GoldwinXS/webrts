@@ -275,10 +275,13 @@ export class Renderer {
     this.groundTex = new THREE.CanvasTexture(this.groundCanvas);
     this.groundTex.colorSpace = THREE.SRGBColorSpace;
     this.groundTex.anisotropy = this.renderer.capabilities.getMaxAnisotropy();
-    // Crisp pixel-art look: nearest sampling so the 32px tiles stay blocky
-    // instead of being blurred by bilinear filtering (anisotropy preserved).
-    this.groundTex.magFilter = THREE.NearestFilter;
-    this.groundTex.minFilter = THREE.NearestFilter;
+    // Soft painted-gouache look: LINEAR sampling melts the painted cells into
+    // smooth dabs of color that sit with the rounded toon models. (The old
+    // NearestFilter pixel-art look read as a different game than the units.)
+    // No mipmaps: the fog composite rewrites this canvas every few ticks and
+    // mip regeneration would tax that; anisotropy covers minification.
+    this.groundTex.magFilter = THREE.LinearFilter;
+    this.groundTex.minFilter = THREE.LinearFilter;
     this.groundTex.generateMipmaps = false;
     this.paintFog();
 
@@ -315,8 +318,8 @@ export class Renderer {
     this.gooCanvas.height = h * PX;
     this.gooTex = new THREE.CanvasTexture(this.gooCanvas);
     this.gooTex.colorSpace = THREE.SRGBColorSpace;
-    this.gooTex.magFilter = THREE.NearestFilter;
-    this.gooTex.minFilter = THREE.NearestFilter;
+    this.gooTex.magFilter = THREE.LinearFilter;
+    this.gooTex.minFilter = THREE.LinearFilter;
     this.gooTex.generateMipmaps = false;
     // Same displaced grid as the ground so the creep hugs ramps and stays
     // under cliff tops; depthTest lets terrain occlude it, polygonOffset
@@ -389,28 +392,42 @@ export class Renderer {
                     :                      [235, 248, 255];   // cool snow-light
     // Amplitudes gentler than the old dark-palette pass (bright bases need
     // less push to read), with the hue mixes doing the expressive work.
-    const dark = rgbStr(mixC(shade(tone, -0.07), shadowHue, 0.18));
-    const darker = rgbStr(mixC(shade(tone, -0.13), shadowHue, 0.26));
-    const light = rgbStr(mixC(lift(tone, 0.05), sunHue, 0.12));
-    const lighter = rgbStr(mixC(lift(tone, 0.08), sunHue, 0.18));
+    const dark = rgbStr(mixC(shade(tone, -0.05), shadowHue, 0.14));
+    const darker = rgbStr(mixC(shade(tone, -0.10), shadowHue, 0.20));
+    const light = rgbStr(mixC(lift(tone, 0.04), sunHue, 0.10));
+    const lighter = rgbStr(mixC(lift(tone, 0.06), sunHue, 0.14));
     // "Simple but detailed": paint the noise in coarse CELL blocks instead of
-    // per-pixel. A CELL x CELL fill reads as a calm soft patch rather than TV
-    // static, and holds up when the camera zooms out. Coverage is also lower
-    // (~14% of cells shaded vs ~24% of pixels before), so the surface stays
-    // clean. The cell grid divides PX evenly (32 / 2 = 16), so wrapping is
-    // preserved and the field still tiles seamlessly.
-    const CELL = 2;
-    const fillCell = (cx, cy, css) => {
-      for (let dy = 0; dy < CELL; dy++)
-        for (let dx = 0; dx < CELL; dx++) set(cx + dx, cy + dy, css);
+    // per-pixel. With linear texture sampling a 4px cell melts into a soft
+    // brush dab (~1/8 tile) — the ground reads as hand-painted gouache washes
+    // instead of pixel static, matching the smooth toon models. The cell grid
+    // divides PX evenly (32 / 4 = 8), so wrapping still tiles seamlessly.
+    const CELL = 4;
+    // ROUND antialiased dab: a real canvas arc (not 1px rects), drawn at all
+    // nine wrap offsets so dabs that spill over an edge reappear on the other
+    // side and the tile stays seamless. AA subpixel coverage + linear texture
+    // sampling turn each into a soft round brush touch, and a deterministic
+    // ±1px center jitter dissolves the underlying cell grid.
+    const fillDab = (cx, cy, css) => {
+      tctx.fillStyle = css;
+      const jx = (noiseAt(cx + 7, cy + 13) % 3) - 1;
+      const jy = (noiseAt(cx + 29, cy + 3) % 3) - 1;
+      const r = CELL * 0.6, cx0 = cx + CELL / 2 + jx, cy0 = cy + CELL / 2 + jy;
+      for (const ox of [-PX, 0, PX]) {
+        for (const oy of [-PX, 0, PX]) {
+          tctx.beginPath();
+          tctx.arc(cx0 + ox, cy0 + oy, r, 0, Math.PI * 2);
+          tctx.fill();
+        }
+      }
     };
+    tctx.imageSmoothingEnabled = true;
     for (let cy = 0; cy < PX; cy += CELL) {
       for (let cx = 0; cx < PX; cx += CELL) {
         const v = noiseAt(cx, cy);
-        if (v < 8) fillCell(cx, cy, dark);
-        else if (v < 12) fillCell(cx, cy, light);
-        else if (v < 14) fillCell(cx, cy, darker);
-        else if (v < 15) fillCell(cx, cy, lighter);
+        if (v < 10) fillDab(cx, cy, dark);
+        else if (v < 15) fillDab(cx, cy, light);
+        else if (v < 17) fillDab(cx, cy, darker);
+        else if (v < 19) fillDab(cx, cy, lighter);
       }
     }
 
@@ -1146,11 +1163,15 @@ export class Renderer {
     const [c0, c1, c2] = this.theme.deco;
 
     // kind 3: tall shrubs (LoS blockers) — animated groups, subtle sway.
+    // The raw deco tint rendered close to BLACK under toon lighting (read as
+    // burnt trees on the bright palette); lift it halfway toward a leafy
+    // green so they stay visibly darker than terrain (their vision-blocker
+    // identity) without looking scorched.
+    const shrubTint = new THREE.Color(c2).lerp(new THREE.Color(0x4d8a52), 0.55).getHex();
     this.shrubs = [];
     for (const d of buckets[3]) {
       const wx = d.x + 0.5, wz = d.y + 0.5;
-      // theme-tinted, biased toward the darker mid flora color
-      const g = makeShrubVisual(c2, (d.x * 13 + d.y * 7) & 0xff);
+      const g = makeShrubVisual(shrubTint, (d.x * 13 + d.y * 7) & 0xff);
       g.position.set(wx, this.heightAt(wx, wz), wz);
       g.scale.setScalar(0.9 + ((d.x + d.y) % 4) / 8);
       this.scene.add(g);
