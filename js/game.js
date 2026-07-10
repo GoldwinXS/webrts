@@ -19,7 +19,10 @@ export class Game {
     this.net = net || null;
     this.localPlayer = mode === "client" ? 1 : 0;
     this.sim = new Sim(seed, opts || {});
-    this.ai = mode === "ai" ? new AI(1) : null;
+    // AI only exists in local skirmish ("ai") mode — never in host/client, so
+    // nothing AI-related runs over the network. Difficulty is a local-only menu
+    // option (opts.aidifficulty); it never needs to cross the wire.
+    this.ai = mode === "ai" ? new AI(1, (opts && opts.aidifficulty) || "normal") : null;
 
     this.pending = [];       // local commands captured this tick
     this.buffers = [new Map(), new Map()];  // pid -> (tick -> cmds)

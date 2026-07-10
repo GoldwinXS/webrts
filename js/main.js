@@ -28,7 +28,7 @@ function say(msg, isError) {
 // Each group's selected data-val is stored as a string; "random" means the map
 // generator resolves it from the rng, so we OMIT the key entirely for random.
 const MAPOPT_KEY = "webrts-mapopts";
-const optGroups = ["spawns", "expansions", "theme", "faction", "aifaction"];
+const optGroups = ["spawns", "expansions", "theme", "faction", "aifaction", "aidifficulty"];
 
 function selectedVal(group) {
   const active = document.querySelector(`#opt-${group} .seg-btn.is-active`);
@@ -47,6 +47,10 @@ function readMapOpts() {
   if (theme !== "random") opts.theme = parseInt(theme, 10); // 0|1|2
   // factions: [localPlayer(0), enemy(1)]. Ignored by generateMap, read by Sim.
   opts.factions = [selectedVal("faction") || "cogs", selectedVal("aifaction") || "cogs"];
+  // AI difficulty is a LOCAL-ONLY skirmish setting (Easy/Normal/Hard). It's
+  // read by Game -> AI in mode "ai" only; the host flow strips it before
+  // sending over the wire (see btn-host) since the client runs no AI.
+  opts.aidifficulty = selectedVal("aidifficulty") || "normal";
   return opts;
 }
 
@@ -300,7 +304,11 @@ $("btn-host").addEventListener("click", async () => {
     // host picks the seed AND the map options; both sides start identically.
     const seed = (Math.random() * 0x7fffffff) | 0;
     const opts = readMapOpts();
-    net.send({ k: "start", seed, opts });
+    // aidifficulty is a local-only skirmish knob and there's no AI in a
+    // networked match — strip it from the wire message (only map-affecting opts
+    // need to cross for lockstep determinism).
+    const { aidifficulty, ...netOpts } = opts;
+    net.send({ k: "start", seed, opts: netOpts });
     startGame("host", seed, net, opts);
   };
 });

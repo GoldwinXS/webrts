@@ -2,16 +2,60 @@
 // command pipeline, so the sim stays authoritative. Rule-based build order:
 // saturate minerals -> keep supply ahead -> barracks -> army -> attack waves.
 import { FP, tileToFp, fpToTile, dist2 } from "./fixed.js";
-import { UNITS, BUILDINGS, UPGRADES, UPGRADE_BITS } from "./data.js";
+import { UNITS, BUILDINGS, UPGRADES, UPGRADE_BITS, FACTIONS } from "./data.js";
+import { findPath, nearestFree } from "./path.js";
+
+// Per-difficulty tuning. The three faction branches are SHARED and read these
+// constants — difficulty parameterizes behaviour, it does not fork the logic.
+// No resource cheating on any tier; only caps, cadence, and toggles change.
+//   workerCap     : how many workers/motes/ions to saturate to
+//   firstWave     : tick of the first attack wave
+//   waveSize      : units required before the first wave launches
+//   waveGrowth    : how many units the required wave size grows each wave
+//   waveCap       : ceiling on the required wave size
+//   waveGap       : ticks between successive waves
+//   maxExpansions : how many extra deposit buildings to try to take (0 = none)
+//   richMinerals  : bank threshold that flags "rich enough to expand"
+//   abilityMicro  : run per-unit ability micro (blink/siege/engulf/stim/...)?
+//   harass        : send an early raid at the enemy mineral line?
+//   harassTick    : tick to launch that raid
+//   harassSize    : how many units the raid pulls
+const DIFFICULTY = {
+  easy: {
+    workerCap: 10, firstWave: 2000, waveSize: 8, waveGrowth: 3, waveCap: 16,
+    waveGap: 1100, maxExpansions: 0, richMinerals: 99999, abilityMicro: false,
+    harass: false, harassTick: 0, harassSize: 0,
+  },
+  normal: {
+    workerCap: 14, firstWave: 1200, waveSize: 8, waveGrowth: 4, waveCap: 20,
+    waveGap: 900, maxExpansions: 1, richMinerals: 500, abilityMicro: true,
+    harass: false, harassTick: 0, harassSize: 0,
+  },
+  hard: {
+    workerCap: 18, firstWave: 900, waveSize: 6, waveGrowth: 5, waveCap: 28,
+    waveGap: 650, maxExpansions: 3, richMinerals: 400, abilityMicro: true,
+    harass: true, harassTick: 700, harassSize: 4,
+  },
+};
 
 export class AI {
-  constructor(pid) {
+  constructor(pid, difficulty = "normal") {
     this.pid = pid;
-    this.nextWave = 1200;      // first attack around 2 min
-    this.waveSize = 8;
+    this.diff = DIFFICULTY[difficulty] || DIFFICULTY.normal;
+    this.difficulty = DIFFICULTY[difficulty] ? difficulty : "normal";
+    this.nextWave = this.diff.firstWave;
+    this.waveSize = this.diff.waveSize;
     this.tankIdleSince = {};   // tankId -> tick nothing was near (for unsiege)
     this.sluiceIdleSince = {}; // sluiceId -> tick nothing was near (for unburrow)
     this.lastMorphTick = 0;    // throttle morph commands
+    this.harassDone = false;   // early raid fired?
+    this.expandMoteId = 0;     // ooze: mote currently escorting an expansion
+    this.wantExpand = false;   // saving minerals toward a deposit this cycle
+    this.expandWatch = null;   // {id,progress,since} stall watchdog for a deposit site
+    this.failedSites = new Set(); // "tx,ty" of expansion spots that stalled — never retry
+    this.savingSince = -1;     // tick we STARTED holding minerals for an expansion (-1 = not saving)
+    this.expandCooldownUntil = 0; // don't attempt expansions again until this tick (after a failed save)
+    this.expandFails = 0;      // dead-end expansion saves so far (2 = stop trying this game)
   }
 
   // Called every tick; returns a command list (usually empty).
@@ -61,13 +105,19 @@ export class AI {
       }
     }
 
+    // 1b. EXPANSION (runs EARLY so the deposit build claims minerals before the
+    // army/tech spending below drains the bank — otherwise the AI, which trains
+    // continuously, never banks the deposit's full cost). Shared across
+    // factions; difficulty gates the count (Easy = 0). See tryExpand.
+    this.tryExpand(sim, cmds, faction, hqs, workers, sites);
+
     if (faction === "ooze") {
       // =========================================================================
       // OOZE AI
       // =========================================================================
 
-      // 2. keep training Motes up to 14
-      if (workers.length < 14 && hq.queue.length === 0 && sim.canAfford(this.pid, UNITS.mote.cost) && s.used + 1 <= s.cap) {
+      // 2. keep training Motes up to the difficulty worker cap
+      if (workers.length < this.diff.workerCap && hq.queue.length === 0 && sim.canAfford(this.pid, UNITS.mote.cost) && s.used + 1 <= s.cap) {
         cmds.push({ t: "train", buildingId: hq.id, unit: "mote" });
       }
 
@@ -132,8 +182,9 @@ export class AI {
         this.tryBuildOoze(sim, cmds, "barb", hq);
       }
 
-      // 5. train army from Den: Nips and Spits
+      // 5. train army from Den: Nips and Spits (paused while saving to expand)
       for (const r of barracks) {
+        if (this.wantExpand) break;
         if (!r.done || r.queue.length > 1) continue;
         // mix Nips (auto-broods 2) and Spits
         const type = (sim.tick % 30 === 0) ? "spit" : "nip";
@@ -202,7 +253,7 @@ export class AI {
       }
 
       // 5f. Ooze ability micro: Engulf (maw) — jump onto enemy building
-      if (enemyBuilding) {
+      if (this.diff.abilityMicro && enemyBuilding) {
         const mawsWithEngulf = army.filter((u) => u.type === "maw" && u.abilityCd === 0);
         if (mawsWithEngulf.length) {
           const close = mawsWithEngulf.filter((u) =>
@@ -214,7 +265,7 @@ export class AI {
       }
 
       // 5g. Ooze ability micro: Burrow (sluice) — siege-like toggle using burrowtech
-      if (sim.upgrades[own] & UPGRADE_BITS.burrowtech) {
+      if (this.diff.abilityMicro && sim.upgrades[own] & UPGRADE_BITS.burrowtech) {
         for (const sluice of army.filter((u) => u.type === "sluice")) {
           if (sim.tick < sluice.transformUntil) continue;
           const enemiesNear4 = sim.entities.filter((e) => e.owner >= 0 && e.owner !== own && e.unit &&
@@ -242,8 +293,8 @@ export class AI {
       // TEMPEST (storm) AI — Cog cadence with conduit-first power logic
       // =========================================================================
 
-      // 2. keep training Ions up to 14
-      if (workers.length < 14 && hq.queue.length === 0 && sim.canAfford(this.pid, UNITS.ion.cost) && s.used + 1 <= s.cap) {
+      // 2. keep training Ions up to the difficulty worker cap
+      if (workers.length < this.diff.workerCap && hq.queue.length === 0 && sim.canAfford(this.pid, UNITS.ion.cost) && s.used + 1 <= s.cap) {
         cmds.push({ t: "train", buildingId: hq.id, unit: "ion" });
       }
 
@@ -316,8 +367,9 @@ export class AI {
         this.tryBuild(sim, cmds, workers, "vault", hq);
       }
 
-      // 5. train army: volts and arcs from forges
+      // 5. train army: volts and arcs from forges (paused while saving to expand)
       for (const r of barracks) {
+        if (this.wantExpand) break;
         if (!r.done || r.queue.length > 1) continue;
         const type = (sim.tick % 30 === 0) ? "volt" : "arc";
         const d = UNITS[type];
@@ -366,6 +418,7 @@ export class AI {
 
       // 5e. ability micro: blink volts at enemy buildings, dome under fire,
       // tempest onto the enemy base
+      if (this.diff.abilityMicro) {
       if (sim.upgrades[own] & UPGRADE_BITS.blinktech && enemyBuilding) {
         const volts = army.filter((u) => u.type === "volt" && u.abilityCd === 0 &&
           dist2(u.x, u.y, enemyBuilding.x, enemyBuilding.y) <= (FP * 6) * (FP * 6));
@@ -385,14 +438,15 @@ export class AI {
           cmds.push({ t: "ability", ids: [fuls[0].id], ability: "tempest", x: enemyBuilding.x, y: enemyBuilding.y });
         }
       }
+      } // end abilityMicro (storm)
 
     } else {
       // =========================================================================
       // COG (Human) AI — unchanged
       // =========================================================================
 
-      // 2. keep training workers up to 14
-      if (workers.length < 14 && hq.queue.length === 0 && sim.canAfford(this.pid, UNITS.worker.cost) && s.used + 1 <= s.cap) {
+      // 2. keep training workers up to the difficulty worker cap
+      if (workers.length < this.diff.workerCap && hq.queue.length === 0 && sim.canAfford(this.pid, UNITS.worker.cost) && s.used + 1 <= s.cap) {
         cmds.push({ t: "train", buildingId: hq.id, unit: "worker" });
       }
 
@@ -464,8 +518,9 @@ export class AI {
         this.tryBuild(sim, cmds, workers, "turret", hq);
       }
 
-      // 5. train army: mostly marines, some brutes.
+      // 5. train army: mostly marines, some brutes (paused while saving to expand)
       for (const r of barracks) {
+        if (this.wantExpand) break;
         if (!r.done || r.queue.length > 1) continue;
         const type = (sim.tick % 40 === 0) ? "brute" : "marine";
         const d = UNITS[type];
@@ -512,6 +567,7 @@ export class AI {
       }
 
       // 5e. ability micro. Stim marines near enemy buildings.
+      if (this.diff.abilityMicro) {
       if (sim.upgrades[own] & UPGRADE_BITS.stims) {
         const marines = army.filter((u) => u.type === "marine" && u.abilityCd === 0 &&
           sim.tick >= (u.stimUntil || 0) && u.hp > 12);
@@ -542,10 +598,11 @@ export class AI {
           }
         }
       }
+      } // end abilityMicro (cogs)
     }
 
     // =========================================================================
-    // SHARED: Defense, kiting, attack waves
+    // SHARED: Defense, kiting, attack waves, harass
     // =========================================================================
 
     // 6. defense: enemy near base -> army responds; retreat if outnumbered
@@ -578,19 +635,43 @@ export class AI {
       }
     }
 
-    // 7. attack waves, growing over time
+    // 6c. HARASS (Hard only): one early raid at the enemy mineral line before
+    // the main army is ready. Pulls a small squad so it doesn't gut base
+    // defense; fires once. Aimed at the enemy start's resource line.
+    if (this.diff.harass && !this.harassDone && sim.tick >= this.diff.harassTick &&
+        army.length >= this.diff.harassSize) {
+      const raid = army.slice(0, this.diff.harassSize);
+      const target = this.enemyMineralLine(sim) || this.enemyBase(sim);
+      if (target) {
+        cmds.push({ t: "attackmove", ids: raid.map((u) => u.id), x: target.x, y: target.y });
+        this.harassDone = true;
+      }
+    }
+
+    // 7. attack waves, growing over time (cadence/size tuned by difficulty)
     if (sim.tick >= this.nextWave && army.length >= this.waveSize) {
       const target = enemyBuilding
         ? { x: enemyBuilding.x, y: enemyBuilding.y }
         : this.enemyBase(sim);
       if (target) {
         cmds.push({ t: "attackmove", ids: army.map((u) => u.id), x: target.x, y: target.y });
-        this.nextWave = sim.tick + 900;
-        this.waveSize = Math.min(20, this.waveSize + 4);
+        this.nextWave = sim.tick + this.diff.waveGap;
+        this.waveSize = Math.min(this.diff.waveCap, this.waveSize + this.diff.waveGrowth);
       }
     }
 
     return cmds;
+  }
+
+  // A point at the enemy's starting mineral line (for harass). Falls back to
+  // the enemy start tile. Deterministic: nearest mineral to the enemy start.
+  enemyMineralLine(sim) {
+    const s = sim.map.starts[1 - this.pid];
+    if (!s) return null;
+    const sx = tileToFp(s.x), sy = tileToFp(s.y);
+    const patch = sim.nearestEntity(sx, sy, FP * 20,
+      (e) => e.type === "mineral" && e.amount > 0);
+    return patch ? { x: patch.x, y: patch.y } : { x: sx, y: sy };
   }
 
   enemyBase(sim) {
@@ -598,6 +679,289 @@ export class AI {
     if (enemy) return { x: enemy.x, y: enemy.y };
     const s = sim.map.starts[1 - this.pid];
     return { x: tileToFp(s.x), y: tileToFp(s.y) };
+  }
+
+  // -------------------------------------------------------------------------
+  // EXPANSION. Take another deposit (hq / nucleus / core) at a fresh mineral
+  // cluster when we're rich or the current line is thinning. Shared logic;
+  // per-faction issue path differs. All scans are deterministic (sorted by
+  // distance then id), and the site search rides on canPlace which enforces
+  // the HQ_RESOURCE_CLEARANCE, so no float branching is introduced.
+  // -------------------------------------------------------------------------
+  tryExpand(sim, cmds, faction, hqs, workers, sites) {
+    this.wantExpand = false;      // cleared each cycle; set below if saving up
+    const depositType = FACTIONS[faction]?.start; // hq / nucleus / core
+    if (!depositType || !hqs.length) return;
+
+    // Count expansions actually taken from live sim state (done deposits beyond
+    // the first main, PLUS any deposit still under construction). Deriving from
+    // the sim — instead of a counter bumped on ISSUE — is robust: a build the
+    // sim silently rejects (couldn't afford / canPlace flipped that tick) simply
+    // doesn't get counted, so the AI retries next tick instead of giving up.
+    const depositSiteList = sites.filter((b) => b.type === depositType);
+    const expansionsTaken = Math.max(0, hqs.length - 1) + depositSiteList.length;
+    if (expansionsTaken >= this.diff.maxExpansions) return;
+    // After a failed save (couldn't complete an expansion), back off for a while
+    // so the AI resumes army production instead of starving forever.
+    if (sim.tick < this.expandCooldownUntil) { this.savingSince = -1; return; }
+
+    // STALL WATCHDOG: an expansion deposit whose builder physically can't reach
+    // it (base congestion / a pocket the reachability test didn't catch) sits
+    // at progress 0 forever, and — because it counts as an expansion "in
+    // flight" — permanently blocks any retry. So watch its progress: if it
+    // hasn't advanced within a grace window, tear it down (t:"remove") and let
+    // the next cycle pick a fresh site. This is the "re-issue if it failed"
+    // robustness the design calls for.
+    if (depositSiteList.length > 0) {
+      this.savingSince = -1;       // site exists — no longer just saving
+      const site = depositSiteList[0];
+      const rec = this.expandWatch;
+      if (!rec || rec.id !== site.id) {
+        this.expandWatch = { id: site.id, progress: site.progress, since: sim.tick };
+      } else if (site.progress > rec.progress) {
+        rec.progress = site.progress; rec.since = sim.tick; // making progress
+      } else if (sim.tick - rec.since >= 500) {
+        cmds.push({ t: "remove", ids: [site.id] });          // stalled: abandon
+        this.failedSites.add(site.tx + "," + site.ty);       // never re-pick it
+        this.expandWatch = null;
+        this.expandMoteId = 0;
+      }
+      return; // one in flight (or being torn down); wait
+    }
+    this.expandWatch = null;
+
+    // Trigger — expand PROACTIVELY (an aggressive AI grabs bases early), when
+    // ANY of:
+    //   rich      : bank over the tier threshold
+    //   thinning  : minerals near our deposits are running low
+    //   developed : economy is up (near worker cap + army production online),
+    //               so we snowball with a second base instead of hoarding.
+    // Any own worker (idle or mining) can be pulled to build it.
+    const rich = sim.minerals[this.pid] >= this.diff.richMinerals;
+    let nearbyMinerals = 0;
+    for (const e of sim.entities) {
+      if (e.type !== "mineral" || e.amount <= 0) continue;
+      for (const hq of hqs) {
+        if (dist2(hq.x, hq.y, e.x, e.y) <= (FP * 10) * (FP * 10)) { nearbyMinerals += e.amount; break; }
+      }
+    }
+    const thinning = nearbyMinerals < 3000;
+    const armyProduction = sim.entities.some((e) => e.owner === this.pid && e.building && e.done &&
+      (e.type === "barracks" || e.type === "den" || e.type === "forge"));
+    // Expand as an OPENING priority: once army production is online and the
+    // eco has a decent worker base, grab a second base early (before the AI has
+    // already steamrolled a passive opponent). A lower bar than full saturation
+    // so the deposit actually completes while the game is still going.
+    const developed = workers.length >= 8 && armyProduction;
+    if (!rich && !thinning && !developed) return;
+
+    // We WANT to expand. If we can't afford the deposit yet, flag "saving" so
+    // the faction branches pause their army training this cycle and let the
+    // bank fill toward the deposit cost (an AI that trains every tick otherwise
+    // never accumulates the 400 for a Hub/Nucleus/Core). Only save once a
+    // reachable site actually exists — no point starving the army for nothing.
+    const site = this.findExpansionSite(sim, hqs, depositType, workers);
+    if (!site) { this.savingSince = -1; return; }
+    const canAfford = sim.canAfford(this.pid, BUILDINGS[depositType].cost);
+    const cx = site.tx * FP + (BUILDINGS[depositType].size * FP >> 1);
+    const cy = site.ty * FP + (BUILDINGS[depositType].size * FP >> 1);
+
+    // SAVING TIMEOUT (safety valve): pausing the army to bank a deposit is only
+    // worth it if the expansion actually happens. On a cramped map the escort
+    // worker/mote may never reach a placeable spot, and an open-ended save would
+    // starve the army forever (no units, eventual loss). So bound the save: if
+    // we've held minerals this long without a deposit SITE spawning, give up on
+    // this site, blacklist it, cool down, and let army production resume.
+    if (this.savingSince < 0) this.savingSince = sim.tick;
+    if (sim.tick - this.savingSince >= 1500) {
+      this.failedSites.add(site.tx + "," + site.ty);
+      this.expandFails = (this.expandFails || 0) + 1;
+      // A dead-end save (escort can't reach a placeable spot) has to give up so
+      // it doesn't starve the army forever. After two such dead ends, STOP
+      // expanding for the game; the map is too cramped for this base and further
+      // cycles just waste production against a passive opponent.
+      this.expandCooldownUntil = this.expandFails >= 2 ? Infinity : sim.tick + 800;
+      this.savingSince = -1;
+      this.expandMoteId = 0;
+      return; // wantExpand stays false -> army resumes this cycle
+    }
+
+    if (faction === "ooze") {
+      // Nucleus is gooOozes (no goo needed) but ooze_build needs a Mote within
+      // 4 tiles of the site. PRE-STAGE a mote at the site WHILE we save up (so
+      // it's already in position the moment we can afford it), then melt it.
+      const moteNear = sim.nearestEntity(cx, cy, FP * 4, (e) =>
+        e.owner === this.pid && e.unit && e.type === "mote" && e.hp > 0);
+      if (moteNear && canAfford) {
+        cmds.push({ t: "ooze_build", building: depositType, tx: site.tx, ty: site.ty });
+        this.expandMoteId = 0;
+        return;
+      }
+      // Not ready (no funds yet, or no mote in place): hold the army (pause
+      // training) to bank toward the deposit, and keep the escort mote walking
+      // toward the site so it arrives in time. The saving TIMEOUT above is the
+      // safety valve that stops an impossible expansion from starving us.
+      if (!canAfford) this.wantExpand = true;
+      let mote = this.expandMoteId ? workers.find((w) => w.id === this.expandMoteId && w.hp > 0) : null;
+      if (!mote) {
+        mote = sim.nearestEntity(cx, cy, FP * 999, (e) =>
+          e.owner === this.pid && e.unit && e.type === "mote" && e.hp > 0);
+        if (mote) this.expandMoteId = mote.id;
+      }
+      if (mote && !moteNear) cmds.push({ t: "move", ids: [mote.id], x: cx, y: cy });
+      return;
+    }
+
+    // From here (cogs/storm) we need funds. Hold the army to bank toward the
+    // deposit (the saving timeout above stops an impossible save from starving
+    // us), then escort a worker over and build.
+    if (!canAfford) { this.wantExpand = true; return; }
+
+    // Cogs / Storm: worker-built (t:"build"). Storm core is powers:true so it
+    // places without a power field — canPlace already handles that.
+    //
+    // ESCORT-THEN-BUILD: issuing a bare "build" makes the sim walk the worker
+    // to the (soon-blocked) footprint CENTER, and its pathing can snap onto a
+    // stub and strand the worker at progress 0 for a distant base-corner
+    // expansion. Mirror the Ooze mote pattern instead: MOVE a dedicated worker
+    // to a free tile beside the site (clean pathing to an open tile), and only
+    // once it's actually adjacent do we issue the build. Robust + deterministic.
+    const size = BUILDINGS[depositType].size;
+    // reuse the escorting worker if it still lives; else pick a gatherer/idle
+    let worker = this.expandMoteId ? workers.find((w) => w.id === this.expandMoteId && w.hp > 0) : null;
+    if (!worker) worker = workers.find((w) => w.order.kind === "gather" || w.order.kind === "idle");
+    if (!worker) return;
+    this.expandMoteId = worker.id;
+    // adjacent? (worker within one tile of the footprint box) -> build now
+    const wtx = fpToTile(worker.x), wty = fpToTile(worker.y);
+    const adjacent = wtx >= site.tx - 2 && wtx <= site.tx + size + 1 &&
+                     wty >= site.ty - 2 && wty <= site.ty + size + 1;
+    if (adjacent) {
+      cmds.push({ t: "build", workerId: worker.id, building: depositType, tx: site.tx, ty: site.ty });
+      this.expandMoteId = 0;
+    } else {
+      // walk it to a free tile just outside the footprint (open, no snap)
+      const spot = nearestFree(sim.blocked, sim.map.w, sim.map.h, site.tx - 1, site.ty - 1) ||
+        { x: fpToTile(cx), y: fpToTile(cy) };
+      cmds.push({ t: "move", ids: [worker.id], x: tileToFp(spot.x), y: tileToFp(spot.y) });
+    }
+  }
+
+  // Find a placeable deposit spot near a mineral cluster that is FAR (>10
+  // tiles) from every one of our existing deposits. Ring-search radius 5..8
+  // around the cluster centroid; canPlace enforces the HQ resource clearance.
+  findExpansionSite(sim, hqs, depositType, workers) {
+    const size = BUILDINGS[depositType].size;
+    // Gather mineral patches not already claimed by one of our deposits.
+    const far = (e) => hqs.every((hq) =>
+      dist2(hq.x, hq.y, e.x, e.y) > (FP * 10) * (FP * 10));
+    const patches = sim.entities
+      .filter((e) => e.type === "mineral" && e.amount > 0 && far(e))
+      .sort((a, b) => a.id - b.id);
+    if (!patches.length) return null;
+
+    // Cluster patches by proximity; evaluate clusters nearest to our main first
+    // so we grab the closest fresh field. Cluster = patches within 6 tiles of a
+    // seed. Deterministic: iterate patches in id order, greedy-group.
+    const used = new Set();
+    const clusters = [];
+    for (const p of patches) {
+      if (used.has(p.id)) continue;
+      const group = [p]; used.add(p.id);
+      for (const q of patches) {
+        if (used.has(q.id)) continue;
+        if (dist2(p.x, p.y, q.x, q.y) <= (FP * 6) * (FP * 6)) { group.push(q); used.add(q.id); }
+      }
+      let sx = 0, sy = 0;
+      for (const g of group) { sx += g.x; sy += g.y; }
+      clusters.push({ cx: (sx / group.length) | 0, cy: (sy / group.length) | 0, n: group.length });
+    }
+    // Prefer the NEAREST cluster to our main deposit, tie-break by size then
+    // by centroid position (deterministic). Nearer clusters are almost always
+    // on the same landmass, so a builder can actually path there — a far
+    // cluster behind a cliff strands the builder forever at progress 0.
+    const main = hqs[0];
+    clusters.sort((a, b) =>
+      (dist2(main.x, main.y, a.cx, a.cy) - dist2(main.x, main.y, b.cx, b.cy)) ||
+      (b.n - a.n) || (a.cx - b.cx) || (a.cy - b.cy));
+
+    // Reachability is measured from a point KNOWN to be on our landmass. A
+    // live worker is ideal (it's standing on a reachable, unblocked tile);
+    // fall back to a free tile beside the main deposit (its own footprint is
+    // blocked, so pathing from the center fails outright).
+    let startX, startY;
+    const anchor = workers && workers.find((w) => w.hp > 0);
+    if (anchor) { startX = anchor.x; startY = anchor.y; }
+    else {
+      const mfree = nearestFree(sim.blocked, sim.map.w, sim.map.h, fpToTile(main.x), fpToTile(main.y));
+      startX = mfree ? tileToFp(mfree.x) : main.x;
+      startY = mfree ? tileToFp(mfree.y) : main.y;
+    }
+
+    for (const cl of clusters) {
+      const ctx = fpToTile(cl.cx), cty = fpToTile(cl.cy);
+      for (let r = 5; r <= 8; r++) {
+        for (let dy = -r; dy <= r; dy++) {
+          for (let dx = -r; dx <= r; dx++) {
+            if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+            const tx = ctx + dx - (size >> 1), ty = cty + dy - (size >> 1);
+            if (this.failedSites.has(tx + "," + ty)) continue; // known-stuck spot
+            if (!sim.canPlace(depositType, tx, ty, this.pid)) continue;
+            // Reachability gate. A worker BUILDS from a tile adjacent to the
+            // footprint, and once the site spawns its own 3x3 becomes blocked —
+            // so the honest test is "can we path to a free tile touching the
+            // footprint, WITH the footprint treated as an obstacle?". Checking
+            // the (soon-to-be-blocked) center instead lets findPath thread the
+            // path through where the building will sit, then the real builder
+            // stalls forever. This mirrors build-time and kills pocket sites.
+            if (this.reachableSite(sim, startX, startY, tx, ty, size)) return { tx, ty };
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  // Can a builder standing on our landmass reach a tile ADJACENT to the
+  // [tx,ty]+size footprint, once that footprint is blocked (as it will be after
+  // the deposit spawns)? Temporarily stamps the footprint into sim.blocked,
+  // runs a real findPath to each free perimeter tile, then RESTORES blocked
+  // byte-for-byte (mutating and un-mutating in the same call keeps the sim
+  // pristine — no desync). Deterministic scan order.
+  reachableSite(sim, startX, startY, tx, ty, size) {
+    const { w, h } = sim.map;
+    const blocked = sim.blocked;
+    // stamp the footprint (it becomes blocked once the deposit spawns),
+    // remembering prior values so we can restore byte-for-byte.
+    const saved = [];
+    for (let y = ty; y < ty + size; y++)
+      for (let x = tx; x < tx + size; x++) {
+        if (x < 0 || y < 0 || x >= w || y >= h) continue;
+        const idx = y * w + x;
+        saved.push([idx, blocked[idx]]);
+        blocked[idx] = 1;
+      }
+    // Replicate the sim's build-time pathing EXACTLY: the builder walks toward
+    // the site CENTER (blocked), which findPath snaps to nearestFree(center)
+    // by stepping toward the start. If that snapped goal ends up near the site
+    // (adjacent to the footprint) the builder arrives and builds; if it snaps
+    // all the way back beside the start, the site is a pocket and the builder
+    // stalls at progress 0. So: path to the center and check the endpoint is
+    // actually next to the footprint.
+    const scx = tx * FP + (size * FP >> 1), scy = ty * FP + (size * FP >> 1);
+    const path = findPath(blocked, w, h, startX, startY, scx, scy);
+    let ok = false;
+    if (path && path.length) {
+      const end = path[path.length - 1];
+      const ex = fpToTile(end.x), ey = fpToTile(end.y);
+      // endpoint must touch the footprint (Chebyshev distance 1 to the box)
+      const nearBox =
+        ex >= tx - 1 && ex <= tx + size && ey >= ty - 1 && ey <= ty + size;
+      if (nearBox) ok = true;
+    }
+    // restore blocked exactly
+    for (const [idx, v] of saved) blocked[idx] = v;
+    return ok;
   }
 
   // Build a gas harvester (Cog refinery / Storm extractor) on the nearest
