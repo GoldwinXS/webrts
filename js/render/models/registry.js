@@ -23,6 +23,11 @@ const PLACEHOLDER = {
   mote: "worker", nip: "marine", spit: "marine", maw: "brute", sluice: "tank", wisp: "wraith",
   nucleus: "hq", pod: "depot", vent: "turret", den: "barracks", sump: "refinery",
   warren: "factory", roost: "starport", barb: "turret",
+  // Tempest: placeholder until models/storm.js registers the real family
+  ion: "worker", volt: "marine", arc: "marine", sentinel: "tank", phantom: "brute",
+  zephyr: "wraith", fulminar: "banshee",
+  core: "hq", conduit: "depot", extractor: "refinery", forge: "barracks",
+  shrine: "factory", spire: "starport", tesla: "turret", vault: "depot",
 };
 const propAnimators = {
   mineral: animateMineral,

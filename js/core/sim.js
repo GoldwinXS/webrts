@@ -5,6 +5,7 @@
 import { FP, HALF, tileToFp, fpToTile, isqrt, dist, dist2, makeHash } from "./fixed.js";
 import { UNITS, BUILDINGS, FACTIONS, START_MINERALS, START_GAS, CARRY_AMOUNT, GATHER_TICKS, PATCH_AMOUNT, MAX_QUEUE,
   GOLD_PATCH_AMOUNT, GOLD_CARRY_BONUS,
+  SHIELD_DELAY, SHIELD_REGEN, POWER_RADIUS, CAPACITOR_SHIELD,
   GAS_CARRY, GAS_GATHER_TICKS, GAS_AMOUNT, GAS_DEPLETED, HQ_RESOURCE_CLEARANCE,
   UPGRADES, UPGRADE_BITS, ABILITIES, PLATING_HP, SERVOS_SPEED_NUM, SERVOS_SPEED_DEN,
   GOO_GROW_INTERVAL, GOO_RECEDE_INTERVAL, GOO_NOISE, GOO_MAX_RADIUS, GOO_SPEED_NUM, GOO_SPEED_DEN,
@@ -139,6 +140,11 @@ export class Sim {
       // Ooze regen: last tick this unit took damage (0 = never). Used to
       // gate regeneration (only heals after REGEN_DELAY ticks without dmg).
       lastDmg: 0,
+      // Tempest state (inert for other factions; all checksummed):
+      shield: d.shield || 0,       // current shield (absorbs before hp)
+      maxShield: d.shield || 0,    // recharge cap (dome may overcharge past it)
+      phased: 0,                   // phantom: 1 while phase-shifted
+      domeUntil: 0,                // sentinel dome overcharge expiry tick
     });
     // FUTURE-unit plating: marines/brutes built after plating completes get +12 maxHp.
     if ((type === "marine" || type === "brute") && (this.upgrades[pid] & UPGRADE_BITS.plating)) {
@@ -151,11 +157,18 @@ export class Sim {
       e.maxHp += carapaceHp;
       e.hp += carapaceHp;
     }
+    // Tempest Capacitors: shielded units built after research get +15 shield
+    if (e.maxShield && (this.upgrades[pid] & UPGRADE_BITS.capacitors)) {
+      e.maxShield += CAPACITOR_SHIELD;
+      e.shield += CAPACITOR_SHIELD;
+    }
     return e;
   }
 
   spawnBuilding(pid, type, tx, ty, done) {
     const d = BUILDINGS[type];
+    let sh = d.shield || 0;
+    if (sh && (this.upgrades[pid] & UPGRADE_BITS.capacitors)) sh += CAPACITOR_SHIELD;
     const b = this.addEntity({
       type, owner: pid, tx, ty, size: d.size,
       x: tx * FP + (d.size * FP >> 1), y: ty * FP + (d.size * FP >> 1),
@@ -163,6 +176,9 @@ export class Sim {
       building: true, done: !!done, progress: done ? d.buildTime : 0,
       queue: [], radius: (d.size * FP >> 1),
       cooldown: 0, geyserId: 0,
+      // Tempest shields: construction sites start unshielded; the shield
+      // snaps to full on completion (see the two done-transition sites).
+      shield: done ? sh : 0, maxShield: sh, lastDmg: 0, domeUntil: 0,
     });
     this.setFootprint(b, 1);
     return b;
@@ -251,7 +267,7 @@ export class Sim {
     return this.fog[pid][fpToTile(y) * this.map.w + fpToTile(x)] === 2;
   }
 
-  canPlace(type, tx, ty) {
+  canPlace(type, tx, ty, pid) {
     const d = BUILDINGS[type];
     if (!d) return false;
     const { w, h } = this.map;
@@ -273,6 +289,14 @@ export class Sim {
         for (let x = tx; x < tx + d.size; x++) {
           if (!this.tileOnGoo(x, y)) return false;
         }
+    }
+    // Tempest buildings (except power sources and the geyser Extractor) must
+    // sit inside the placing player's POWER FIELD — the storm mirror of the
+    // Ooze creep rule. pid may be omitted by legacy callers; only gate when
+    // we know whose field to check.
+    if (d.faction === "storm" && !d.powers && !d.onGeyser && pid !== undefined) {
+      const cfx = tx * FP + (d.size * FP >> 1), cfy = ty * FP + (d.size * FP >> 1);
+      if (!this.fpInPower(pid, cfx, cfy)) return false;
     }
     // don't allow placement on top of mineral patches or units
     const cx = tx * FP + (d.size * FP >> 1), cy = ty * FP + (d.size * FP >> 1);
@@ -342,6 +366,36 @@ export class Sim {
   // Is an fp position on goo?
   fpOnGoo(fpx, fpy) {
     return this.tileOnGoo(fpToTile(fpx), fpToTile(fpy));
+  }
+
+  // ---------- Tempest power field & shields ----------
+
+  // Is an fp point inside pid's power field (within POWER_RADIUS tiles of a
+  // finished powers:true building)? Entity order scan — deterministic.
+  fpInPower(pid, fx, fy) {
+    const r = POWER_RADIUS * FP, r2 = r * r;
+    for (const e of this.entities) {
+      if (!e.building || !e.done || e.owner !== pid || e.hp <= 0) continue;
+      if (!BUILDINGS[e.type]?.powers) continue;
+      if (dist2(e.x, e.y, fx, fy) <= r2) return true;
+    }
+    return false;
+  }
+
+  // Shield recharge: after SHIELD_DELAY undamaged ticks, +1/tick — doubled
+  // inside the owner's own power field. Dome overcharge decays back to the
+  // cap when it expires. Runs for any shielded entity (units + buildings).
+  applyShieldRegen(e) {
+    if (!e.maxShield || e.hp <= 0) return;
+    if (e.building && !e.done) return;
+    if (e.domeUntil && this.tick >= e.domeUntil) {
+      e.domeUntil = 0;
+      if (e.shield > e.maxShield) e.shield = e.maxShield;
+    }
+    if (e.shield >= e.maxShield) return;
+    if (this.tick - (e.lastDmg || 0) < SHIELD_DELAY) return;
+    const rate = this.fpInPower(e.owner, e.x, e.y) ? SHIELD_REGEN * 2 : SHIELD_REGEN;
+    e.shield = Math.min(e.maxShield, e.shield + rate);
   }
 
   // Regenerate HP for Ooze units that haven't taken damage recently.
@@ -543,6 +597,7 @@ export class Sim {
     // Ooze regeneration: apply after all damage from this tick is resolved.
     for (const e of this.entities) {
       if (e.unit) this.applyRegen(e);
+      if (e.maxShield) this.applyShieldRegen(e);
     }
     this.separate();
     this.removeDead();
@@ -633,7 +688,7 @@ export class Sim {
         if (!this.canAfford(pid, d.cost, d.gasCost || 0)) break;
         // tech prerequisite: must own a FINISHED building of the required type
         if (d.requires && !this.hasBuilding(pid, d.requires)) break;
-        if (!this.canPlace(c.building, c.tx, c.ty)) break;
+        if (!this.canPlace(c.building, c.tx, c.ty, pid)) break;
         this.minerals[pid] -= d.cost;
         this.gas[pid] -= (d.gasCost || 0);
         const site = this.spawnBuilding(pid, c.building, c.tx, c.ty, false);
@@ -654,7 +709,7 @@ export class Sim {
         if (!d || d.faction !== "ooze") break;
         if (!this.canAfford(pid, d.cost, d.gasCost || 0)) break;
         if (d.requires && !this.hasBuilding(pid, d.requires)) break;
-        if (!this.canPlace(c.building, c.tx, c.ty)) break;
+        if (!this.canPlace(c.building, c.tx, c.ty, pid)) break;
         // Find a Mote within 4 tiles of the build site
         const cx = c.tx * FP + (d.size * FP >> 1);
         const cy = c.ty * FP + (d.size * FP >> 1);
@@ -799,6 +854,15 @@ export class Sim {
         }
       }
     }
+    // Capacitors: retroactive +15 max shield to every shielded thing owned
+    if (upg === "capacitors") {
+      for (const e of this.entities) {
+        if (e.owner === pid && e.maxShield) {
+          e.maxShield += CAPACITOR_SHIELD;
+          e.shield += CAPACITOR_SHIELD;
+        }
+      }
+    }
     this.events.push({ t: "research", owner: pid, upg });
   }
 
@@ -824,7 +888,111 @@ export class Sim {
         case "barrage":this.castBarrage(u, a, c.x, c.y); break;
         case "burrow": this.castBurrow(u, a); break;
         case "engulf": this.castEngulf(u, a, c.x, c.y); break;
+        // Tempest
+        case "blink":
+        case "slipstream": this.castBlink(u, a, c.x, c.y); break;
+        case "dome":       this.castDome(u, a); break;
+        case "phase":      this.castPhase(u, a); break;
+        case "tempest":    this.castTempest(u, a, c.x, c.y); break;
       }
+    }
+  }
+
+  // Volt Blink / Zephyr Slipstream: instant short-range self-teleport (the
+  // leap without the flight). Keeps the current order, forces a repath, and
+  // snaps px/py so the renderer doesn't draw a smear between the endpoints.
+  castBlink(u, a, tx, ty) {
+    if (u.abilityCd > 0) return;
+    tx = this.clampX(tx | 0); ty = this.clampY(ty | 0);
+    const maxR = a.range * FP;
+    const dx = tx - u.x, dy = ty - u.y;
+    const dd = isqrt(dx * dx + dy * dy);
+    if (dd > maxR) { tx = u.x + ((dx * maxR / dd) | 0); ty = u.y + ((dy * maxR / dd) | 0); }
+    if (!u.fly) {
+      const { w, h } = this.map;
+      if (this.blocked[fpToTile(ty) * w + fpToTile(tx)]) {
+        const free = nearestFree(this.blocked, w, h, fpToTile(tx), fpToTile(ty));
+        if (!free) return;
+        tx = tileToFp(free.x); ty = tileToFp(free.y);
+      }
+    }
+    this.events.push({
+      t: "ability", kind: "blink", id: u.id, owner: u.owner,
+      fromX: u.x, fromY: u.y, toX: tx, toY: ty,
+    });
+    u.x = u.px = this.clampX(tx);
+    u.y = u.py = this.clampY(ty);
+    u.path = null;
+    u.abilityCd = a.cd;
+  }
+
+  // Sentinel Shield Dome: overcharge the shields of nearby shielded allies
+  // past their cap for a few seconds (decays back at expiry, see
+  // applyShieldRegen).
+  castDome(u, a) {
+    if (u.abilityCd > 0) return;
+    const r2 = a.radius * a.radius;
+    for (const e of this.entities) {
+      if (!e.unit || e.owner !== u.owner || e.hp <= 0 || !e.maxShield) continue;
+      if (dist2(u.x, u.y, e.x, e.y) > r2) continue;
+      e.shield += a.shield;
+      e.domeUntil = this.tick + a.dur;
+    }
+    u.abilityCd = a.cd;
+    this.events.push({ t: "ability", kind: "dome", id: u.id, owner: u.owner, x: u.x, y: u.y, r: a.radius });
+  }
+
+  // Phantom Phase Shift: toggle. Phased = untargetable, can't attack, +40%
+  // speed, ghosts through other units (see separate()/canHit()).
+  castPhase(u, a) {
+    if (u.abilityCd > 0) return;
+    u.phased = u.phased ? 0 : 1;
+    u.abilityCd = a.cd;
+    this.events.push({
+      t: "ability", kind: u.phased ? "phase_out" : "phase_in",
+      id: u.id, owner: u.owner, x: u.x, y: u.y,
+    });
+  }
+
+  // Fulminar Tempest: channel a lightning storm onto a zone — strikes rain
+  // down on deterministic offsets and hit BOTH ground and air units.
+  castTempest(u, a, tx, ty) {
+    if (u.abilityCd > 0) return;
+    tx = this.clampX(tx | 0); ty = this.clampY(ty | 0);
+    const maxR = a.range * FP;
+    const dx = tx - u.x, dy = ty - u.y;
+    const dd = isqrt(dx * dx + dy * dy);
+    if (dd > maxR) { tx = u.x + ((dx * maxR / dd) | 0); ty = u.y + ((dy * maxR / dd) | 0); }
+    u.channel = { x: tx, y: ty, fired: 0 };
+    u.channelUntil = this.tick + a.channel;
+    u.abilityCd = a.cd;
+    u.order = { kind: "idle" }; u.path = null; u.next = [];
+    this.events.push({ t: "ability", kind: "tempest", id: u.id, owner: u.owner, x: tx, y: ty });
+  }
+
+  updateTempest(u) {
+    const a = ABILITIES.tempest;
+    const ch = u.channel;
+    const elapsed = a.channel - (u.channelUntil - this.tick);
+    if (ch && ch.fired < a.strikes && elapsed >= ch.fired * a.interval) {
+      const i = ch.fired;
+      const ox = ((i * 211) % 615) - 307;   // deterministic scatter ~±1.2 tiles
+      const oy = ((i * 149) % 615) - 307;
+      const ix = this.clampX(ch.x + ox), iy = this.clampY(ch.y + oy);
+      const r = a.radius;
+      for (const e of this.entities) {
+        if (!e.unit || e.owner < 0 || e.owner === u.owner || e.hp <= 0 || e.phased) continue;
+        if (dist2(ix, iy, e.x, e.y) <= r * r) {
+          this.applyDamage(e, a.dmg);
+        }
+      }
+      this.events.push({ t: "ability", kind: "tempest_hit", id: u.id, owner: u.owner, x: ix, y: iy });
+      ch.fired++;
+    }
+    if (this.tick >= u.channelUntil && (!ch || ch.fired >= a.strikes)) {
+      u.channelUntil = 0; u.channel = null;
+    } else if (this.tick >= u.channelUntil) {
+      u.channelUntil = this.tick + 1;   // strikes remain: keep channeling
     }
   }
 
@@ -886,10 +1054,9 @@ export class Sim {
     // slam: damage all enemy GROUND units within `splash` tiles (id order)
     const r = a.splash * FP;
     for (const e of this.entities) {
-      if (!e.unit || e.fly || e.owner < 0 || e.owner === u.owner || e.hp <= 0) continue;
+      if (!e.unit || e.fly || e.owner < 0 || e.owner === u.owner || e.hp <= 0 || e.phased) continue;
       if (dist2(u.x, u.y, e.x, e.y) <= r * r) {
-        e.hp -= a.dmg;
-        e.lastDmg = this.tick;
+        this.applyDamage(e, a.dmg);
       }
     }
     this.events.push({ t: "ability", kind: "leap_land", id: u.id, owner: u.owner, x: u.x, y: u.y });
@@ -950,10 +1117,9 @@ export class Sim {
       const ix = this.clampX(ch.x + ox), iy = this.clampY(ch.y + oy);
       const r = a.radius;
       for (const e of this.entities) {
-        if (!e.unit || e.fly || e.owner < 0 || e.owner === u.owner || e.hp <= 0) continue;
+        if (!e.unit || e.fly || e.owner < 0 || e.owner === u.owner || e.hp <= 0 || e.phased) continue;
         if (dist2(ix, iy, e.x, e.y) <= r * r) {
-          e.hp -= a.dmg;
-          e.lastDmg = this.tick;
+          this.applyDamage(e, a.dmg);
         }
       }
       this.events.push({ t: "ability", kind: "barrage_hit", id: u.id, owner: u.owner, x: ix, y: iy });
@@ -1062,6 +1228,7 @@ export class Sim {
     if ((u.type === "brute" || u.type === "maw") && u.leapUntil) { this.updateLeap(u); return; }
     // Channeling banshee: fire a timed volley of rockets, immobile.
     if (u.type === "banshee" && u.channelUntil) { this.updateBarrage(u); return; }
+    if (u.type === "fulminar" && u.channelUntil) { this.updateTempest(u); return; }
     // Transforming tank / Burrowing sluice: immobile, can't fire; finish the
     // toggle when the timer elapses. Weapon/acquire resumes next tick.
     if ((u.type === "tank" || u.type === "sluice") && this.tick < u.transformUntil) return;
@@ -1178,6 +1345,7 @@ export class Sim {
           if (site.progress >= bd.buildTime) {
             site.done = true;
             site.hp = site.maxHp;
+            site.shield = site.maxShield;
             this.events.push({ t: "complete", id: site.id, x: site.x, y: site.y, owner: site.owner });
             u.order = { kind: "idle" };
             this.autoGather(u);
@@ -1203,6 +1371,7 @@ export class Sim {
         if (b.progress >= bd.buildTime) {
           b.done = true;
           b.hp = b.maxHp;
+          b.shield = b.maxShield;
           this.events.push({ t: "complete", id: b.id, x: b.x, y: b.y, owner: b.owner });
         }
         return; // no further processing until done
@@ -1216,14 +1385,18 @@ export class Sim {
       if (b.cooldown > 0) b.cooldown--;
       if (b.cooldown === 0) {
         const target = this.nearestEntity(b.x, b.y, bd.range, (e) =>
-          e.owner >= 0 && e.owner !== b.owner && e.hp > 0 &&
+          e.owner >= 0 && e.owner !== b.owner && e.hp > 0 && !e.phased &&
           (e.fly ? (bd.dmgAir || 0) > 0 : (bd.dmg || 0) > 0) &&
           this.isVisible(b.owner, e.x, e.y));
         if (target) {
           b.cooldown = bd.cooldown;
           const dmg = target.fly ? bd.dmgAir : bd.dmg;
-          target.hp -= dmg;
-          if (target.unit) target.lastDmg = this.tick;
+          this.applyDamage(target, dmg);
+          // Tesla Pylon bolts chain like the Arc's
+          if (bd.chain) {
+            this.chainFrom(b.owner, target, dmg, bd.chain,
+              this.upgrades[b.owner] & UPGRADE_BITS.superconduct);
+          }
           this.events.push({
             t: "shot", fx: b.x, fy: b.y, tx: target.x, ty: target.y,
             owner: b.owner, ranged: true, air: !!target.fly,
@@ -1405,6 +1578,8 @@ export class Sim {
   canHit(attacker, target) {
     const d = UNITS[attacker.type];
     if (!d) return false;
+    if (attacker.phased) return false;   // phase-shifted phantoms can't attack...
+    if (target.phased) return false;     // ...and can't be attacked
     return target.fly ? (d.dmgAir || 0) > 0 : (d.dmg || 0) > 0;
   }
 
@@ -1432,6 +1607,10 @@ export class Sim {
     // Membrane: +20% speed for Wisps
     if (u.type === "wisp" && (this.upgrades[u.owner] & UPGRADE_BITS.membrane)) {
       s = (s * 6 / 5) | 0;
+    }
+    // Phase-shifted phantoms slip through the world faster
+    if (u.type === "phantom" && u.phased) {
+      const a = ABILITIES.phase; s = (s * a.spdNum / a.spdDen) | 0;
     }
     return s;
   }
@@ -1485,12 +1664,27 @@ export class Sim {
   }
 
   // Fire `u`'s weapon at `target`, applying the shot, cooldown, and (for a
+  // Single damage funnel for every weapon and ability, so faction mechanics
+  // hook combat in exactly one place. Tempest shields absorb before HP and
+  // recharge after SHIELD_DELAY undamaged ticks (see applyShieldRegen);
+  // lastDmg stamps for units AND shielded buildings so both regen delays
+  // reset on any hit.
+  applyDamage(target, dmg) {
+    if (target.maxShield) {
+      const absorbed = Math.min(target.shield | 0, dmg);
+      target.shield -= absorbed;
+      dmg -= absorbed;
+      target.lastDmg = this.tick;
+    }
+    target.hp -= dmg;
+    if (target.unit) target.lastDmg = this.tick;
+  }
+
   // sieged tank) splash to nearby enemy ground units. `d` is UNITS[u.type].
   fireAt(u, target, d) {
     u.cooldown = this.unitCooldown(u);
     const dmg = this.unitDmg(u, target);
-    target.hp -= dmg;
-    if (target.unit) target.lastDmg = this.tick;
+    this.applyDamage(target, dmg);
     this.events.push({
       t: "shot", fx: u.x, fy: u.y, tx: target.x, ty: target.y,
       owner: u.owner, ranged: this.unitRange(u) > FP, air: !!target.fly,
@@ -1498,16 +1692,20 @@ export class Sim {
       siege: u.type === "tank" && u.sieged ? 1 : 0,
       burrow: u.type === "sluice" && u.burrowed ? 1 : 0,
     });
+    // Tempest chain lightning (Arc): the bolt jumps onward from the victim
+    if (d.chain) {
+      this.chainFrom(u.owner, target, dmg, d.chain,
+        this.upgrades[u.owner] & UPGRADE_BITS.superconduct);
+    }
     // sieged-tank / burrowed-sluice splash: all OTHER enemy ground units within
     // 1 tile of the impact take splash damage too (deterministic id order).
     if ((u.type === "tank" && u.sieged || u.type === "sluice" && u.burrowed) && !target.fly) {
       const a = u.type === "tank" ? ABILITIES.siege : ABILITIES.burrow;
       const r = a.splash * FP;
       for (const e of this.entities) {
-        if (e === target || !e.unit || e.fly || e.owner < 0 || e.owner === u.owner || e.hp <= 0) continue;
+        if (e === target || !e.unit || e.fly || e.owner < 0 || e.owner === u.owner || e.hp <= 0 || e.phased) continue;
         if (dist2(target.x, target.y, e.x, e.y) <= r * r) {
-          e.hp -= a.splashDmg;
-          e.lastDmg = this.tick;
+          this.applyDamage(e, a.splashDmg);
           this.events.push({
             t: "shot", fx: u.x, fy: u.y, tx: e.x, ty: e.y,
             owner: u.owner, ranged: true, air: false,
@@ -1515,6 +1713,28 @@ export class Sim {
           });
         }
       }
+    }
+  }
+
+  // Chain lightning: after a primary hit, jump to up to `jumps` nearest OTHER
+  // enemy units within `radius` of the victim, each taking num/den of the
+  // damage. Deterministic: candidates sorted by (dist2, id). superconduct
+  // (jumpsBonus truthy) adds one jump.
+  chainFrom(owner, target, dmg, chain, jumpsBonus) {
+    const jumps = chain.jumps + (jumpsBonus ? 1 : 0);
+    const r2 = chain.radius * chain.radius;
+    const cands = [];
+    for (const e of this.entities) {
+      if (!e.unit || e === target || e.owner < 0 || e.owner === owner || e.hp <= 0 || e.phased) continue;
+      const d2 = dist2(target.x, target.y, e.x, e.y);
+      if (d2 <= r2) cands.push([d2, e.id, e]);
+    }
+    cands.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+    const cdmg = ((dmg * chain.num / chain.den) | 0) || 1;
+    for (let i = 0; i < jumps && i < cands.length; i++) {
+      const e = cands[i][2];
+      this.applyDamage(e, cdmg);
+      this.events.push({ t: "chain", fx: target.x, fy: target.y, tx: e.x, ty: e.y, owner, targetId: e.id });
     }
   }
 
@@ -1665,6 +1885,7 @@ export class Sim {
               const b = neighbors[bi];
               if (b.id <= a.id) continue;
               if (!!a.fly !== !!b.fly) continue;
+              if (a.phased || b.phased) continue;   // phased units ghost through
               const min = a.radius + b.radius;
               const ddx = a.x - b.x, ddy = a.y - b.y;
               if (Math.abs(ddx) >= min || Math.abs(ddy) >= min) continue;
@@ -1837,11 +2058,13 @@ export class Sim {
         h.mix(e.transformUntil | 0); h.mix(e.leapUntil | 0);
         h.mix(e.channelUntil | 0); h.mix(e.noProg | 0);
         h.mix(e.lastDmg | 0);
+        h.mix(e.shield | 0); h.mix(e.domeUntil | 0); h.mix(e.phased | 0);
         h.mix(e.order?.kind?.charCodeAt(0) || 0);
         h.mix(e.order?.targetId || 0);
       }
       if (e.building) {
         h.mix(e.done ? 1 : 0); h.mix(e.progress | 0);
+        h.mix(e.shield | 0);
         h.mix(e.cooldown | 0); h.mix(e.queue.length);
         h.mix(e.geyserId | 0);
         const head = e.queue[0];

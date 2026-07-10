@@ -1418,11 +1418,44 @@ export class Renderer {
         this.placementGrid.tx === tx && this.placementGrid.ty === ty) return;
     this.placementGrid = { type, tx, ty };
     this.refreshPlacementGrid();
+    this.refreshPowerDiscs(type);
   }
 
   clearPlacementGrid() {
     this.placementGrid = null;
     for (const q of this.gridPool) q.visible = false;
+    if (this.powerDiscs) for (const disc of this.powerDiscs) disc.visible = false;
+  }
+
+  // While placing a Tempest building, show translucent cyan discs over every
+  // finished power source so the player can see where the field reaches.
+  refreshPowerDiscs(type) {
+    const isStorm = BUILDINGS[type]?.faction === "storm";
+    if (!this.powerDiscs) this.powerDiscs = [];
+    let i = 0;
+    if (isStorm) {
+      if (!this.powerDiscGeo) this.powerDiscGeo = new THREE.CircleGeometry(6, 48); // POWER_RADIUS
+      for (const e of this.sim.entities) {
+        if (!e.building || !e.done || e.owner !== this.localPlayer || e.hp <= 0) continue;
+        if (!BUILDINGS[e.type]?.powers) continue;
+        let disc = this.powerDiscs[i];
+        if (!disc) {
+          disc = new THREE.Mesh(this.powerDiscGeo, new THREE.MeshBasicMaterial({
+            color: 0x58c8ff, transparent: true, opacity: 0.13,
+            depthWrite: false, polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -3,
+          }));
+          disc.rotation.x = -Math.PI / 2;
+          disc.renderOrder = 2;
+          this.scene.add(disc);
+          this.powerDiscs.push(disc);
+        }
+        const wx = W2(e.x), wz = W2(e.y);
+        disc.position.set(wx, this.heightAt(wx, wz) + 0.07, wz);
+        disc.visible = true;
+        i++;
+      }
+    }
+    for (; i < this.powerDiscs.length; i++) this.powerDiscs[i].visible = false;
   }
 
   // Recompute cell positions + validity colors. SC2 semantics: each CELL
@@ -1594,6 +1627,14 @@ export class Renderer {
     barFg.position.z = 0.004;
     const bar = new THREE.Group();
     bar.add(barBg, barFg);
+    // Tempest shields: a thin cyan strip floating just above the HP bar
+    if (e.maxShield) {
+      const shieldFg = new THREE.Mesh(SHARED.bar, new THREE.MeshBasicMaterial({ color: 0x64d8ff }));
+      shieldFg.scale.y = 0.45;
+      shieldFg.position.set(0, 0.085, 0.004);
+      bar.add(shieldFg);
+      group.userData.shieldFg = shieldFg;
+    }
     bar.position.y = barHeight;
     bar.visible = false;
     group.add(bar);
@@ -1870,13 +1911,19 @@ export class Renderer {
         if (sel) g.userData.ring.material.opacity = 0.75 + Math.sin(t * 5) * 0.2;
       }
       if (g.userData.bar) {
-        const show = (sel || e.hp < e.maxHp) && e.maxHp > 0;
+        const show = (sel || e.hp < e.maxHp || (e.maxShield && e.shield < e.maxShield)) && e.maxHp > 0;
         g.userData.bar.visible = show;
         if (show) {
           const frac = Math.max(0, e.hp / e.maxHp);
           g.userData.barFg.scale.x = frac;
           g.userData.barFg.position.x = -(1 - frac) / 2;
           g.userData.barFg.material.color.setHSL(frac * 0.33, 0.75, 0.5);
+          if (g.userData.shieldFg) {
+            const sf = Math.max(0, Math.min(1, e.shield / e.maxShield));
+            g.userData.shieldFg.scale.x = sf;
+            g.userData.shieldFg.position.x = -(1 - sf) / 2;
+            g.userData.shieldFg.visible = sf > 0;
+          }
           g.userData.bar.quaternion.copy(this.camera.cam.quaternion);
         }
       }

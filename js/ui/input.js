@@ -532,7 +532,7 @@ export class Input {
         for (let oy = 0; oy < d.size; oy++)
           for (let ox = 0; ox < d.size; ox++) {
             const cx = gx - ox, cy = gz - oy;                 // (0,0) = exact overlap first
-            if (this.sim.canPlace(this.placing, cx, cy)) { chosen = [cx, cy]; break outer; }
+            if (this.sim.canPlace(this.placing, cx, cy, this.pid)) { chosen = [cx, cy]; break outer; }
           }
         tx = chosen[0]; ty = chosen[1];
       }
@@ -540,7 +540,7 @@ export class Input {
     this.ghostTile = { tx, ty };
     const gy = this.renderer.heightAt ? this.renderer.heightAt(tx + d.size / 2, ty + d.size / 2) : 0;
     this.ghost.position.set(tx + d.size / 2, gy + 0.4, ty + d.size / 2);
-    const ok = this.sim.canPlace(this.placing, tx, ty) && this.sim.canAfford(this.pid, d.cost);
+    const ok = this.sim.canPlace(this.placing, tx, ty, this.pid) && this.sim.canAfford(this.pid, d.cost);
     this.ghostMat.color.set(ok ? 0x7cff6b : 0xff5f4c);
     // build-grid overlay: centered on the cursor tile, recomputed on move only
     this.renderer.setPlacementGrid?.(this.placing, fpToTile(g.x), fpToTile(g.y));
@@ -552,7 +552,7 @@ export class Input {
     const worker = this.mySelectedWorkers()[0];
     if (!worker) { this.hud.toast("Select a worker first"); this.audio.error(); return; }
     if (!this.sim.canAfford(this.pid, d.cost)) { this.hud.toast("Not enough scrap"); this.audio.error(); return; }
-    if (!this.sim.canPlace(this.placing, tx, ty)) { this.hud.toast("Can't build there"); this.audio.error(); return; }
+    if (!this.sim.canPlace(this.placing, tx, ty, this.pid)) { this.hud.toast("Can't build there"); this.audio.error(); return; }
     // Ooze faction: the worker (Mote) melts into the building site
     const cmd = d.faction === "ooze" ? "ooze_build" : "build";
     const buildCmd = cmd === "ooze_build"

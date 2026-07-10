@@ -20,24 +20,27 @@ export class AI {
     const cmds = [];
     const faction = sim.factions?.[this.pid] || "cogs";
 
-    // Single-pass entity bucketing (replaces 8+ filter() calls)
+    // Single-pass entity bucketing (replaces 8+ filter() calls). Storm types
+    // map onto the same role buckets: forge=T1 production, shrine=T2,
+    // spire=air/T3, tesla=defense, vault=research (its own bucket).
     const workers = [], army = [], hqs = [], barracks = [], refineries = [];
-    const factories = [], starports = [], turrets = [], sites = [];
+    const factories = [], starports = [], turrets = [], sites = [], vaults = [];
     let enemyBuilding = null;
     for (const e of sim.entities) {
       if (e.owner === this.pid) {
         if (e.unit) {
-          if (e.type === "worker" || e.type === "mote") workers.push(e);
+          if (e.type === "worker" || e.type === "mote" || e.type === "ion") workers.push(e);
           else army.push(e);
         } else if (e.building) {
           if (!e.done) { sites.push(e); continue; }
           switch (e.type) {
-            case "hq": case "nucleus": hqs.push(e); break;
-            case "barracks": case "den": barracks.push(e); break;
-            case "refinery": case "sump": refineries.push(e); break;
-            case "factory": case "warren": factories.push(e); break;
-            case "starport": case "roost": starports.push(e); break;
-            case "turret": case "barb": turrets.push(e); break;
+            case "hq": case "nucleus": case "core": hqs.push(e); break;
+            case "barracks": case "den": case "forge": barracks.push(e); break;
+            case "refinery": case "sump": case "extractor": refineries.push(e); break;
+            case "factory": case "warren": case "shrine": factories.push(e); break;
+            case "starport": case "roost": case "spire": starports.push(e); break;
+            case "turret": case "barb": case "tesla": turrets.push(e); break;
+            case "vault": vaults.push(e); break;
           }
         }
       } else if (e.building && e.owner >= 0 && e.owner !== this.pid && !enemyBuilding) {
@@ -230,6 +233,155 @@ export class AI {
               }
             }
           }
+        }
+      }
+
+    } else if (faction === "storm") {
+      // =========================================================================
+      // TEMPEST (storm) AI — Cog cadence with conduit-first power logic
+      // =========================================================================
+
+      // 2. keep training Ions up to 14
+      if (workers.length < 14 && hq.queue.length === 0 && sim.canAfford(this.pid, UNITS.ion.cost) && s.used + 1 <= s.cap) {
+        cmds.push({ t: "train", buildingId: hq.id, unit: "ion" });
+      }
+
+      // 3. Conduits double as supply AND power — stay ahead on both counts.
+      const conduitComing = sites.some((b) => b.type === "conduit");
+      if (s.cap - s.used < 4 && s.cap < 200 && !conduitComing && sim.canAfford(this.pid, BUILDINGS.conduit.cost)) {
+        this.tryBuild(sim, cmds, workers, "conduit", hq);
+      }
+
+      // 4. up to 2 forges once the economy is going (need power: near core/conduit)
+      const forgeComing = sites.some((b) => b.type === "forge");
+      if (workers.length >= 10 && barracks.length < 2 && !forgeComing && sim.canAfford(this.pid, BUILDINGS.forge.cost + 50)) {
+        this.tryBuild(sim, cmds, workers, "forge", hq);
+      }
+
+      // 4b. extractor once a forge exists; keep ~3 workers on gas
+      const extractorComing = sites.some((b) => b.type === "extractor");
+      if (barracksDone && refineries.length === 0 && !extractorComing &&
+          sim.canAfford(this.pid, BUILDINGS.extractor.cost)) {
+        this.tryBuildRefinery(sim, cmds, workers, "extractor");
+      }
+      // adopt orphaned construction sites (same rationale as the Cog branch)
+      const adoptedS = new Set();
+      for (const site of sites) {
+        const hasBuilder = workers.some((w) => w.order.kind === "build" && w.order.targetId === site.id);
+        if (hasBuilder) continue;
+        const w = workers.find((x) => !adoptedS.has(x.id) &&
+          (x.order.kind === "idle" ||
+           (x.order.kind === "gather" && x.order.resource !== "gas")));
+        if (w) { adoptedS.add(w.id); cmds.push({ t: "resume", ids: [w.id], targetId: site.id }); }
+      }
+      if (refineries.length) {
+        const ref = refineries[0];
+        const onGas = workers.filter((w) =>
+          w.order.kind === "gather" && w.order.resource === "gas").length;
+        if (onGas < 3) {
+          const w = workers.find((w) =>
+            w.order.kind === "idle" ||
+            (w.order.kind === "gather" && w.order.resource !== "gas"));
+          if (w) cmds.push({ t: "gather", ids: [w.id], targetId: ref.id });
+        }
+      }
+
+      // 4c. shrine (T2) once a forge is done and gas is flowing
+      const shrineComing = sites.some((b) => b.type === "shrine");
+      if (barracksDone && factories.length === 0 && !shrineComing &&
+          sim.canAfford(this.pid, BUILDINGS.shrine.cost, BUILDINGS.shrine.gasCost)) {
+        this.tryBuild(sim, cmds, workers, "shrine", hq);
+      }
+
+      // 4d. spire (air/T3) once a shrine is done
+      const spireComing = sites.some((b) => b.type === "spire");
+      const shrineDone = factories.some((f) => f.done);
+      if (shrineDone && starports.length === 0 && !spireComing &&
+          sim.canAfford(this.pid, BUILDINGS.spire.cost, BUILDINGS.spire.gasCost)) {
+        this.tryBuild(sim, cmds, workers, "spire", hq);
+      }
+
+      // 4e. tesla pylons for defense
+      const teslaComing = sites.some((b) => b.type === "tesla");
+      if (barracksDone && turrets.length < 2 && !teslaComing &&
+          sim.canAfford(this.pid, BUILDINGS.tesla.cost)) {
+        this.tryBuild(sim, cmds, workers, "tesla", hq);
+      }
+
+      // 4f. vault (research) once a shrine is done
+      const vaultComing = sites.some((b) => b.type === "vault");
+      if (shrineDone && vaults.length === 0 && !vaultComing &&
+          sim.canAfford(this.pid, BUILDINGS.vault.cost, BUILDINGS.vault.gasCost)) {
+        this.tryBuild(sim, cmds, workers, "vault", hq);
+      }
+
+      // 5. train army: volts and arcs from forges
+      for (const r of barracks) {
+        if (!r.done || r.queue.length > 1) continue;
+        const type = (sim.tick % 30 === 0) ? "volt" : "arc";
+        const d = UNITS[type];
+        if (sim.canAfford(this.pid, d.cost, d.gasCost || 0) && s.used + d.supply <= s.cap) {
+          cmds.push({ t: "train", buildingId: r.id, unit: type });
+        }
+      }
+      // 5b. sentinels (and the odd phantom) from shrines
+      for (const fac of factories) {
+        if (!fac.done || fac.queue.length > 0) continue;
+        const type = (sim.tick % 50 === 0) ? "phantom" : "sentinel";
+        const d = UNITS[type];
+        if (sim.canAfford(this.pid, d.cost, d.gasCost || 0) && s.used + d.supply <= s.cap) {
+          cmds.push({ t: "train", buildingId: fac.id, unit: type });
+        }
+      }
+      // 5c. zephyrs, and a fulminar when the bank allows
+      for (const sp of starports) {
+        if (!sp.done || sp.queue.length > 0) continue;
+        const type = (sim.tick % 80 === 0) ? "fulminar" : "zephyr";
+        const d = UNITS[type];
+        if (sim.canAfford(this.pid, d.cost, d.gasCost || 0) && s.used + d.supply <= s.cap) {
+          cmds.push({ t: "train", buildingId: sp.id, unit: type });
+        }
+      }
+
+      // 5d. research: capacitors -> blinktech -> stormtech
+      if (barracksDone && refineries.length && !(sim.upgrades[own] & UPGRADE_BITS.capacitors) &&
+          !sim.upgradeQueued(own, "capacitors")) {
+        const bk = barracks.find((b) => b.done && b.queue.length < 2);
+        const u = UPGRADES.capacitors;
+        if (bk && sim.canAfford(own, u.cost, u.gasCost)) cmds.push({ t: "research", buildingId: bk.id, research: "capacitors" });
+      }
+      if (vaults.length && !(sim.upgrades[own] & UPGRADE_BITS.blinktech) &&
+          !sim.upgradeQueued(own, "blinktech")) {
+        const v = vaults.find((v) => v.queue.length < 2);
+        const u = UPGRADES.blinktech;
+        if (v && sim.canAfford(own, u.cost, u.gasCost)) cmds.push({ t: "research", buildingId: v.id, research: "blinktech" });
+      }
+      if (starports.some((sp) => sp.done) && !(sim.upgrades[own] & UPGRADE_BITS.stormtech) &&
+          !sim.upgradeQueued(own, "stormtech")) {
+        const sp = starports.find((sp) => sp.done && sp.queue.length < 2);
+        const u = UPGRADES.stormtech;
+        if (sp && sim.canAfford(own, u.cost, u.gasCost)) cmds.push({ t: "research", buildingId: sp.id, research: "stormtech" });
+      }
+
+      // 5e. ability micro: blink volts at enemy buildings, dome under fire,
+      // tempest onto the enemy base
+      if (sim.upgrades[own] & UPGRADE_BITS.blinktech && enemyBuilding) {
+        const volts = army.filter((u) => u.type === "volt" && u.abilityCd === 0 &&
+          dist2(u.x, u.y, enemyBuilding.x, enemyBuilding.y) <= (FP * 6) * (FP * 6));
+        if (volts.length) {
+          cmds.push({ t: "ability", ids: [volts[0].id], ability: "blink", x: enemyBuilding.x, y: enemyBuilding.y });
+        }
+      }
+      for (const sen of army.filter((u) => u.type === "sentinel" && u.abilityCd === 0)) {
+        const enemiesNear = sim.entities.filter((e) => e.owner >= 0 && e.owner !== own && e.unit &&
+          dist2(sen.x, sen.y, e.x, e.y) <= (FP * 4) * (FP * 4)).length;
+        if (enemiesNear >= 2) { cmds.push({ t: "ability", ids: [sen.id], ability: "dome" }); break; }
+      }
+      if (sim.upgrades[own] & UPGRADE_BITS.stormtech && enemyBuilding) {
+        const fuls = army.filter((u) => u.type === "fulminar" && u.abilityCd === 0 && !u.channelUntil &&
+          dist2(u.x, u.y, enemyBuilding.x, enemyBuilding.y) <= (FP * 7) * (FP * 7));
+        if (fuls.length) {
+          cmds.push({ t: "ability", ids: [fuls[0].id], ability: "tempest", x: enemyBuilding.x, y: enemyBuilding.y });
         }
       }
 
@@ -447,8 +599,9 @@ export class AI {
     return { x: tileToFp(s.x), y: tileToFp(s.y) };
   }
 
-  // Build a refinery on the nearest own-base geyser that has no refinery yet.
-  tryBuildRefinery(sim, cmds, workers) {
+  // Build a gas harvester (Cog refinery / Storm extractor) on the nearest
+  // own-base geyser that has none yet.
+  tryBuildRefinery(sim, cmds, workers, type = "refinery") {
     const worker = workers.find((w) => w.order.kind === "gather" || w.order.kind === "idle");
     if (!worker) return;
     // geysers sorted by distance to our start, then id — deterministic
@@ -463,8 +616,8 @@ export class AI {
       // try the four 2x2 origins that can cover the geyser tile
       for (const [ox, oy] of [[0, 0], [-1, 0], [0, -1], [-1, -1]]) {
         const tx = gx + ox, ty = gy + oy;
-        if (sim.canPlace("refinery", tx, ty)) {
-          cmds.push({ t: "build", workerId: worker.id, building: "refinery", tx, ty });
+        if (sim.canPlace(type, tx, ty, this.pid)) {
+          cmds.push({ t: "build", workerId: worker.id, building: type, tx, ty });
           return;
         }
       }
@@ -482,7 +635,7 @@ export class AI {
         for (let dx = -r; dx <= r; dx++) {
           if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
           const tx = htx + dx - (size >> 1), ty = hty + dy - (size >> 1);
-          if (sim.canPlace(type, tx, ty)) {
+          if (sim.canPlace(type, tx, ty, this.pid)) {
             // avoid plugging the mineral line: stay off patch-adjacent tiles
             const cx = tx * FP + (size * FP >> 1), cy = ty * FP + (size * FP >> 1);
             const nearPatch = sim.nearestEntity(cx, cy, FP * 2, (e) => e.type === "mineral");
@@ -504,7 +657,7 @@ export class AI {
         for (let dx = -r; dx <= r; dx++) {
           if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
           const tx = htx + dx - (size >> 1), ty = hty + dy - (size >> 1);
-          if (sim.canPlace(type, tx, ty)) {
+          if (sim.canPlace(type, tx, ty, this.pid)) {
             const cx = tx * FP + (size * FP >> 1), cy = ty * FP + (size * FP >> 1);
             const nearPatch = sim.nearestEntity(cx, cy, FP * 2, (e) => e.type === "mineral");
             if (nearPatch) continue;
@@ -528,7 +681,7 @@ export class AI {
       const gx = fpToTile(g.x), gy = fpToTile(g.y);
       for (const [ox, oy] of [[0, 0], [-1, 0], [0, -1], [-1, -1]]) {
         const tx = gx + ox, ty = gy + oy;
-        if (sim.canPlace("sump", tx, ty)) {
+        if (sim.canPlace("sump", tx, ty, this.pid)) {
           cmds.push({ t: "ooze_build", building: "sump", tx, ty });
           return;
         }

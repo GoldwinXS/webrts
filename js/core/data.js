@@ -266,6 +266,144 @@ Object.assign(BUILDINGS, {
   },
 });
 
+// ===========================================================================
+// THE TEMPEST (storm faction) — living lightning in hovering armor.
+// Macro identity: POWER FIELD (buildings other than Core/Conduit must be
+// placed near a powers:true structure) + REGENERATING SHIELDS (absorb before
+// HP; recharge after SHIELD_DELAY undamaged ticks, twice as fast inside the
+// player's own power field). Signature weapons chain between targets.
+// ===========================================================================
+export const SHIELD_DELAY = 40;        // ticks without damage before recharge
+export const SHIELD_REGEN = 1;         // shield per tick (x2 in own power)
+export const POWER_RADIUS = 6;         // tiles from a powers building
+export const CAPACITOR_SHIELD = 15;    // capacitors upgrade: +15 max shield
+
+Object.assign(UNITS, {
+  ion: {
+    name: "Ion", faction: "storm", isWorker: true, cost: 50, gasCost: 0, supply: 1,
+    hp: 35, shield: 15, speed: 66,
+    dmg: 4, dmgAir: 0, range: (FP * 0.7) | 0, acquire: 0, cooldown: 10,
+    sight: 7, buildTime: 80, radius: (FP * 0.34) | 0,
+  },
+  // Volt: melee blade of lightning; Blink dash once researched.
+  volt: {
+    name: "Volt", faction: "storm", cost: 60, gasCost: 0, supply: 1,
+    hp: 50, shield: 20, speed: 72,
+    dmg: 8, dmgAir: 0, range: (FP * 0.9) | 0, acquire: (FP * 6) | 0, cooldown: 9,
+    sight: 7, buildTime: 100, radius: (FP * 0.36) | 0,
+  },
+  // Arc: ranged; every hit CHAINS to up to 2 nearby enemies at half damage.
+  arc: {
+    name: "Arc", faction: "storm", cost: 75, gasCost: 0, supply: 1,
+    hp: 40, shield: 25, speed: 60,
+    dmg: 6, dmgAir: 6, range: (FP * 4.2) | 0, acquire: (FP * 7) | 0, cooldown: 10,
+    sight: 8, buildTime: 110, radius: (FP * 0.36) | 0,
+    chain: { jumps: 2, num: 1, den: 2, radius: (FP * 2) | 0 },
+  },
+  // Sentinel: support; projects a Shield Dome that overcharges nearby shields.
+  sentinel: {
+    name: "Sentinel", faction: "storm", cost: 100, gasCost: 50, supply: 2,
+    hp: 70, shield: 40, speed: 55,
+    dmg: 4, dmgAir: 4, range: (FP * 3.5) | 0, acquire: (FP * 7) | 0, cooldown: 12,
+    sight: 8, buildTime: 160, radius: (FP * 0.44) | 0,
+  },
+  // Phantom: harasser; Phase Shift = untargetable, faster, walks through
+  // units, but cannot attack while phased.
+  phantom: {
+    name: "Phantom", faction: "storm", cost: 110, gasCost: 75, supply: 2,
+    hp: 65, shield: 30, speed: 70,
+    dmg: 12, dmgAir: 0, range: (FP * 0.9) | 0, acquire: (FP * 6) | 0, cooldown: 10,
+    sight: 8, buildTime: 170, radius: (FP * 0.4) | 0,
+  },
+  // Zephyr: flyer; Slipstream = instant 4-tile self-teleport.
+  zephyr: {
+    name: "Zephyr", faction: "storm", cost: 140, gasCost: 75, supply: 2,
+    hp: 80, shield: 35, speed: 82,
+    dmg: 8, dmgAir: 12, range: (FP * 4.5) | 0, acquire: (FP * 9) | 0, cooldown: 10,
+    sight: 9, buildTime: 180, radius: (FP * 0.4) | 0, fly: true,
+  },
+  // Fulminar: the Storm Colossus. T3 walker that hits ground AND air, and
+  // channels Tempest — a zone-hammering lightning storm.
+  fulminar: {
+    name: "Fulminar", faction: "storm", cost: 250, gasCost: 175, supply: 5,
+    hp: 200, shield: 80, speed: 45,
+    dmg: 16, dmgAir: 16, range: (FP * 5) | 0, acquire: (FP * 8) | 0, cooldown: 14,
+    sight: 9, buildTime: 300, radius: (FP * 0.6) | 0,
+  },
+});
+Object.assign(BUILDINGS, {
+  core: {
+    name: "Storm Core", faction: "storm", cost: 400, gasCost: 0, hp: 1000, shield: 100,
+    size: 3, supply: 10, buildTime: 500, sight: 9, trains: ["ion"], deposit: true,
+    powers: true,
+  },
+  // Conduit: supply + power field in one crystal spire (the pylon).
+  conduit: {
+    name: "Conduit", faction: "storm", cost: 90, gasCost: 0, hp: 300, shield: 50,
+    size: 2, supply: 8, buildTime: 170, sight: 7, trains: [], powers: true,
+  },
+  extractor: {
+    name: "Extractor", faction: "storm", cost: 75, gasCost: 0, hp: 400, shield: 40,
+    size: 2, supply: 0, buildTime: 180, sight: 4, trains: [], deposit: false, onGeyser: true,
+  },
+  forge: {
+    name: "Arc Forge", faction: "storm", cost: 150, gasCost: 0, hp: 700, shield: 60,
+    size: 3, supply: 0, buildTime: 300, sight: 7, trains: ["volt", "arc"],
+  },
+  shrine: {
+    name: "Storm Shrine", faction: "storm", cost: 150, gasCost: 75, hp: 700, shield: 60,
+    size: 3, supply: 0, buildTime: 350, sight: 7, trains: ["sentinel", "phantom"], requires: "forge",
+  },
+  spire: {
+    name: "Sky Ring", faction: "storm", cost: 150, gasCost: 125, hp: 750, shield: 60,
+    size: 3, supply: 0, buildTime: 350, sight: 7, trains: ["zephyr", "fulminar"], requires: "shrine",
+  },
+  // Tesla Pylon: defense turret whose bolts chain like the Arc's.
+  tesla: {
+    name: "Tesla Pylon", faction: "storm", cost: 125, gasCost: 0, hp: 300, shield: 40,
+    size: 2, supply: 0, buildTime: 200, sight: 7, trains: [], requires: "forge",
+    armed: true, dmg: 7, dmgAir: 14, range: (FP * 5.5) | 0, cooldown: 9,
+    chain: { jumps: 2, num: 1, den: 2, radius: (FP * 2) | 0 },
+  },
+  // Phase Vault: pure research building.
+  vault: {
+    name: "Phase Vault", faction: "storm", cost: 125, gasCost: 50, hp: 500, shield: 50,
+    size: 2, supply: 0, buildTime: 250, sight: 6, trains: [], requires: "shrine",
+  },
+});
+Object.assign(UPGRADE_BITS, {
+  blinktech: 512, capacitors: 1024, superconduct: 2048, phasetech: 4096, stormtech: 8192,
+});
+Object.assign(UPGRADES, {
+  blinktech:   { name: "Blink Matrix",  faction: "storm", building: "vault", cost: 100, gasCost: 100, time: 300, bit: 512 },
+  capacitors:  { name: "Capacitors",    faction: "storm", building: "forge", cost: 125, gasCost: 75,  time: 350, bit: 1024 },
+  superconduct:{ name: "Superconduct",  faction: "storm", building: "vault", cost: 150, gasCost: 100, time: 350, bit: 2048 },
+  phasetech:   { name: "Phase Tech",    faction: "storm", building: "vault", cost: 100, gasCost: 100, time: 300, bit: 4096 },
+  stormtech:   { name: "Storm Tech",    faction: "storm", building: "spire", cost: 150, gasCost: 150, time: 400, bit: 8192 },
+});
+Object.assign(ABILITIES, {
+  blink: {
+    name: "Blink", unit: "volt", faction: "storm", requires: "blinktech", targeted: true,
+    cd: 90, range: 3,
+  },
+  slipstream: {
+    name: "Slipstream", unit: "zephyr", faction: "storm", requires: null, targeted: true,
+    cd: 110, range: 4,
+  },
+  dome: {
+    name: "Shield Dome", unit: "sentinel", faction: "storm", requires: null, targeted: false,
+    cd: 200, radius: (FP * 2.5) | 0, shield: 40, dur: 80,
+  },
+  phase: {
+    name: "Phase Shift", unit: "phantom", faction: "storm", requires: "phasetech",
+    targeted: false, toggle: true, cd: 30, spdNum: 14, spdDen: 10,
+  },
+  tempest: {
+    name: "Tempest", unit: "fulminar", faction: "storm", requires: "stormtech", targeted: true,
+    cd: 220, range: 7, channel: 30, strikes: 6, interval: 5, dmg: 12, radius: (FP * 1.2) | 0,
+  },
+});
+
 // ---------- factions ----------
 // Per-faction metadata: the start building, the worker type, and the worker's
 // build list (what it can construct — replaces the old hardcoded order array in
@@ -280,6 +418,11 @@ export const FACTIONS = {
     name: "The Ooze", blurb: "Gooey swarm. Cheap, self-healing, morphing.",
     worker: "mote", start: "nucleus",
     build: ["pod", "den", "vent", "sump", "warren", "roost", "barb", "nucleus"],
+  },
+  storm: {
+    name: "The Tempest", blurb: "Living lightning in floating armor. Shielded, blinking, unforgiving.",
+    worker: "ion", start: "core",
+    build: ["conduit", "forge", "extractor", "tesla", "shrine", "vault", "spire", "core"],
   },
 };
 
