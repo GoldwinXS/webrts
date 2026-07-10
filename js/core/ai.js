@@ -83,9 +83,10 @@ export class AI {
         this.tryBuildOoze(sim, cmds, "den", hq);
       }
 
-      // 4b. GooVent early to help spread goo (acts as refinery-like support building)
+      // 4b. GooVents to spread goo — capped, they're support not an army
       const ventComing = sites.some((b) => b.type === "vent");
-      if (barracksDone && !ventComing && sim.canAfford(this.pid, BUILDINGS.vent.cost)) {
+      const vents = sim.entities.filter((e) => e.owner === own && e.type === "vent").length;
+      if (barracksDone && vents < 3 && !ventComing && sim.canAfford(this.pid, BUILDINGS.vent.cost)) {
         this.tryBuildOoze(sim, cmds, "vent", hq);
       }
 
@@ -649,6 +650,10 @@ export class AI {
   }
 
   // Ooze ooze_build: consumes a Mote at the site, auto-completes.
+  // The sim SILENTLY rejects the command unless a Mote is within 4 tiles of
+  // the site — so a candidate spot without one is a permanent stall (the
+  // deterministic scan re-picks the same doomed spot forever, banking
+  // thousands of minerals at 10/10 supply). Mirror that precondition here.
   tryBuildOoze(sim, cmds, type, hq) {
     const size = BUILDINGS[type].size;
     const htx = fpToTile(hq.x), hty = fpToTile(hq.y);
@@ -661,6 +666,9 @@ export class AI {
             const cx = tx * FP + (size * FP >> 1), cy = ty * FP + (size * FP >> 1);
             const nearPatch = sim.nearestEntity(cx, cy, FP * 2, (e) => e.type === "mineral");
             if (nearPatch) continue;
+            const moteNear = sim.nearestEntity(cx, cy, FP * 4, (e) =>
+              e.owner === this.pid && e.unit && e.type === "mote" && e.hp > 0);
+            if (!moteNear) continue;
             cmds.push({ t: "ooze_build", building: type, tx, ty });
             return;
           }
@@ -682,6 +690,11 @@ export class AI {
       for (const [ox, oy] of [[0, 0], [-1, 0], [0, -1], [-1, -1]]) {
         const tx = gx + ox, ty = gy + oy;
         if (sim.canPlace("sump", tx, ty, this.pid)) {
+          // same silent-reject rule: a Mote must be within 4 tiles of the site
+          const cx = tx * FP + FP, cy = ty * FP + FP;
+          const moteNear = sim.nearestEntity(cx, cy, FP * 4, (e) =>
+            e.owner === this.pid && e.unit && e.type === "mote" && e.hp > 0);
+          if (!moteNear) continue;
           cmds.push({ t: "ooze_build", building: "sump", tx, ty });
           return;
         }
