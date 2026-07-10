@@ -6,7 +6,7 @@ import { FP, HALF, tileToFp, fpToTile, isqrt, dist, dist2, makeHash } from "./fi
 import { UNITS, BUILDINGS, FACTIONS, START_MINERALS, START_GAS, CARRY_AMOUNT, GATHER_TICKS, PATCH_AMOUNT, MAX_QUEUE,
   GAS_CARRY, GAS_GATHER_TICKS, GAS_AMOUNT, GAS_DEPLETED, HQ_RESOURCE_CLEARANCE,
   UPGRADES, UPGRADE_BITS, ABILITIES, PLATING_HP, SERVOS_SPEED_NUM, SERVOS_SPEED_DEN,
-  GOO_SPREAD_INTERVAL, GOO_MAX_RADIUS, GOO_SPEED_NUM, GOO_SPEED_DEN,
+  GOO_GROW_INTERVAL, GOO_RECEDE_INTERVAL, GOO_NOISE, GOO_MAX_RADIUS, GOO_SPEED_NUM, GOO_SPEED_DEN,
   REGEN_DELAY, REGEN_RATE, REGEN_RATE_OFF, CARAPACE_HP } from "./data.js";
 import { generateMap } from "./map.js";
 import { findPath, nearestFree } from "./path.js";
@@ -46,10 +46,19 @@ export class Sim {
     // get +speed and +regen on Goo; Ooze buildings require Goo underneath
     // (except the sources themselves).
     this.gooGrid = new Uint8Array(w * h);
-    // Per-source goo radius (tiles from the source footprint edge). Incremented
-    // every GOO_SPREAD_INTERVAL ticks until GOO_MAX_RADIUS. Initial radius = 3
-    // so the starting Nucleus immediately covers its surroundings.
+    // Live goo sources: [{id}] of finished gooOozes buildings. Goo grows
+    // tile-by-tile from tiles BFS-connected to a source (up to GOO_MAX_RADIUS)
+    // and crumbles back where that support is lost.
     this._gooSources = [];
+    // Cursor into the GOO_NOISE dice list. Sim state: mixed into checksum()
+    // so any consumption drift between lockstep peers is caught immediately.
+    this.gooNoiseI = 0;
+    // Scratch: per-tile BFS distance-from-source (0 = unsupported). Derived
+    // from gooGrid + sources each pass, so NOT part of the checksum.
+    this._gooSupport = new Uint8Array(w * h);
+    // Bumped whenever any goo tile changes — lets the renderer repaint the
+    // creep canvas only when needed. Presentation-facing, not checksummed.
+    this.gooVersion = 0;
 
     for (const m of this.map.minerals) {
       this.addEntity({ type: "mineral", owner: -1, x: m.x, y: m.y, hp: 0, maxHp: 0, amount: PATCH_AMOUNT, radius: (FP * 0.4) | 0 });
@@ -71,15 +80,16 @@ export class Sim {
         this.autoGather(u);
       }
     }
-    // Initialize goo sources from start buildings and spread the initial goo.
-    // Ooze players start with a Nucleus (gooOozes: true) that needs to radiate
-    // goo from tick 0 so their buildings (Pod, Den, etc.) can be placed.
+    // Initialize goo sources from start buildings. Ooze players start with a
+    // Nucleus (gooOozes: true) whose seed stamp gives them enough goo from
+    // tick 0 to place their first buildings (Pod, Den, etc.).
     for (const e of this.entities) {
       if (e.building && e.done && BUILDINGS[e.type]?.gooOozes) {
-        this._gooSources.push({ id: e.id, radius: 3 });
+        e.gooStamped = 1;
+        this._gooSources.push({ id: e.id });
+        this.stampGooSeed(e);
       }
     }
-    this.rebuildGooGrid();
     this.updateFog();
   }
 
@@ -300,10 +310,15 @@ export class Sim {
   }
 
   // ---------- Goo field ----------
-  // The gooGrid is a Uint8Array(w*h) where 1 = covered by goo. It spreads from
-  // gooOozes buildings (Nucleus, Goo Vents) outward by one ring every
-  // GOO_SPREAD_INTERVAL ticks, up to GOO_MAX_RADIUS from the source's footprint
-  // edge.
+  // The gooGrid is a Uint8Array(w*h) where 1 = covered by goo. Goo grows
+  // tile-by-tile at the frontier around gooOozes buildings (Nucleus, Goo
+  // Vents): every GOO_GROW_INTERVAL ticks each empty tile touching supported
+  // goo rolls the GOO_NOISE dice — more goo neighbors, better odds — so fronts
+  // creep out as ragged amoeba lobes instead of rings. "Supported" means
+  // BFS-connected to a live source within GOO_MAX_RADIUS; when a source dies
+  // its unsupported goo crumbles back edge-first every GOO_RECEDE_INTERVAL
+  // ticks. All rolls come from the shared noise list in strict tile-index
+  // order, so both lockstep peers stay bit-identical (cursor is checksummed).
 
   // Is a tile coordinate covered by goo?
   tileOnGoo(tx, ty) {
@@ -330,75 +345,157 @@ export class Sim {
     }
   }
 
-  // Rebuild the gooGrid entirely from the current goo sources. Used at init
-  // and when a new goo source is created (e.g. a Goo Vent finishes).
-  rebuildGooGrid() {
+  // Stamp goo under a building's footprint plus `border` extra tiles in each
+  // direction (terrain permitting). Sources stamp a 2-tile seed border the
+  // moment they finish so a fresh Nucleus/Vent isn't starved while the
+  // frontier grows; other Ooze buildings stamp only their own footprint.
+  stampGoo(e, border) {
     const { w, h } = this.map;
-    this.gooGrid.fill(0);
+    const rock = this.map.rock, H = this.map.height, ramps = this.map.rampTiles;
+    const lvl = H ? H[e.ty * w + e.tx] : 0;
+    const x0 = Math.max(0, e.tx - border), x1 = Math.min(w - 1, e.tx + e.size - 1 + border);
+    const y0 = Math.max(0, e.ty - border), y1 = Math.min(h - 1, e.ty + e.size - 1 + border);
+    let changed = false;
+    for (let y = y0; y <= y1; y++)
+      for (let x = x0; x <= x1; x++) {
+        const i = y * w + x;
+        if (this.gooGrid[i]) continue;
+        const inside = x >= e.tx && x < e.tx + e.size && y >= e.ty && y < e.ty + e.size;
+        if (!inside) {
+          if (rock && rock[i]) continue;
+          if (H && H[i] !== lvl && !(ramps && ramps[i])) continue;
+        }
+        this.gooGrid[i] = 1;
+        changed = true;
+      }
+    if (changed) this.gooVersion++;
+  }
+
+  stampGooSeed(e) { this.stampGoo(e, 2); }
+
+  // BFS from all live source footprints across existing goo (4-neighbor),
+  // depth-capped. _gooSupport[i] = distance+1 from a source footprint, 0 =
+  // unsupported. FIFO BFS distances are order-independent, so this is
+  // deterministic regardless of source ordering.
+  computeGooSupport() {
+    const { w, h } = this.map;
+    const grid = this.gooGrid, sup = this._gooSupport;
+    sup.fill(0);
+    const queue = [];
     for (const src of this._gooSources) {
       const e = this.byId.get(src.id);
-      if (!e || !e.building || !e.done || !BUILDINGS[e.type]?.gooOozes) continue;
-      const r = src.radius;
-      // footprint expanded outward by `r` tiles in each direction
-      const left = Math.max(0, e.ty - r);
-      const top = Math.max(0, e.tx - r);
-      const right = Math.min(w, e.ty + e.size + r);
-      const bottom = Math.min(h, e.tx + e.size + r);
-      for (let y = left; y < right; y++) {
-        for (let x = top; x < bottom; x++) {
-          // distance from the footprint edge (Manhattan-ish)
-          if (x >= e.tx && x < e.tx + e.size && y >= e.ty && y < e.ty + e.size) {
-            // inside the building footprint: always goo
-            this.gooGrid[y * w + x] = 1;
-          } else {
-            // outside: tile must be within `r` of the footprint edge
-            const dx = Math.max(0, e.tx - x, x - (e.tx + e.size - 1));
-            const dy = Math.max(0, e.ty - y, y - (e.ty + e.size - 1));
-            // Use Chebyshev distance (square spread) for organic look
-            const d = Math.max(dx, dy);
-            if (d <= r) this.gooGrid[y * w + x] = 1;
-          }
-        }
-      }
-    }
-    // Also mark the tiles under any Ooze building as goo (buildings that finish
-    // on a tile that the source hasn't yet reached still count)
-    for (const e of this.entities) {
-      if (!e.building || !e.done) continue;
-      const bd = BUILDINGS[e.type];
-      if (!bd || bd.faction !== "ooze") continue;
+      if (!e) continue;
       for (let y = e.ty; y < e.ty + e.size; y++)
-        for (let x = e.tx; x < e.tx + e.size; x++)
-          this.gooGrid[y * w + x] = 1;
+        for (let x = e.tx; x < e.tx + e.size; x++) {
+          const i = y * w + x;
+          if (grid[i] && !sup[i]) { sup[i] = 1; queue.push(i); }
+        }
+    }
+    for (let qi = 0; qi < queue.length; qi++) {
+      const i = queue[qi];
+      const d = sup[i];
+      if (d > GOO_MAX_RADIUS) continue; // depth cap
+      const x = i % w;
+      if (x > 0 && grid[i - 1] && !sup[i - 1]) { sup[i - 1] = d + 1; queue.push(i - 1); }
+      if (x < w - 1 && grid[i + 1] && !sup[i + 1]) { sup[i + 1] = d + 1; queue.push(i + 1); }
+      if (i >= w && grid[i - w] && !sup[i - w]) { sup[i - w] = d + 1; queue.push(i - w); }
+      if (i < w * (h - 1) && grid[i + w] && !sup[i + w]) { sup[i + w] = d + 1; queue.push(i + w); }
     }
   }
 
-  // Incrementally expand goo from all sources. Called every step.
+  // Can goo tile j feed growth into empty tile i? j must be supported with
+  // headroom (so the new tile stays inside GOO_MAX_RADIUS) and on the same
+  // height level — unless either tile is a ramp tile, so creep flows along
+  // ramps but never over cliff walls (those are rock anyway).
+  gooCanFeed(i, j) {
+    const sup = this._gooSupport;
+    if (!this.gooGrid[j] || !sup[j] || sup[j] > GOO_MAX_RADIUS) return 0;
+    const H = this.map.height, ramps = this.map.rampTiles;
+    if (H && H[i] !== H[j] && !(ramps && (ramps[i] || ramps[j]))) return 0;
+    return 1;
+  }
+
+  // Grow and recede the goo frontier. Called every step.
   spreadGoo() {
-    let changed = false;
-    // Step 1: remove dead goo sources
+    // Step 1: drop dead sources — their goo loses support and crumbles below.
     this._gooSources = this._gooSources.filter((src) => {
       const e = this.byId.get(src.id);
       return e && e.building && e.hp > 0;
     });
-    // Step 2: add any NEW goo sources (buildings that just finished)
+    // Step 2: newly finished Ooze buildings stamp their goo; gooOozes ones
+    // also register as sources with a seed border.
     for (const e of this.entities) {
-      if (!e.building || !e.done || e.hp <= 0) continue;
-      if (!BUILDINGS[e.type]?.gooOozes) continue;
-      if (this._gooSources.some((s) => s.id === e.id)) continue;
-      this._gooSources.push({ id: e.id, radius: 3 });
-      changed = true;
-    }
-    // Step 3: expand radii on timer
-    if (this.tick % GOO_SPREAD_INTERVAL === 0) {
-      for (const src of this._gooSources) {
-        if (src.radius < GOO_MAX_RADIUS) {
-          src.radius++;
-          changed = true;
-        }
+      if (!e.building || !e.done || e.hp <= 0 || e.gooStamped) continue;
+      const bd = BUILDINGS[e.type];
+      if (!bd || bd.faction !== "ooze") continue;
+      e.gooStamped = 1;
+      if (bd.gooOozes) {
+        this._gooSources.push({ id: e.id });
+        this.stampGooSeed(e);
+      } else {
+        this.stampGoo(e, 0);
       }
     }
-    if (changed) this.rebuildGooGrid();
+    const growing = this.tick % GOO_GROW_INTERVAL === 0;
+    const receding = this.tick % GOO_RECEDE_INTERVAL === 0;
+    if (!growing && !receding) return;
+    this.computeGooSupport();
+
+    const { w, h } = this.map;
+    const grid = this.gooGrid;
+    const rock = this.map.rock;
+    const grown = [], dying = [];
+
+    if (growing) {
+      for (let i = 0; i < grid.length; i++) {
+        if (grid[i] || (rock && rock[i])) continue;
+        const x = i % w, y = (i / w) | 0;
+        let n = 0;
+        if (x > 0) n += this.gooCanFeed(i, i - 1);
+        if (x < w - 1) n += this.gooCanFeed(i, i + 1);
+        if (y > 0) n += this.gooCanFeed(i, i - w);
+        if (y < h - 1) n += this.gooCanFeed(i, i + w);
+        if (!n) continue;
+        // more goo around the tile = better odds: concavities fill fast,
+        // lone spikes stay rare, fronts come out blobby
+        const roll = GOO_NOISE[this.gooNoiseI++ % GOO_NOISE.length];
+        if (roll < (n === 1 ? 40 : n === 2 ? 110 : 215)) grown.push(i);
+      }
+    }
+
+    if (receding) {
+      const sup = this._gooSupport;
+      // Tiles under living Ooze buildings never crumble.
+      const hold = this._gooHold || (this._gooHold = new Uint8Array(w * h));
+      hold.fill(0);
+      for (const e of this.entities) {
+        if (!e.building || e.hp <= 0) continue;
+        const bd = BUILDINGS[e.type];
+        if (!bd || bd.faction !== "ooze") continue;
+        for (let y = e.ty; y < e.ty + e.size; y++)
+          for (let x = e.tx; x < e.tx + e.size; x++) hold[y * w + x] = 1;
+      }
+      for (let i = 0; i < grid.length; i++) {
+        if (!grid[i] || sup[i] || hold[i]) continue;
+        // only edge tiles crumble (fewer than 4 orthogonal goo neighbors),
+        // so lost creep shrivels inward instead of blinking off
+        const x = i % w, y = (i / w) | 0;
+        let n = 0;
+        if (x > 0 && grid[i - 1]) n++;
+        if (x < w - 1 && grid[i + 1]) n++;
+        if (y > 0 && grid[i - w]) n++;
+        if (y < h - 1 && grid[i + w]) n++;
+        if (n >= 4) continue;
+        const roll = GOO_NOISE[this.gooNoiseI++ % GOO_NOISE.length];
+        if (roll < 120) dying.push(i);
+      }
+    }
+
+    if (grown.length || dying.length) {
+      for (const i of grown) grid[i] = 1;
+      for (const i of dying) grid[i] = 0;
+      this.gooVersion++;
+    }
   }
 
   // Does the player have a building that oozes goo? (for AI checks)
@@ -1689,7 +1786,8 @@ export class Sim {
     // Goo grid checksum: sample tiles near sources for deterministic sync
     const { w } = this.map;
     for (let i = 0; i < this.gooGrid.length; i += 13) h.mix(this.gooGrid[i]); // sparse sample
-    for (const src of this._gooSources) { h.mix(src.id); h.mix(src.radius); }
+    for (const src of this._gooSources) h.mix(src.id);
+    h.mix(this.gooNoiseI); // noise-cursor drift = goo divergence, caught here
     for (const e of this.entities) {
       h.mix(e.id); h.mix(e.x); h.mix(e.y); h.mix(e.hp | 0);
       if (e.amount !== undefined) h.mix(e.amount | 0);

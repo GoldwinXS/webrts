@@ -164,10 +164,22 @@ export const ABILITIES = {
 export const PLAYER_COLORS = ["#4cc2ff", "#ff5f4c"];
 export const MAX_QUEUE = 5;
 
-// Goo-field constants (Ooze faction). The gooGrid spreads from Nucleus and Goo
-// Vent sources. Ticks are 100ms real-time, so 10 ticks = 1s.
-export const GOO_SPREAD_INTERVAL = 10;    // spread one ring every 10 ticks (1s)
-export const GOO_MAX_RADIUS = 10;          // tiles from source at max spread
+// Goo-field constants (Ooze faction). The gooGrid grows tile-by-tile from
+// Nucleus and Goo Vent sources and crumbles back when they die. Ticks are
+// 100ms real-time, so 10 ticks = 1s.
+export const GOO_GROW_INTERVAL = 10;       // frontier growth pass every 10 ticks
+export const GOO_RECEDE_INTERVAL = 5;      // unsupported-edge decay pass every 5 ticks
+export const GOO_MAX_RADIUS = 10;          // BFS depth cap: tiles from source footprint
+// The goo dice: a fixed list of "random" bytes both lockstep peers step
+// through in the same order (cursor lives in sim state and is checksummed).
+// Deliberately dumb — no PRNG, just numbers — so goo growth is trivially
+// deterministic and auditable.
+export const GOO_NOISE = Uint8Array.from([
+  183,  42, 219,  91, 137,  12, 250,  68, 201,  33, 174, 226,  57, 148,   5, 239,
+   96, 210,  27, 163,  78, 244, 119,  49, 192,   8, 231, 104, 156,  71, 217,  36,
+  128, 253,  61, 179,  22, 145, 236,  87, 199,  14, 110, 168,  44, 222,  99, 187,
+    3, 133, 246,  53, 205,  75, 160,  30, 228, 116,  84, 194,  18, 141, 251,  65,
+]);
 export const GOO_SPEED_NUM = 6, GOO_SPEED_DEN = 5;  // ×1.2 speed on Goo
 export const REGEN_DELAY = 30;             // 3s before regen starts after damage
 export const REGEN_RATE = 1;               // HP per tick on Goo

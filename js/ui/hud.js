@@ -987,6 +987,12 @@ export class Hud {
           ? this.mmRock[vis]
           : this.mmGround[height ? Math.min(3, height[i]) : 0][vis];
         ctx.fillRect(x * S, y * S, S + 0.5, S + 0.5);
+        // creep coverage at a glance (visible tiles only, same policy as
+        // the world overlay — hidden goo doesn't leak)
+        if (vis && this.sim.gooGrid && this.sim.gooGrid[i]) {
+          ctx.fillStyle = "rgba(90,200,60,0.55)";
+          ctx.fillRect(x * S, y * S, S + 0.5, S + 0.5);
+        }
       }
     }
     for (const e of this.sim.entities) {

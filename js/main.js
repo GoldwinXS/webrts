@@ -206,6 +206,8 @@ function startGame(mode, seed, netConn, opts, showcase) {
   const hud = new Hud(game, renderer, audio);
   const input = new Input(game, renderer, hud, audio);
   hud.input = input;
+  // debug/verification handle (read-only use only — the sim is lockstep)
+  window.webrts = { game, renderer, hud, input };
 
   game.onEvents = (events) => {
     renderer.consumeEvents(events);

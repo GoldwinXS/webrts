@@ -311,14 +311,26 @@ export class Renderer {
     this.gooTex.magFilter = THREE.NearestFilter;
     this.gooTex.minFilter = THREE.NearestFilter;
     this.gooTex.generateMipmaps = false;
-    const gooGeo = new THREE.PlaneGeometry(w, h);
+    // Same displaced grid as the ground so the creep hugs ramps and stays
+    // under cliff tops; depthTest lets terrain occlude it, polygonOffset
+    // keeps it from z-fighting the ground it sits on.
+    const gooGeo = new THREE.PlaneGeometry(w, h, w, h);
+    const gooPos = gooGeo.attributes.position;
+    for (let i = 0; i < gooPos.count; i++) {
+      const vx = gooPos.getX(i) + w / 2;
+      const cz = h / 2 - gooPos.getY(i);
+      const cx = Math.round(vx), cz2 = Math.round(cz);
+      gooPos.setZ(i, this.heightGrid[cz2 * gw + cx] + 0.05);
+    }
+    gooPos.needsUpdate = true;
     const gooMat = new THREE.MeshBasicMaterial({
       map: this.gooTex, transparent: true, opacity: 0.65,
-      depthWrite: false, depthTest: false,
+      depthWrite: false, depthTest: true,
+      polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
     });
     this.gooPlane = new THREE.Mesh(gooGeo, gooMat);
     this.gooPlane.rotation.x = -Math.PI / 2;
-    this.gooPlane.position.set(w / 2, 0.15, h / 2);
+    this.gooPlane.position.set(w / 2, 0, h / 2);
     this.gooPlane.renderOrder = 1;
     this.scene.add(this.gooPlane);
   }
@@ -851,47 +863,95 @@ export class Renderer {
     this.groundTex.needsUpdate = true;
   }
 
-  // Paint the goo creep overlay (Ooze faction). Acid-green translucent blobs
-  // with a pulsing network feel. Only painted where the gooGrid has a 1 AND
-  // the fog is clear (fog===2) so hidden goo doesn't leak information.
+  // Paint the goo creep overlay (Ooze faction) as one organic silhouette:
+  // a union of discs (one per goo tile, one per goo-goo edge midpoint) gives
+  // a smooth amoeba outline with rounded lobes instead of square tiles. A
+  // dark rim is stamped by drawing the silhouette offset in 4 directions
+  // under the fill; veins/speckles are composited source-atop so all detail
+  // stays inside the blob. Only painted where the gooGrid has a 1 AND the
+  // fog is clear (fog===2) so hidden goo doesn't leak information.
   paintGoo() {
     const { w, h } = this.sim.map;
     if (!this.sim.gooGrid) { this.gooPlane.visible = false; return; }
+    const grid = this.sim.gooGrid;
     const fog = this.sim.fog[this.localPlayer];
-    const ctx = this.gooCanvas.getContext("2d");
-    ctx.clearRect(0, 0, this.gooCanvas.width, this.gooCanvas.height);
+    const W = this.gooCanvas.width, H = this.gooCanvas.height;
+    if (!this.gooMask) {
+      this.gooMask = document.createElement("canvas");
+      this.gooMask.width = W; this.gooMask.height = H;
+      this.gooTint = document.createElement("canvas");
+      this.gooTint.width = W; this.gooTint.height = H;
+    }
+    const vis = (x, y) => grid[y * w + x] === 1 && fog[y * w + x] === 2;
+
+    // 1) white silhouette mask: union of discs
+    const mctx = this.gooMask.getContext("2d");
+    mctx.clearRect(0, 0, W, H);
+    mctx.fillStyle = "#fff";
     let anyGoo = false;
+    const R = PX * 0.72;
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
-        if (this.sim.gooGrid[y * w + x] !== 1) continue;
-        if (fog[y * w + x] !== 2) continue; // hidden by fog
+        if (!vis(x, y)) continue;
         anyGoo = true;
-        const px = x * PX, py = y * PX;
-        // Acid-green base with per-tile variation
+        const cx = x * PX + PX / 2, cy = y * PX + PX / 2;
+        mctx.beginPath(); mctx.arc(cx, cy, R, 0, Math.PI * 2); mctx.fill();
+        // discs at shared edge midpoints fill the waists between neighbors
+        if (x + 1 < w && vis(x + 1, y)) { mctx.beginPath(); mctx.arc(cx + PX / 2, cy, R, 0, Math.PI * 2); mctx.fill(); }
+        if (y + 1 < h && vis(x, y + 1)) { mctx.beginPath(); mctx.arc(cx, cy + PX / 2, R, 0, Math.PI * 2); mctx.fill(); }
+      }
+    }
+    const ctx = this.gooCanvas.getContext("2d");
+    ctx.clearRect(0, 0, W, H);
+    this.gooPlane.visible = anyGoo;
+    if (!anyGoo) { this.gooTex.needsUpdate = true; return; }
+
+    // tint helper: colored copy of the silhouette
+    const tint = (color) => {
+      const tctx = this.gooTint.getContext("2d");
+      tctx.clearRect(0, 0, W, H);
+      tctx.drawImage(this.gooMask, 0, 0);
+      tctx.globalCompositeOperation = "source-in";
+      tctx.fillStyle = color;
+      tctx.fillRect(0, 0, W, H);
+      tctx.globalCompositeOperation = "source-over";
+      return this.gooTint;
+    };
+
+    // 2) dark rim (offset stamps) under the acid-green fill
+    const rim = tint("rgba(24,92,20,0.9)");
+    const O = 3;
+    ctx.drawImage(rim, -O, 0); ctx.drawImage(rim, O, 0);
+    ctx.drawImage(rim, 0, -O); ctx.drawImage(rim, 0, O);
+    ctx.drawImage(tint("rgba(62,205,40,0.82)"), 0, 0);
+
+    // 3) per-tile veins + darker blotches, clipped inside the silhouette
+    ctx.globalCompositeOperation = "source-atop";
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        if (!vis(x, y)) continue;
         const hh = pixHash(x + 42, y + 99);
-        // Vibrant acid-green with per-tile variation — stands out on any terrain
-        const r = 40 + (hh & 23);
-        const g = 210 + ((hh >> 4) & 35);
-        const b = 30 + ((hh >> 8) & 15);
-        ctx.fillStyle = `rgba(${r},${g},${b},0.72)`;
-        ctx.fillRect(px + 1, py + 1, PX - 2, PX - 2);
-        // Brighter vein/network highlight
-        ctx.fillStyle = `rgba(${r+60},${g+30},${b+20},0.28)`;
-        const cx = px + PX / 2, cy = py + PX / 2;
-        const veins = 3 + (hh & 3);
+        const cx = x * PX + PX / 2, cy = y * PX + PX / 2;
+        // soft dark blotch for organic mottling
+        ctx.fillStyle = `rgba(20,80,16,${0.10 + (hh & 7) * 0.02})`;
+        ctx.beginPath();
+        ctx.arc(cx + ((hh >> 3) & 7) - 3, cy + ((hh >> 6) & 7) - 3, PX * (0.22 + ((hh >> 9) & 3) * 0.05), 0, Math.PI * 2);
+        ctx.fill();
+        // bright vein highlights
+        const veins = 2 + (hh & 1);
         for (let v = 0; v < veins; v++) {
           const ang = ((hh >> (v * 3)) & 15) / 15 * Math.PI * 2;
           ctx.beginPath();
           ctx.moveTo(cx + Math.cos(ang) * 2, cy + Math.sin(ang) * 2);
           ctx.lineTo(cx + Math.cos(ang) * (PX * 0.4), cy + Math.sin(ang) * (PX * 0.4));
           ctx.lineWidth = 2 + (hh & 2);
-          ctx.strokeStyle = `rgba(${r+70},${g+40},${b+25},0.24)`;
+          ctx.strokeStyle = `rgba(150,255,90,0.20)`;
           ctx.stroke();
         }
       }
     }
-    this.gooPlane.visible = anyGoo;
-    if (anyGoo) { this.gooTex.needsUpdate = true; }
+    ctx.globalCompositeOperation = "source-over";
+    this.gooTex.needsUpdate = true;
   }
 
   // Instanced, theme-tinted barrier props keyed by map.barrierKind:
@@ -1607,8 +1667,18 @@ export class Renderer {
 
     if (sim.tick !== this.lastFogPaint && sim.tick % 3 === 0) {
       this.paintFog();
-      this.paintGoo();
       this.lastFogPaint = sim.tick;
+    }
+    // Goo repaints only when the grid actually changed (gooVersion) or on a
+    // slow heartbeat so fog reveals eventually show hidden creep. The slow
+    // breathing pulse is pure material opacity — no repaint.
+    if (sim.gooVersion !== this.lastGooVersion || sim.tick - (this.lastGooTick || 0) >= 15) {
+      this.paintGoo();
+      this.lastGooVersion = sim.gooVersion;
+      this.lastGooTick = sim.tick;
+    }
+    if (this.gooPlane.visible) {
+      this.gooPlane.material.opacity = 0.62 + Math.sin(t * 1.6) * 0.07;
     }
 
     // sun shadow frustum follows the camera target
