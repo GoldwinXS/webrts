@@ -145,7 +145,7 @@ export class Input {
         if (g && ids.length) {
           this.game.issue({ t: "patrol", ids, x: g.x, y: g.y, q: e.shiftKey ? 1 : 0 });
           this.renderer.orderPing(g.wx, g.wz, "#6bb8ff");
-          this.audio.ack();
+          this.audio.ackMove(this.voiceKey());
         }
         this.setPatrolMode(false);
         return;
@@ -174,7 +174,7 @@ export class Input {
       const hit = this.entityAt(e.clientX, e.clientY);
       if (hit && (hit.owner === this.pid || hit.type === "mineral" || hit.owner >= 0)) {
         this.selection.add(hit.id);
-        if (hit.owner === this.pid) this.audio.select();
+        if (hit.owner === this.pid) this.audio.ack(this.voiceKey());
 
         // double-click a unit or building: select all of its type on screen
         const now = performance.now();
@@ -195,7 +195,7 @@ export class Input {
         const sx = (v.x + 1) / 2 * innerWidth, sy = (-v.y + 1) / 2 * innerHeight;
         if (sx >= x0 && sx <= x1 && sy >= y0 && sy <= y1) this.selection.add(ent.id);
       }
-      if (this.selection.size) this.audio.select();
+      if (this.selection.size) this.audio.ack(this.voiceKey());
     }
     this.hud.refreshSelection();
   }
@@ -258,11 +258,33 @@ export class Input {
       if (wids.length) {
         this.game.issue({ t: "resume", ids: wids, targetId: target.id, q });
         this.renderer.orderPing(target.x / FP, target.y / FP, "#ffb347");
-        this.audio.ack();
+        this.audio.ackMove(this.voiceKey());
         // non-workers in the selection just move next to the site
         const others = ids.filter((id) => !wids.includes(id));
         if (others.length && g) this.game.issue({ t: "move", ids: others, x: g.x, y: g.y, q });
         return;
+      }
+    }
+
+    // own DAMAGED Cog unit/finished building: workers repair it (SC1 SCV-style).
+    // Repair stacking is allowed, so ALL selected Bearings pile on.
+    if (target && target.owner === this.pid && target.hp > 0 && target.hp < target.maxHp &&
+        !(target.building && !target.done)) {
+      const def = target.unit ? UNITS[target.type] : (target.building ? BUILDINGS[target.type] : null);
+      const isCog = def && (!def.faction || def.faction === "cogs");
+      if (isCog) {
+        const wids = this.mySelectedWorkers()
+          .filter((w) => { const wd = UNITS[w.type]; return wd && (!wd.faction || wd.faction === "cogs"); })
+          .map((w) => w.id);
+        if (wids.length) {
+          this.game.issue({ t: "repair", ids: wids, targetId: target.id, q });
+          this.renderer.orderPing(target.x / FP, target.y / FP, "#ffd24c");
+          this.audio.ackMove(this.voiceKey());
+          // non-worker units in the selection just move to the target
+          const others = ids.filter((id) => !wids.includes(id));
+          if (others.length && g) this.game.issue({ t: "move", ids: others, x: g.x, y: g.y, q });
+          return;
+        }
       }
     }
 
@@ -276,7 +298,7 @@ export class Input {
     } else if (g) {
       this.game.issue({ t: "move", ids, x: g.x, y: g.y, q });
       this.renderer.orderPing(g.wx, g.wz, q ? "#c9ff6b" : "#7cff6b");
-      this.audio.ack();
+      this.audio.ackMove(this.voiceKey());
     }
   }
 
@@ -379,7 +401,7 @@ export class Input {
         if (ids.length) {
           this.claimIntoGroup(digit, ids, false);
           this.hud.toastInfo(`Group ${digit} set (${ids.length})`);
-          this.audio.select();
+          this.audio.ack(this.voiceKey());
         }
         return;
       }
@@ -387,7 +409,7 @@ export class Input {
         if (ids.length) {
           const grp = this.claimIntoGroup(digit, ids, true);
           this.hud.toastInfo(`Group ${digit}: ${grp.size} member${grp.size > 1 ? "s" : ""}`);
-          this.audio.select();
+          this.audio.ack(this.voiceKey());
         }
         return;
       }
@@ -399,7 +421,7 @@ export class Input {
         this.selection.clear();
         alive.forEach((id) => this.selection.add(id));
         this.hud.refreshSelection();
-        this.audio.select();
+        this.audio.ack(this.voiceKey());
         const now = performance.now();
         if (this.lastRecall.key === digit && now - this.lastRecall.time < 450) {
           let cx = 0, cy = 0;
@@ -422,10 +444,11 @@ export class Input {
       return;
     }
 
-    // grid hotkeys from the command card (QWER / AS)
+    // grid hotkeys from the command card (QWER / AS). Shift held = queue the
+    // command behind the unit's current orders (e.g. shift-leap after a move).
     if (!e.ctrlKey && !e.altKey && !e.metaKey && !e.repeat) {
       const cmd = this.hud.hotkeys?.[k];
-      if (cmd) this.hud.command(cmd);
+      if (cmd) this.hud.command(cmd, e.shiftKey);
     }
   }
 
@@ -451,11 +474,13 @@ export class Input {
   }
 
   issueTargetedAbility(fx, fy, wx, wz) {
-    const { ability, ids } = this.targetMode;
+    const { ability, ids, queue } = this.targetMode;
     // re-filter to still-valid, off-cooldown units of the ability's type
     const live = ids.filter((id) => this.sim.byId.has(id));
     if (!live.length) return;
-    this.game.issue({ t: "ability", ids: live, ability, x: fx, y: fy });
+    // queue: shift-held when the ability was chosen — append the cast behind the
+    // unit's current orders (e.g. move here, THEN leap) instead of firing now.
+    this.game.issue({ t: "ability", ids: live, ability, x: fx, y: fy, q: queue ? 1 : 0 });
     this.hud.abilitySound?.(ability);
     this.renderer.orderPing(wx, wz, "#ff9d4c");
     this.hud.cardSig = "";
@@ -476,7 +501,7 @@ export class Input {
     this.selection.clear();
     army.forEach((u) => this.selection.add(u.id));
     this.hud.refreshSelection();
-    this.audio.select();
+    this.audio.ack(this.voiceKey());
   }
 
   // Space: center the camera on the current selection
@@ -553,7 +578,14 @@ export class Input {
   confirmPlace(queue) {
     const d = BUILDINGS[this.placing];
     const { tx, ty } = this.ghostTile || {};
-    const worker = this.mySelectedWorkers()[0];
+    // MULTI-WORKER DISTRIBUTION: among the selected workers, pick the one with
+    // the FEWEST pending build orders (current build + queued builds in u.next),
+    // tie-broken by closest distance to the new site. With N workers and N
+    // placements this hands each building to a different worker — the first
+    // placement goes to the nearest free worker, the second to the next, etc.
+    // Works for plain and shift-chained placements alike.
+    const site = { x: tx * FP + (d.size * FP >> 1), y: ty * FP + (d.size * FP >> 1) };
+    const worker = this.pickBuildWorker(this.mySelectedWorkers(), site);
     if (!worker) { this.hud.toast("Select a worker first"); this.audio.error(); return; }
     if (!this.sim.canAfford(this.pid, d.cost)) { this.hud.toast("Not enough scrap"); this.audio.error(); return; }
     if (!this.sim.canPlace(this.placing, tx, ty, this.pid)) { this.hud.toast("Can't build there"); this.audio.error(); return; }
@@ -598,7 +630,7 @@ export class Input {
       }
     }
     this.hud.refreshSelection();
-    this.audio.select();
+    this.audio.ack(this.voiceKey());
   }
 
   // cycle through idle workers, centering the camera on each
@@ -612,10 +644,17 @@ export class Input {
     this.selection.add(w.id);
     this.renderer.camera.jumpTo(w.x / FP, w.y / FP);
     this.hud.refreshSelection();
-    this.audio.select();
+    this.audio.ack(this.voiceKey());
   }
 
   // ---------- helpers ----------
+
+  // faction voice key for the local player's acknowledgment sounds
+  // (audio.js speaks "cog" | "ooze" | "tempest"; sim speaks "cogs"/"storm")
+  voiceKey() {
+    const f = this.sim.factions?.[this.pid];
+    return f === "cogs" ? "cog" : f === "storm" ? "tempest" : f;
+  }
 
   mySelected() {
     return [...this.selection]
@@ -624,6 +663,31 @@ export class Input {
   }
   mySelectedUnitIds() { return this.mySelected().filter((e) => e.unit).map((e) => e.id); }
   mySelectedWorkers() { return this.mySelected().filter((e) => UNITS[e.type]?.isWorker); }
+
+  // How many build orders a worker has pending: its current order plus every
+  // queued order in u.next that is a build (worker "build" or ooze "oozebuild").
+  pendingBuilds(w) {
+    const isBuild = (o) => o && (o.kind === "build" || o.kind === "oozebuild");
+    let n = isBuild(w.order) ? 1 : 0;
+    for (const o of (w.next || [])) if (isBuild(o)) n++;
+    return n;
+  }
+
+  // Choose which selected worker builds the next site: fewest pending builds
+  // first, tie-broken by nearest distance to the site, then lowest id (stable).
+  pickBuildWorker(workers, site) {
+    let best = null, bestN = 0, bestD = 0;
+    for (const w of workers) {
+      const n = this.pendingBuilds(w);
+      const dx = w.x - site.x, dy = w.y - site.y;
+      const dd = dx * dx + dy * dy;
+      if (!best || n < bestN || (n === bestN && dd < bestD) ||
+          (n === bestN && dd === bestD && w.id < best.id)) {
+        best = w; bestN = n; bestD = dd;
+      }
+    }
+    return best;
+  }
 
   // called every frame for camera pan
   update(dt) {

@@ -501,6 +501,33 @@ export class Hud {
       html += `<div class="sel-row${active ? " active" : ""}" data-type="${type}"><span>${name}</span><b>${n > 1 ? "x" + n : ""}</b></div>`;
     }
     if (types.length > 1) html += `<div class="sel-sub">Tab cycles subgroup</div>`;
+
+    // ---- per-unit portrait cards ----
+    // When multiple own units are selected, show one clickable card per unit so
+    // the player can pick out a single one. Plain click = select ONLY that unit;
+    // shift-click = remove that unit from the selection. Cap the strip so a
+    // 100-unit ball doesn't flood the panel.
+    const myUnits = mine.filter((e) => e.unit);
+    if (myUnits.length > 1) {
+      // Inline styles so this works without touching the shared stylesheet.
+      const wrap = `display:flex;flex-wrap:wrap;gap:3px;margin:4px 0;`;
+      let cards = "";
+      for (const e of myUnits.slice(0, 24)) {
+        const nm = UNITS[e.type]?.name || e.type;
+        const hpPct = Math.max(0, Math.min(100, (e.hp / e.maxHp) * 100)) | 0;
+        const active = e.type === this.activeType;
+        const box = `position:relative;width:26px;height:26px;border:1px solid ${active ? "#7cff6b" : "#3a5a44"};` +
+          `border-radius:3px;background:#12241a;color:#cfe;font:bold 12px sans-serif;` +
+          `display:flex;align-items:center;justify-content:center;cursor:pointer;pointer-events:auto;`;
+        const bar = `position:absolute;left:1px;right:1px;bottom:1px;height:2px;background:#400;`;
+        const fill = `display:block;height:100%;width:${hpPct}%;background:${hpPct > 50 ? "#3c6" : hpPct > 25 ? "#cc3" : "#c33"};`;
+        cards += `<div class="unit-card" data-eid="${e.id}" style="${box}" title="${nm} — click to isolate, shift-click to drop">` +
+          `${nm.charAt(0)}<span style="${bar}"><i style="${fill}"></i></span></div>`;
+      }
+      if (myUnits.length > 24) cards += `<div style="align-self:center;color:#9ab;font:11px sans-serif;">+${myUnits.length - 24}</div>`;
+      html += `<div class="unit-cards" style="${wrap}">${cards}</div>`;
+    }
+
     if (sel.length === 1) {
       const e = sel[0];
       if (e.type === "mineral") html += `<div class="sel-sub">${e.amount} remaining</div>`;
@@ -544,6 +571,28 @@ export class Hud {
       row.addEventListener("click", () => {
         this.activeType = row.dataset.type;
         this.cardSig = "";
+        this.refreshSelection();
+      });
+    }
+    // per-unit portrait cards: plain click isolates that unit, shift-click drops
+    // it from the selection. Both mutate the shared selection Set, then resync
+    // the subgroup/command card via refreshSelection.
+    for (const card of this.$selPanel.querySelectorAll(".unit-card[data-eid]")) {
+      card.addEventListener("pointerdown", (e) => e.stopPropagation());
+      card.addEventListener("click", (e) => {
+        const eid = Number(card.dataset.eid);
+        if (!this.sim.byId.has(eid)) { this.refreshSelection(); return; }
+        const sel = this.renderer.selection;
+        if (e.shiftKey) {
+          sel.delete(eid);                 // shift-click: remove just this unit
+        } else {
+          sel.clear(); sel.add(eid);       // plain click: isolate this unit
+        }
+        // keep the active subgroup valid for whatever remains selected
+        const survivor = this.sim.byId.get([...sel][0]);
+        this.activeType = survivor?.type || null;
+        this.cardSig = "";
+        this.audio.select();
         this.refreshSelection();
       });
     }
@@ -663,7 +712,7 @@ export class Hud {
     this.$cmdCard.innerHTML = card;
     for (const b of this.$cmdCard.querySelectorAll("button")) {
       b.addEventListener("pointerdown", (e) => e.stopPropagation());
-      b.addEventListener("click", () => this.command(b.dataset.cmd));
+      b.addEventListener("click", (e) => this.command(b.dataset.cmd, e.shiftKey));
       b.addEventListener("pointerenter", () => this.showCmdTip(b));
       b.addEventListener("pointerleave", () => this.hideCmdTip());
     }
@@ -827,7 +876,7 @@ export class Hud {
       !e.leapUntil && !e.channelUntil);
   }
 
-  command(cmd) {
+  command(cmd, shift = false) {
     if (cmd.startsWith("build-")) {
       const b = BUILDINGS[cmd.slice(6)];
       if (b?.requires && !this.sim.hasBuilding(this.pid, b.requires)) {
@@ -871,7 +920,7 @@ export class Hud {
     } else if (cmd.startsWith("research-")) {
       this.doResearch(cmd.slice(9));
     } else if (cmd.startsWith("ability-")) {
-      this.doAbility(cmd.slice(8));
+      this.doAbility(cmd.slice(8), shift);
     } else if (cmd === "attack") {
       if (this.input?.mySelectedUnitIds().length) this.input.setAttackMode(true);
     } else if (cmd === "patrol") {
@@ -920,19 +969,22 @@ export class Hud {
 
   // Issue an ability for all valid selected units of its type. Targeted
   // abilities enter target mode instead of firing immediately.
-  doAbility(name) {
+  doAbility(name, queue = false) {
     const a = ABILITIES[name];
     if (!a) return;
+    // When shift-queuing, don't filter on cooldown/busy — the cast is deferred
+    // to a later queue step, so its readiness is judged then, not now.
     const ids = this.mineOfType(a.unit)
-      .filter((e) => e.abilityCd === 0 &&
+      .filter((e) => queue || (e.abilityCd === 0 &&
         !(e.type === "tank" && this.sim.tick < e.transformUntil) &&
-        !e.leapUntil && !e.channelUntil)
+        !e.leapUntil && !e.channelUntil))
       .map((e) => e.id);
     if (!ids.length) { this.audio.error(); return; }
     if (a.targeted) {
-      this.input?.setTargetMode({ ability: name, ids });
+      // The shift decision is made at click time (queue flag carried through).
+      this.input?.setTargetMode({ ability: name, ids, queue });
     } else {
-      this.game.issue({ t: "ability", ids, ability: name });
+      this.game.issue({ t: "ability", ids, ability: name, q: queue ? 1 : 0 });
       this.abilitySound(name);
       this.cardSig = ""; // reflect the fresh cooldown on the card
     }

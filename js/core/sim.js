@@ -20,6 +20,15 @@ const isWorker = (t) => !!(UNITS[t] && UNITS[t].isWorker);
 // a geyser (onGeyser) and let workers harvest Oil.
 const isGasBuilding = (t) => !!(BUILDINGS[t] && BUILDINGS[t].onGeyser);
 
+// Cog "repair" mechanic (SC1 SCV-style): Bearings mend friendly Cog units and
+// finished buildings, spending minerals as they heal. Cogs have no passive
+// regen (Ooze heals, Tempest shields), so this is their recovery answer — the
+// faction blurb's "Build, repair, out-tech". Cog defs carry no `faction` field
+// (default), so isCogDef treats undefined as cogs.
+const REPAIR_RATE = 2;          // hp restored per tick while a Bearing repairs
+const REPAIR_HP_PER_MIN = 8;    // minerals spent: 1 per 8 hp healed (accumulator)
+const isCogDef = (def) => !!def && (!def.faction || def.faction === "cogs");
+
 export class Sim {
   constructor(seed, opts) {
     this.seed = seed;
@@ -150,6 +159,7 @@ export class Sim {
       slimedUntil: 0,              // corrosive spit slow on this unit
       feast: 0,                    // wisp: +1 dmg per kill, capped
       lockId: 0, lockN: 0,         // dart: consecutive-hit target lock ramp
+      repairAcc: 0,                // cog Bearing: fractional-mineral repair accumulator
     });
     // FUTURE-unit plating: marines/brutes built after plating completes get +12 maxHp.
     if ((type === "marine" || type === "brute") && (this.upgrades[pid] & UPGRADE_BITS.plating)) {
@@ -719,25 +729,35 @@ export class Sim {
         if (!this.canAfford(pid, d.cost, d.gasCost || 0)) break;
         if (d.requires && !this.hasBuilding(pid, d.requires)) break;
         if (!this.canPlace(c.building, c.tx, c.ty, pid)) break;
-        // Find a Mote within 4 tiles of the build site
-        const cx = c.tx * FP + (d.size * FP >> 1);
-        const cy = c.ty * FP + (d.size * FP >> 1);
-        const mote = this.nearestEntity(cx, cy, FP * 4, (e) =>
-          e.owner === pid && e.unit && e.type === "mote" && e.hp > 0);
-        if (!mote) break;
+        // Deduct cost now (reserved, consistent with worker builds).
         this.minerals[pid] -= d.cost;
         this.gas[pid] -= (d.gasCost || 0);
-        // Consume the Mote
-        mote.hp = 0; // killed on next removeDead
-        this.byId.delete(mote.id);
-        // Spawn the building
-        const site = this.spawnBuilding(pid, c.building, c.tx, c.ty, false);
-        if (d.onGeyser) {
-          const geo = this.geyserInFootprint(c.tx, c.ty, d.size);
-          if (geo) site.geyserId = geo.id;
+        // Find a Mote within 4 tiles of the build site — melts in immediately.
+        const cx = c.tx * FP + (d.size * FP >> 1);
+        const cy = c.ty * FP + (d.size * FP >> 1);
+        const near = this.nearestEntity(cx, cy, FP * 4, (e) =>
+          e.owner === pid && e.unit && e.type === "mote" && e.hp > 0);
+        if (near) {
+          this.oozePlace(pid, c.building, c.tx, c.ty, near);
+          break;
         }
-        // Auto-complete progress — the building builds itself
-        site.builderId = 0;
+        // No Mote in range: pick the nearest own Mote anywhere (deterministic —
+        // nearest by dist2, tie by id) and ESCORT it to the site. It walks over
+        // and melts in on arrival (see updateUnit "oozebuild"). Refund on the
+        // command if there's no Mote at all so money isn't stranded.
+        let escort = null, bestD = (FP * 40) * (FP * 40);
+        for (const e of this.entities) {
+          if (e.owner !== pid || !e.unit || e.type !== "mote" || e.hp <= 0) continue;
+          const dd = dist2(cx, cy, e.x, e.y);
+          if (dd < bestD || (dd === bestD && escort && e.id < escort.id)) { bestD = dd; escort = e; }
+        }
+        if (!escort) {
+          // nothing to send: refund the reservation
+          this.minerals[pid] += d.cost;
+          this.gas[pid] += (d.gasCost || 0);
+          break;
+        }
+        this.setOrder(escort, { kind: "oozebuild", building: c.building, tx: c.tx, ty: c.ty }, c.q);
         break;
       }
       case "ooze_morph": {
@@ -770,6 +790,23 @@ export class Sim {
         for (const id of c.ids) {
           const e = own(id);
           if (e && isWorker(e.type)) this.setOrder(e, { kind: "build", targetId: site.id }, c.q);
+        }
+        break;
+      }
+      case "repair": {
+        // Cog Bearings mend a friendly Cog unit/finished building (repair
+        // stacking allowed — unlike construction). Validate the target here;
+        // per-tick healing + mineral cost happen in updateUnit.
+        const target = this.byId.get(c.targetId);
+        if (!target || target.owner !== pid || target.hp <= 0) break;
+        const def = target.unit ? UNITS[target.type] : (target.building ? BUILDINGS[target.type] : null);
+        if (!isCogDef(def)) break;                       // only Cog things repair
+        if (target.building && !target.done) break;      // unfinished sites use build/resume
+        for (const id of c.ids) {
+          const e = own(id);
+          if (e && isWorker(e.type) && isCogDef(UNITS[e.type])) {
+            this.setOrder(e, { kind: "repair", targetId: c.targetId }, c.q);
+          }
         }
         break;
       }
@@ -808,6 +845,19 @@ export class Sim {
         break;
       }
       case "ability": {
+        // Shift-queued (q:1): append an {kind:"ability"} order to each valid
+        // unit's queue instead of casting now — it fires when the queue reaches
+        // it (see updateUnit "ability"). Plain (q:0) casts immediately as before.
+        if (c.q) {
+          const a = ABILITIES[c.ability];
+          if (!a) break;
+          for (const id of c.ids) {
+            const u = this.byId.get(id);
+            if (!u || u.owner !== pid || u.type !== a.unit || u.hp <= 0) continue;
+            this.setOrder(u, { kind: "ability", ability: c.ability, x: c.x || 0, y: c.y || 0 }, 1);
+          }
+          break;
+        }
         this.applyAbility(pid, c);
         break;
       }
@@ -1355,8 +1405,11 @@ export class Sim {
         const site = this.byId.get(o.targetId);
         // Site gone or already finished by someone else: advance the worker's
         // queue if it has one (build A, then build B / move here), so an
-        // interrupted build doesn't strand the rest of the chain. Otherwise idle.
+        // interrupted build doesn't strand the rest of the chain. Otherwise the
+        // worker goes IDLE (no return-to-mine — the player decides via F1). If
+        // this worker held the claim, release it so the site can be resumed.
         if (!site || site.done) {
+          if (site && site.builderId === u.id) site.builderId = 0;
           if (u.next.length) this.popNext(u);
           else { u.order = { kind: "idle" }; u.path = null; }
           break;
@@ -1365,6 +1418,24 @@ export class Sim {
         const gap = this.gapTo(u, site);
         if (gap <= (FP * 0.75) | 0) {
           u.path = null;
+          // ONE BUILDER PER SITE: only the claiming worker advances progress.
+          // The claim is held by builderId; it's free (0) when the prior claimant
+          // died/abandoned (orphaned site) or was never set. If another live,
+          // in-range worker already owns the claim, this worker skips ahead —
+          // pop its queue or go idle — instead of double-building.
+          // (FUTURE "race upgrade" could allow multi-build by lifting this gate.)
+          const owner = site.builderId ? this.byId.get(site.builderId) : null;
+          const claimed = owner && owner.hp > 0 && owner.id !== u.id &&
+            owner.order.kind === "build" && owner.order.targetId === site.id &&
+            this.gapTo(owner, site) <= (FP * 0.75) | 0;
+          if (claimed) {
+            if (u.next.length) this.popNext(u);
+            else { u.order = { kind: "idle" }; u.path = null; }
+            this.events.push({ t: "buildBusy", id: site.id, workerId: u.id, owner: u.owner, x: site.x, y: site.y });
+            break;
+          }
+          // Claim (or re-claim an orphaned site) and advance progress.
+          site.builderId = u.id;
           site.progress++;
           site.hp = Math.min(site.maxHp, site.hp + Math.ceil(site.maxHp / bd.buildTime));
           if (site.progress >= bd.buildTime) {
@@ -1373,12 +1444,98 @@ export class Sim {
             site.shield = site.maxShield;
             this.events.push({ t: "complete", id: site.id, x: site.x, y: site.y, owner: site.owner });
             // Finished: run the next queued order (build/move/gather chain) if
-            // the player shift-queued one; else fall back to auto-gathering.
+            // the player shift-queued one; else, if this was a GAS harvester
+            // (refinery/sump/extractor), start harvesting gas from it — building
+            // it is explicit intent to mine gas. Otherwise go IDLE. Deliberately
+            // NOT auto-gathering minerals — the player asked that workers not
+            // return to mining after a task (F1 finds idle workers).
             if (u.next.length) this.popNext(u);
-            else { u.order = { kind: "idle" }; this.autoGather(u); }
+            else if (isGasBuilding(site.type)) {
+              u.order = { kind: "gather", targetId: site.id, phase: "to", resource: "gas" };
+              u.path = null;
+            } else { u.order = { kind: "idle" }; u.path = null; }
           }
         } else {
           this.travelTo(u, site.x, site.y, d.speed); // static target: always pathfind
+        }
+        break;
+      }
+
+      case "oozebuild": {
+        // Escorted Ooze build: a Mote walks to the reserved site and melts in on
+        // arrival. Cost was reserved at command time (see ooze_build fallback).
+        const bd = BUILDINGS[o.building];
+        const cx = o.tx * FP + (bd.size * FP >> 1);
+        const cy = o.ty * FP + (bd.size * FP >> 1);
+        const dd = dist(u.x, u.y, cx, cy);
+        if (dd <= FP * 4) {
+          // Arrived. Re-validate placement (the spot may have been blocked while
+          // walking). Valid: spawn + consume. Invalid: refund and go idle.
+          if (this.canPlace(o.building, o.tx, o.ty, u.owner)) {
+            this.oozePlace(u.owner, o.building, o.tx, o.ty, u);
+            // (u is consumed inside oozePlace; nothing else to do)
+          } else {
+            this.minerals[u.owner] += bd.cost;
+            this.gas[u.owner] += (bd.gasCost || 0);
+            this.popNext(u);
+          }
+        } else {
+          this.travelTo(u, cx, cy, d.speed);
+        }
+        break;
+      }
+
+      case "ability": {
+        // Shift-queued ability reached in the order chain: cast it through the
+        // normal applyAbility validation, then advance. If the ability is on
+        // cooldown (or the cast is otherwise rejected this tick), WAIT here — the
+        // unit is idle at this queue step, so parking until it's ready feels
+        // right (rather than silently dropping the queued cast). A finished cast
+        // typically overwrites u.order itself (leap/siege/barrage set idle), so
+        // we only pop when the order is still "ability" after the attempt.
+        const a = ABILITIES[o.ability];
+        if (!a || u.type !== a.unit) { this.popNext(u); break; }
+        if (u.abilityCd > 0) break;   // on cooldown: wait (unit is parked)
+        this.applyAbility(u.owner, { ids: [u.id], ability: o.ability, x: o.x, y: o.y });
+        // If the cast consumed the order (set a new order/idle), we're done.
+        // Otherwise (e.g. rejected for some transient reason) advance so we
+        // don't spin forever on an un-castable queued ability.
+        if (u.order === o) this.popNext(u);
+        break;
+      }
+
+      case "repair": {
+        // Cog Bearing repair: walk to the friendly Cog target, then heal
+        // REPAIR_RATE hp/tick while spending minerals (1 per REPAIR_HP_PER_MIN
+        // healed, tracked on repairAcc). Stops (pop queue / idle per the agency
+        // rule) when the target is full, dead/gone, or we're out of minerals.
+        const target = this.byId.get(o.targetId);
+        const stop = () => {
+          u.repairAcc = 0;
+          if (u.next.length) this.popNext(u);
+          else { u.order = { kind: "idle" }; u.path = null; }
+        };
+        if (!target || target.hp <= 0 || target.hp >= target.maxHp) { stop(); break; }
+        const tdef = target.unit ? UNITS[target.type] : BUILDINGS[target.type];
+        if (!isCogDef(tdef) || (target.building && !target.done)) { stop(); break; }
+        const gap = target.building ? this.gapTo(u, target) : dist(u.x, u.y, target.x, target.y);
+        if (gap <= (FP * 0.75) | 0) {
+          u.path = null;
+          if (this.minerals[u.owner] <= 0) { stop(); break; } // no funds: give up
+          const heal = Math.min(REPAIR_RATE, target.maxHp - target.hp);
+          target.hp += heal;
+          u.repairAcc += heal;
+          while (u.repairAcc >= REPAIR_HP_PER_MIN && this.minerals[u.owner] > 0) {
+            this.minerals[u.owner] -= 1;
+            u.repairAcc -= REPAIR_HP_PER_MIN;
+          }
+          // periodic spark event for the fx layer (renderer not ours to touch)
+          if (this.tick % 10 === 0) {
+            this.events.push({ t: "ability", kind: "repair", id: u.id, owner: u.owner, x: target.x, y: target.y });
+          }
+          if (target.hp >= target.maxHp) stop();
+        } else {
+          this.travelTo(u, target.x, target.y, d.speed, true);
         }
         break;
       }
@@ -1585,6 +1742,24 @@ export class Sim {
   autoGather(u) {
     const patch = this.pickPatch(u, FP * 12);
     if (patch) u.order = { kind: "gather", targetId: patch.id, phase: "to" };
+  }
+
+  // Ooze placement: consume `mote` and spawn the building at (tx,ty). Assumes
+  // affordability was already reserved and canPlace was checked by the caller
+  // at the point of placement (immediate melt-in OR escort arrival). Returns
+  // the spawned site.
+  oozePlace(pid, building, tx, ty, mote) {
+    const d = BUILDINGS[building];
+    mote.hp = 0; // killed on next removeDead
+    this.byId.delete(mote.id);
+    const site = this.spawnBuilding(pid, building, tx, ty, false);
+    if (d.onGeyser) {
+      const geo = this.geyserInFootprint(tx, ty, d.size);
+      if (geo) site.geyserId = geo.id;
+    }
+    // Auto-complete progress — the building builds itself (no builder claim).
+    site.builderId = 0;
+    return site;
   }
 
   // Point just outside a building's footprint, on the side facing the unit.
@@ -2201,14 +2376,19 @@ export class Sim {
         h.mix(e.shield | 0); h.mix(e.domeUntil | 0); h.mix(e.phased | 0);
         h.mix(e.frenzyUntil | 0); h.mix(e.slimedUntil | 0);
         h.mix(e.feast | 0); h.mix(e.lockId | 0); h.mix(e.lockN | 0);
+        h.mix(e.repairAcc | 0);
         h.mix(e.order?.kind?.charCodeAt(0) || 0);
         h.mix(e.order?.targetId || 0);
+        // "ability" and "attack" share first char 'a'; disambiguate cheaply so
+        // the checksum distinguishes a queued ability order from an attack order.
+        if (e.order?.kind === "ability") h.mix((e.order.x | 0) ^ (e.order.y | 0) ^ 0x5b1);
       }
       if (e.building) {
         h.mix(e.done ? 1 : 0); h.mix(e.progress | 0);
         h.mix(e.shield | 0);
         h.mix(e.cooldown | 0); h.mix(e.queue.length);
         h.mix(e.geyserId | 0);
+        h.mix(e.builderId | 0);   // one-builder-per-site claim (sim state)
         const head = e.queue[0];
         if (head) { h.mix(head.type?.charCodeAt(0) || 0); h.mix(head.remaining | 0); }
         if (e.rally) { h.mix(e.rally.x); h.mix(e.rally.y); h.mix(e.rally.targetId || 0); }
