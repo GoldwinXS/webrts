@@ -116,6 +116,14 @@ export class Hud {
       if (document.fullscreenElement) document.exitFullscreen();
       else document.documentElement.requestFullscreen({ navigationUI: "hide" });
     });
+    // Keyboard lock (Chrome/Edge): while fullscreen, deliver Escape to the
+    // game instead of instantly leaving fullscreen — so Esc cancels placement
+    // and targeting like a desktop RTS, and only exits fullscreen when the
+    // input cascade has nothing left to cancel. No-op where unsupported.
+    document.addEventListener("fullscreenchange", () => {
+      if (document.fullscreenElement) navigator.keyboard?.lock?.(["Escape"]);
+      else navigator.keyboard?.unlock?.();
+    });
 
     // mute toggle
     this.$mute = document.getElementById("btn-mute");

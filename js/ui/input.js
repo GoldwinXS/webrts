@@ -51,7 +51,13 @@ export class Input {
     }, { passive: false });
     window.addEventListener("keydown", (e) => this.onKey(e, true));
     window.addEventListener("keyup", (e) => this.keys.delete(e.key.toLowerCase()));
-    document.addEventListener("mouseleave", () => (this.mouse.inside = false));
+    // In fullscreen the pointer physically cannot leave the screen, but the
+    // browser still fires mouseleave at the very edges (top bar, Windows
+    // notification strips) — which used to kill edge-panning exactly where a
+    // desktop RTS needs it most. Only honor mouseleave in windowed mode.
+    document.addEventListener("mouseleave", () => {
+      if (!document.fullscreenElement) this.mouse.inside = false;
+    });
     document.addEventListener("mouseenter", () => (this.mouse.inside = true));
   }
 
@@ -288,6 +294,19 @@ export class Input {
     }
   }
 
+  // Move ids into group `digit`, removing them from every other group first
+  // (a unit lives in at most one group). additive=false replaces the group.
+  claimIntoGroup(digit, ids, additive) {
+    for (const d in this.groups) {
+      if (d !== digit) for (const id of ids) this.groups[d].delete(id);
+    }
+    const grp = additive
+      ? (this.groups[digit] || (this.groups[digit] = new Set()))
+      : (this.groups[digit] = new Set());
+    ids.forEach((id) => grp.add(id));
+    return grp;
+  }
+
   onKey(e, down) {
     const k = e.key.toLowerCase();
     this.keys.add(k);
@@ -297,7 +316,8 @@ export class Input {
       else if (this.targetMode) this.setTargetMode(null);
       else if (this.attackMode) this.setAttackMode(false);
       else if (this.patrolMode) this.setPatrolMode(false);
-      else { this.selection.clear(); this.hud.refreshSelection(); }
+      else if (this.selection.size) { this.selection.clear(); this.hud.refreshSelection(); }
+      else if (document.fullscreenElement) document.exitFullscreen();
       return;
     }
     if (k === "tab") {
@@ -349,13 +369,15 @@ export class Input {
     // control groups (e.code, so Shift+digit works on every layout):
     // Ctrl/Alt+digit assigns, Shift+digit adds, digit recalls,
     // double-tap centers the camera. Buildings are allowed in groups.
+    // Membership is EXCLUSIVE: claiming units into a group pulls them out of
+    // every other group, so a unit answers to exactly one number.
     const digit = e.code?.startsWith("Digit") ? e.code.slice(5) : null;
     if (digit && digit >= "1" && digit <= "9") {
       const ids = this.mySelected().map((u) => u.id);
       if (e.ctrlKey || e.altKey) {
         e.preventDefault();
         if (ids.length) {
-          this.groups[digit] = new Set(ids);
+          this.claimIntoGroup(digit, ids, false);
           this.hud.toastInfo(`Group ${digit} set (${ids.length})`);
           this.audio.select();
         }
@@ -363,8 +385,7 @@ export class Input {
       }
       if (e.shiftKey) {
         if (ids.length) {
-          const grp = this.groups[digit] || (this.groups[digit] = new Set());
-          ids.forEach((id) => grp.add(id));
+          const grp = this.claimIntoGroup(digit, ids, true);
           this.hud.toastInfo(`Group ${digit}: ${grp.size} member${grp.size > 1 ? "s" : ""}`);
           this.audio.select();
         }
