@@ -79,10 +79,107 @@ export class GameAudio {
     src.start(t);
   }
 
+  // A resonant filtered-noise ZAP: a burst of noise pushed through a high-Q
+  // bandpass whose centre frequency sweeps f0->f1. Reads as a crackly electric
+  // hum/zap — the Tempest voice. Short and quiet by default.
+  zap(f0, f1, dur, vol = 0.12, q = 9, when = 0) {
+    if (!this.ctx || this.muted) return;
+    const t = this.ctx.currentTime + when;
+    const n = Math.ceil(this.ctx.sampleRate * dur);
+    const buf = this.ctx.createBuffer(1, n, this.ctx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < n; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / n);
+    const src = this.ctx.createBufferSource();
+    src.buffer = buf;
+    const f = this.ctx.createBiquadFilter();
+    f.type = "bandpass";
+    f.Q.value = q;
+    f.frequency.setValueAtTime(f0, t);
+    f.frequency.exponentialRampToValueAtTime(Math.max(1, f1), t + dur);
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    src.connect(f).connect(g).connect(this.master);
+    src.start(t);
+  }
+
   // ---------- game sounds ----------
 
   select() { if (!this.limited("sel", 60)) this.beep(950, 1150, 0.04, "sine", 0.07); }
-  ack() { if (this.limited("ack", 120)) return; this.beep(620, 900, 0.07, "square", 0.05); this.beep(900, 1000, 0.05, "square", 0.04, 0.06); }
+
+  // ---- acknowledgment voices ----
+  // ack(faction)   — a unit acknowledges a SELECT (a "yes?" / "reporting" note)
+  // ackMove(faction) — a unit acknowledges an ORDER (a "moving out" note)
+  // faction is one of "cog" | "ooze" | "tempest"; omitted/unknown -> neutral
+  // beeps, so the legacy no-arg audio.ack()/select-move call sites keep working.
+  // Each voice is procedural, short (<0.35s) and quiet vs combat sounds, with a
+  // little per-call pitch jitter so a group of units doesn't chorus in unison.
+
+  ack(faction) {
+    if (this.limited("ack", 120)) return;
+    this._voice(faction, false);
+  }
+  ackMove(faction) {
+    if (this.limited("ack", 120)) return;
+    this._voice(faction, true);
+  }
+
+  // Dispatch to a faction voice. `order` = true -> the "moving out" variant
+  // (a touch lower/more resolved), false -> the "yes?" select variant.
+  _voice(faction, order) {
+    const j = 1 + (Math.random() - 0.5) * 0.12;   // +-6% pitch jitter per call
+    switch (faction) {
+      case "cog": return this._voiceCog(order, j);
+      case "ooze": return this._voiceOoze(order, j);
+      case "tempest": return this._voiceTempest(order, j);
+      default:
+        // neutral fallback: the original two-square-beep chirp (backward compat)
+        this.beep(620, 900, 0.07, "square", 0.05);
+        this.beep(900, 1000, 0.05, "square", 0.04, 0.06);
+    }
+  }
+
+  // COGS — cheerful little robot chirp sequences (bright square/sine beeps).
+  _voiceCog(order, j) {
+    if (order) {
+      // "on it!" — a rising 3-note skip
+      this.beep(720 * j, 760 * j, 0.05, "square", 0.05);
+      this.beep(900 * j, 940 * j, 0.05, "square", 0.05, 0.06);
+      this.beep(1180 * j, 1240 * j, 0.06, "sine", 0.045, 0.12);
+    } else {
+      // "yes?" — a quick two-note query
+      this.beep(880 * j, 940 * j, 0.05, "square", 0.05);
+      this.beep(1120 * j, 1180 * j, 0.05, "sine", 0.045, 0.06);
+    }
+  }
+
+  // OOZE — wet squelchy blips: a filtered-noise splat + a pitch-bent sine gloop.
+  _voiceOoze(order, j) {
+    if (order) {
+      // downward gloop + squelch — "sloshing off"
+      this.noise(0.05, 520, 0.06, "lowpass");
+      this.beep(360 * j, 150 * j, 0.16, "sine", 0.07, 0.02);
+      this.beep(220 * j, 120 * j, 0.1, "sine", 0.04, 0.14);
+    } else {
+      // upward inquisitive gloop + wet blip — "hrmm?"
+      this.noise(0.04, 600, 0.05, "lowpass");
+      this.beep(240 * j, 460 * j, 0.14, "sine", 0.07, 0.02);
+    }
+  }
+
+  // TEMPEST — crackly static-zap hums: a resonant filter sweep + a cyan tone.
+  _voiceTempest(order, j) {
+    if (order) {
+      // discharge downward — "surging out"
+      this.zap(2600 * j, 700 * j, 0.16, 0.1, 10);
+      this.beep(1300 * j, 900 * j, 0.1, "sine", 0.04, 0.04);
+    } else {
+      // rising crackle query — "charged?"
+      this.zap(900 * j, 2400 * j, 0.14, 0.09, 11);
+      this.beep(1000 * j, 1500 * j, 0.08, "sine", 0.035, 0.03);
+    }
+  }
+
   attackAck() { if (this.limited("ack", 120)) return; this.beep(440, 300, 0.09, "square", 0.06); this.beep(330, 260, 0.08, "square", 0.05, 0.07); }
   gatherAck() { if (this.limited("ack", 120)) return; this.beep(700, 1300, 0.08, "triangle", 0.06); }
 

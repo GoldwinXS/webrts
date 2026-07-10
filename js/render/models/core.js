@@ -223,6 +223,26 @@ export function glowMat(color, intensity = 1.6) {
 // Helpers
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Idle-fidget gate. Returns a 0..1 pulse that spends most of its time at 0 and
+// briefly ramps up-then-down during rare windows, giving units occasional
+// "personality" twitches (a glance, a jaw snap, a weight-shift) instead of
+// constant motion. Deterministic from time `t` + a per-unit `seed` (use e.id
+// plus a small offset so different fidgets on the same unit don't sync).
+//
+// Usage:  const f = fidget(t, e.id, 0.13);  // f>0 only in brief windows
+//         head.rotation.y = f * 0.4;          // scale motion by the pulse
+//
+// `rate` sets how often windows open (lower = rarer). `sharp` (default 40)
+// controls how narrow each window is. Cheap: two sins + a pow.
+export function fidget(t, seed, rate = 0.13, sharp = 40) {
+  const s = Math.sin(t * rate + seed);
+  if (s < 0.9) return 0;                 // cheap early-out most of the time
+  // remap the top sliver of the sine into a 0..1..0 hump
+  const w = Math.pow((s - 0.9) / 0.1, 0.5);   // 0..1 across the window
+  return Math.sin(w * Math.PI);               // smooth up-then-down
+}
+
 // Lift a group so its lowest point rests near ground level
 export function liftToGround(group, floor = -0.05) {
   group.updateMatrixWorld(true);
@@ -256,10 +276,30 @@ export const BILE = 0x9be23a;
 // Per-instance translucent acid-green shell. Transparent + faint self-emissive
 // gives the wet "subsurface" jelly feel; ONE instance per model, shared across
 // all its shell parts, and returned so it can also drive the damage flash.
-export function oozeShell(intensity = 0.22) {
+//
+// Richness pass: a slightly DEEPER base green (was flat-lime 0x8fd63a) so the
+// toon ramp has more room to pop a bright top band, a warmer/brighter emissive
+// tint that reads as a wet subsurface glow rather than a dull fill, and a
+// touch LESS opacity (0.72 -> 0.66) so the bruised-purple gut shows through
+// harder — the see-through read is the whole point of the family. specular +
+// shininess give MeshToon a faint glossy spot for the "wet" feel (MeshToon
+// honours specular via its Phong lineage even with a gradient ramp).
+export function oozeShell(intensity = 0.26) {
+  const m = new THREE.MeshToonMaterial({
+    color: 0x7fce30, gradientMap: toonGradient(),
+    emissive: 0x6ec02f, emissiveIntensity: intensity,
+    transparent: true, opacity: 0.66,
+  });
+  return m;
+}
+
+// Deeper acid-green for shadowed/underbelly shell parts — pairs with oozeShell
+// to give the body some tonal range instead of one flat lime. Same transparency
+// so it reads as the same jelly, just the darker side of the blob.
+export function oozeShellDeep(intensity = 0.18) {
   return new THREE.MeshToonMaterial({
-    color: 0x8fd63a, gradientMap: toonGradient(),
-    emissive: 0x5aa02a, emissiveIntensity: intensity,
+    color: 0x5fa626, gradientMap: toonGradient(),
+    emissive: 0x4c8a22, emissiveIntensity: intensity,
     transparent: true, opacity: 0.72,
   });
 }

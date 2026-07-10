@@ -19,7 +19,7 @@ import { ModelBuilder, part } from "./parts.js";
 import { registerUnit } from "./registry.js";
 import {
   G, DARK, GUNMETAL, TIN, COPPER, RUBBER, AMBER, CHEEK,
-  shellMat, teamMat, glowMat, toonGradient,
+  shellMat, teamMat, glowMat, toonGradient, fidget,
 } from "./core.js";
 
 // Module-scope one-off geometries (shared across all instances — never create
@@ -129,10 +129,15 @@ registerUnit("worker", {
       a.cogMat.emissive.setHex(0xffb347);
       a.cogMat.emissiveIntensity = 1.4;
     } else {
-      a.tool.rotation.set(0.35, -0.2, 0);
-      a.cog.rotation.x = t * 0.8;
+      // IDLE FIDGET: every so often the little worker gives its cog wrench a
+      // brief eager SPIN and sweeps the tool as if looking around for a job.
+      // The fidget gate keeps it rare; never touches body.rotation (renderer
+      // owns facing yaw).
+      const look = fidget(t, e.id * 2.3, 0.12) * (1 - move);
+      a.tool.rotation.set(0.35, -0.2 + look * Math.sin(t * 5) * 0.5, 0);
+      a.cog.rotation.x = t * (0.8 + look * 16);          // brief burst of spin
       a.cogMat.emissive.setHex(0xc9853f);
-      a.cogMat.emissiveIntensity = 0.25;
+      a.cogMat.emissiveIntensity = 0.25 + look * 0.6;
     }
   },
 });
@@ -215,6 +220,22 @@ registerUnit("marine", {
     a.legL.rotation.x = sw;
     a.legR.rotation.x = -sw;
     g.userData.body.position.y = Math.abs(Math.sin(phase)) * 0.045 * move;
+
+    // IDLE FIDGET: occasionally the trooper SHIFTS ITS WEIGHT (a slow lean onto
+    // one boot) and gives its blaster a little CHECK (a tilt up and back). Two
+    // separate rare windows so they don't always coincide. Skipped while moving.
+    const shift = fidget(t, e.id * 2.1, 0.1) * (1 - move);
+    const check = fidget(t, e.id * 3.3 + 1.2, 0.09) * (1 - move);
+    if (move < 0.05) {
+      const lean = shift * Math.sin(t * 3) * 0.12;
+      a.legL.rotation.x = lean;
+      a.legR.rotation.x = -lean * 0.6;
+      g.userData.body.rotation.z = lean * 0.35;
+    } else {
+      g.userData.body.rotation.z = 0;
+    }
+    a.gunGroup.rotation.x = -check * Math.sin(check * Math.PI) * 0.5;
+
     if (a.recoil > 0) {
       a.recoil = Math.max(0, a.recoil - 0.5 / 60);
       a.gunGroup.position.z = a.gunHome - a.recoil * 0.9;
@@ -283,8 +304,17 @@ registerUnit("brute", {
   animate(g, e, t, move, a) {
     const phase = t * 9 + e.id * 1.7;
     const sw = Math.sin(phase * 0.8) * 0.5 * move;
-    a.armL.rotation.x = sw;
-    a.armR.rotation.x = -sw;
+
+    // IDLE FIDGET: the big bruiser occasionally FLEXES ITS FISTS — arms pull in
+    // and the shoulders roll, a menacing little limber-up. Rare window, skipped
+    // while walking (the walk swing takes over via `move`).
+    const flex = fidget(t, e.id * 1.7 + 0.5, 0.1, 30) * (1 - move);
+    const pull = Math.sin(flex * Math.PI);
+    a.armL.rotation.x = sw - pull * 0.5;
+    a.armR.rotation.x = -sw - pull * 0.5;
+    a.armL.rotation.z = pull * 0.18;
+    a.armR.rotation.z = -pull * 0.18;
+
     g.userData.body.position.y = Math.abs(Math.sin(phase * 0.8)) * 0.06 * move;
     g.userData.body.rotation.z = Math.sin(phase * 0.8) * 0.05 * move;
     if (a.recoil > 0) {

@@ -34,7 +34,7 @@ import { registerUnit, registerBuilding, addLamp } from "./registry.js";
 import {
   G, SCAFFOLD,
   OG, OOZE_PURPLE, OOZE_PLUM, OOZE_DARK, OOZE_BONE, BILE,
-  oozeShell, teamMat, glowMat,
+  oozeShell, oozeShellDeep, teamMat, glowMat, fidget,
 } from "./core.js";
 
 // A wobble helper: a smooth squash-stretch scale applied to a blob mesh. Keeps
@@ -61,8 +61,12 @@ registerUnit("mote", {
     const m = new ModelBuilder();
     m.addMat(shell);
 
-    // squat purple gut, wrapped in a translucent green shell (see-through)
-    m.add(part(OG.blob, OOZE_PURPLE).pos(0, 0, 0).scl(0.34, 0.3, 0.34));
+    // squat purple gut (a faintly bile-lit glow-core inside makes the belly
+    // pulse through the shell), wrapped in a translucent green shell.
+    const gut = glowMat(0x6a2f6e, 0.35);
+    m.add(part(OG.blob, gut).pos(0, 0, 0).scl(0.34, 0.3, 0.34), "gut");
+    // a deeper-green underbelly cap so the blob has tonal range, not flat lime
+    m.add(part(OG.blob, oozeShellDeep()).pos(0, -0.1, 0).scl(0.42, 0.3, 0.42));
     const bodyBlob = part(OG.blobHi, shell).pos(0, 0.02, 0).scl(0.44, 0.4, 0.44).shadow();
     m.add(bodyBlob, "bodyBlob");
 
@@ -71,13 +75,23 @@ registerUnit("mote", {
     m.add(part(OG.eye, core).pos(0, 0.06, 0.28).scl(0.9), "eye");
     m.add(part(OG.eye, OOZE_DARK).pos(0, 0.06, 0.36).scl(0.42));       // pupil
 
-    // team membrane belt at the waistline (second accent)
-    m.add(part(OG.membrane, teamMat(color, 0.5)).pos(0, -0.04, 0).rot(Math.PI / 2, 0, 0).scl(0.42));
+    // team membrane belt at the waistline (second accent) — more saturated glow
+    m.add(part(OG.membrane, teamMat(color, 0.7)).pos(0, -0.04, 0).rot(Math.PI / 2, 0, 0).scl(0.42));
 
-    // spore freckles on the crown
+    // spore freckles on the crown (asymmetric little cluster for silhouette)
     m.add(part(OG.bubble, shell).pos(-0.14, 0.28, 0.04).scl(0.9));
     m.add(part(OG.bubble, shell).pos(0.12, 0.3, -0.06).scl(1.1));
     m.add(part(OG.bubble, shell).pos(0.2, 0.18, 0.14).scl(0.8));
+    m.add(part(OG.bubble, shell).pos(0.02, 0.34, -0.02).scl(0.7));
+
+    // a gooey DRIP hanging off the belly rim that wobbles as it walks — breaks
+    // the near-perfect sphere silhouette. Group so it can swing.
+    const drip = new THREE.Group();
+    drip.add(part(OG.tendril, shell).rot(Math.PI / 2, 0, 0).pos(0, 0, 0.1).scl(0.55, 0.7, 0.55).mesh);
+    drip.add(part(OG.bubble, glowMat(BILE, 0.5)).pos(0, 0, 0.24).scl(1.1).mesh);
+    drip.position.set(-0.18, -0.14, 0.14);
+    drip.rotation.x = Math.PI / 2;      // hangs down
+    m.addGroup(drip, "drip");
 
     // carried resource: a bile droplet held in the belly (hidden unless carrying)
     m.add(part(OG.droplet, glowMat(0x8fe86a, 1.3)).pos(0, -0.16, 0.24).scl(0.22, 0.3, 0.22).visible(false), "carry");
@@ -97,6 +111,7 @@ registerUnit("mote", {
     m.setAnim({
       kind: "mote", wob: e.id % 7, baseColor: new THREE.Color(color),
       body: bodyBlob.mesh, eye: m.named.eye.material, core: m.named.core.material,
+      gutMat: m.named.gut.material, drip,
       carry: m.named.carry, carryMat: m.named.carry.material,
       tool, tip, tipMat,
     });
@@ -107,6 +122,11 @@ registerUnit("mote", {
     // bob + breathe
     g.userData.body.position.y = 0.4 + Math.sin(t * 3 + a.wob) * 0.05 + move * 0.04;
     breathe(a.body, t, e.id, 0.44, 0.4, 0.44, 0.07, 2.6);
+    // belly bile pulse glowing faintly through the shell
+    a.gutMat.emissiveIntensity = 0.3 + Math.sin(t * 2.2 + e.id) * 0.18;
+    // hanging drip swings/wobbles (a touch more while walking)
+    a.drip.rotation.z = Math.sin(t * 3 + e.id) * (0.18 + move * 0.35);
+    a.drip.rotation.x = Math.PI / 2 + Math.sin(t * 2.4 + e.id * 1.3) * 0.1;
 
     a.carry.visible = e.carry > 0;
     if (e.carry > 0) a.carry.rotation.y = t * 2;
@@ -125,8 +145,15 @@ registerUnit("mote", {
       a.tool.rotation.set(-0.1 + Math.sin(t * 4 + e.id) * 0.4, Math.sin(t * 2 + e.id) * 0.3, 0);
       a.tipMat.emissiveIntensity = 1.2;
     } else {
-      a.tool.rotation.set(0.2 + Math.sin(t * 1.6 + e.id) * 0.15, -0.25, 0);
-      a.tipMat.emissiveIntensity = 0.6;
+      // IDLE: a lazy tool sway, plus an occasional curious "look around" where
+      // the tool arm sweeps side to side as the mote peers about. The fidget
+      // gate keeps this rare; it never touches body.rotation (renderer owns yaw).
+      const look = fidget(t, e.id * 2.7, 0.11) * (1 - move);
+      a.tool.rotation.set(
+        0.2 + Math.sin(t * 1.6 + e.id) * 0.15,
+        -0.25 + look * Math.sin(t * 6) * 0.6,
+        0);
+      a.tipMat.emissiveIntensity = 0.6 + look * 0.5;
     }
   },
 });
@@ -142,8 +169,11 @@ registerUnit("nip", {
     const m = new ModelBuilder();
     m.addMat(shell);
 
-    // little teardrop body: purple gut in a green shell
-    m.add(part(OG.blob, OOZE_PURPLE).pos(0, 0, 0).scl(0.24, 0.22, 0.26));
+    // little teardrop body: a faintly-lit purple gut in a green shell, with a
+    // deeper-green underbelly so the tiny blob isn't one flat lime tone.
+    const gut = glowMat(0x6a2f6e, 0.3);
+    m.add(part(OG.blob, gut).pos(0, 0, 0).scl(0.24, 0.22, 0.26), "gut");
+    m.add(part(OG.blob, oozeShellDeep()).pos(0, -0.08, 0).scl(0.3, 0.2, 0.32));
     const body = part(OG.blobHi, shell).pos(0, 0.02, 0).scl(0.32, 0.3, 0.36).shadow();
     m.add(body, "body");
 
@@ -177,19 +207,31 @@ registerUnit("nip", {
     m.add(part(OG.bubble, shell).pos(0.1, 0.24, -0.05).scl(0.9));
 
     m.liftToGround();
-    m.setAnim({ kind: "nip", body: body.mesh, legL: legL.mesh, legR: legR.mesh, tail, recoil: 0 });
+    m.setAnim({ kind: "nip", body: body.mesh, gutMat: gut, legL: legL.mesh, legR: legR.mesh, tail, recoil: 0 });
     return m.build();
   },
 
   animate(g, e, t, move, a) {
     const phase = t * 14 + e.id * 1.7;
     breathe(a.body, t, e.id, 0.32, 0.3, 0.36, 0.09, 4.0);
+    a.gutMat.emissiveIntensity = 0.28 + Math.sin(t * 3.5 + e.id) * 0.15;
     // frantic little scuttle
     a.legL.rotation.z = 0.5 + Math.sin(phase) * 0.5 * move;
     a.legR.rotation.z = -0.5 - Math.sin(phase) * 0.5 * move;
-    g.userData.body.position.y = Math.abs(Math.sin(phase)) * 0.05 * move;
     a.tail.rotation.z = Math.sin(t * 6 + e.id) * 0.5;
-    // lunge on bite
+
+    // IDLE FIDGET: an occasional snap-at-nothing — a fast little lunge + body
+    // clench, as if the greedy thing bit the empty air. Only when standing still.
+    const snap = fidget(t, e.id * 1.9 + 0.6, 0.12, 60) * (1 - move);
+    const lunge = Math.sin(snap * Math.PI) * 0.14;   // quick jab within the window
+
+    g.userData.body.position.y = Math.abs(Math.sin(phase)) * 0.05 * move;
+    g.userData.body.position.z = lunge;
+    if (snap > 0.01) {   // clench the body a touch as it snaps
+      a.body.scale.z *= 1 - snap * 0.12;
+      a.body.scale.y *= 1 + snap * 0.1;
+    }
+    // lunge on bite (real attack recoil overrides the idle jab)
     if (a.recoil > 0) {
       a.recoil = Math.max(0, a.recoil - 0.6 / 60);
       g.userData.body.position.z = a.recoil * 0.6;
@@ -218,19 +260,31 @@ registerUnit("spit", {
       legs.push(leg.mesh);
     }
 
-    // fat acid sac (bile core visible through the green shell)
+    // fat acid sac (bile core visible through the green shell) + a deeper-green
+    // underbelly so the sac has tonal range instead of one flat lime
     m.add(part(OG.core, glowMat(BILE, 0.8)).pos(0, 0.12, 0).scl(0.9), "bile");
+    m.add(part(OG.sac, oozeShellDeep()).pos(0, 0.0, 0).scl(0.38, 0.3, 0.38));
     const sac = part(OG.sac, shell).pos(0, 0.14, 0).scl(0.4, 0.44, 0.4).shadow();
     m.add(sac, "sac");
-    // sloshing bubbles on the sac
+    // sloshing bubbles on the sac (asymmetric cluster for silhouette interest)
     m.add(part(OG.bubbleBig, shell).pos(0.18, 0.06, 0.16).scl(0.9));
     m.add(part(OG.bubble, shell).pos(-0.16, 0.26, 0.1).scl(1.1));
+    m.add(part(OG.bubble, shell).pos(0.22, 0.2, -0.02).scl(0.8));
 
-    // team membrane rim around the sac's shoulder
-    m.add(part(OG.membrane, teamMat(color, 0.5)).pos(0, 0.24, 0).rot(Math.PI / 2, 0, 0).scl(0.42));
+    // team membrane rim around the sac's shoulder (more saturated glow)
+    m.add(part(OG.membrane, teamMat(color, 0.7)).pos(0, 0.24, 0).rot(Math.PI / 2, 0, 0).scl(0.42));
 
     // team eye peering out the front
     m.add(part(OG.eye, glowMat(color, 1.5)).pos(0, 0.16, 0.34).scl(0.85), "eye");
+
+    // a heavy acid DRIP hanging off the sac's underside that wobbles — breaks
+    // the round sac silhouette and sells the "leaking bile" read.
+    const drip = new THREE.Group();
+    drip.add(part(OG.tendril, shell).rot(Math.PI / 2, 0, 0).pos(0, 0, 0.12).scl(0.6, 0.85, 0.6).mesh);
+    drip.add(part(OG.bubble, glowMat(BILE, 0.6)).pos(0, 0, 0.3).scl(1.3).mesh);
+    drip.position.set(0.16, -0.06, 0.2);
+    drip.rotation.x = Math.PI / 2;
+    m.addGroup(drip, "drip");
 
     // puckered SPOUT on top that lobs acid (recoil group)
     const spout = new THREE.Group();
@@ -241,7 +295,7 @@ registerUnit("spit", {
     m.addGroup(spout, "spout");
 
     m.liftToGround();
-    m.setAnim({ kind: "spit", sac: sac.mesh, spout, spoutHome: 0.42, bile: m.named.bile.material, recoil: 0 });
+    m.setAnim({ kind: "spit", sac: sac.mesh, spout, spoutHome: 0.42, bile: m.named.bile.material, drip, recoil: 0 });
     return m.build();
   },
 
@@ -249,6 +303,9 @@ registerUnit("spit", {
     breathe(a.sac, t, e.id, 0.4, 0.44, 0.4, 0.06, 2.2);
     g.userData.body.position.y = Math.abs(Math.sin(t * 10 + e.id)) * 0.03 * move;
     a.bile.emissiveIntensity = 0.7 + Math.sin(t * 3 + e.id) * 0.25;
+    // the hanging acid drip sways and stretches as if about to fall
+    a.drip.rotation.z = Math.sin(t * 2.6 + e.id) * 0.2;
+    a.drip.rotation.x = Math.PI / 2 + Math.sin(t * 1.9 + e.id) * 0.12;
     // spit recoil: sac clenches down then eases back
     if (a.recoil > 0) {
       a.recoil = Math.max(0, a.recoil - 0.8 / 60);
@@ -276,8 +333,10 @@ registerUnit("maw", {
     m.add(part(OG.blob, OOZE_PLUM).pos(0.28, -0.28, 0.08).scl(0.24, 0.2, 0.28));
     m.add(part(OG.blob, OOZE_PLUM).pos(-0.28, -0.28, 0.08).scl(0.24, 0.2, 0.28));
 
-    // massive green shell body over a dark gullet
+    // massive green shell body over a dark gullet + a deeper-green underbelly
+    // so the hulking blob carries tonal range, not one flat lime.
     m.add(part(OG.blob, OOZE_DARK).pos(0, 0.08, 0.06).scl(0.6, 0.5, 0.5));   // gullet seen inside
+    m.add(part(OG.blob, oozeShellDeep()).pos(0, -0.14, -0.04).scl(0.72, 0.4, 0.62));
     const body = part(OG.blobHi, shell).pos(0, 0.1, -0.04).scl(0.78, 0.72, 0.66).shadow();
     m.add(body, "body");
 
@@ -327,8 +386,10 @@ registerUnit("maw", {
     // heavy lumber
     g.userData.body.position.y = Math.abs(Math.sin(phase)) * 0.05 * move;
     g.userData.body.rotation.z = Math.sin(phase) * 0.05 * move;
-    // idle chomp; big snap on attack
-    let open = 0.12 + Math.sin(t * 2 + e.id) * 0.06;
+    // idle chomp; an occasional HUNGRY snap (a bigger gape-then-clench) via the
+    // fidget gate; big snap on attack overrides both.
+    const hunger = fidget(t, e.id * 1.3 + 0.4, 0.1, 30) * (1 - move);
+    let open = 0.12 + Math.sin(t * 2 + e.id) * 0.06 + hunger * 0.5;
     if (a.recoil > 0) {
       a.recoil = Math.max(0, a.recoil - 0.5 / 60);
       open = 0.12 + a.recoil * 0.9;         // gape then chomp shut
@@ -355,8 +416,10 @@ registerUnit("sluice", {
         .rot(lz * 0.6, 0, -lx * 0.6).scl(0.8, 0.8, 0.8));
     }
 
-    // enormous bloated sac: bright bile core glowing through a taut green shell
+    // enormous bloated sac: bright bile core glowing through a taut green shell,
+    // set over a deeper-green underbelly for tonal range.
     m.add(part(OG.core, glowMat(BILE, 0.7)).pos(0, 0.08, 0).scl(1.4), "bile");
+    m.add(part(OG.sac, oozeShellDeep()).pos(0, -0.06, 0).scl(0.62, 0.4, 0.6));
     const sac = part(OG.sac, shell).pos(0, 0.1, 0).scl(0.66, 0.56, 0.62).shadow();
     m.add(sac, "sac");
 
@@ -366,8 +429,8 @@ registerUnit("sluice", {
     m.add(part(OG.bubbleBig, shell).pos(0.08, 0.42, -0.24).scl(1.4));
     m.add(part(OG.bubble, shell).pos(-0.34, 0.36, -0.14).scl(1.2));
 
-    // team membrane seam around the swollen belly
-    m.add(part(OG.membrane, teamMat(color, 0.5)).pos(0, 0.04, 0).rot(Math.PI / 2, 0, 0).scl(0.7));
+    // team membrane seam around the swollen belly (more saturated glow)
+    m.add(part(OG.membrane, teamMat(color, 0.7)).pos(0, 0.04, 0).rot(Math.PI / 2, 0, 0).scl(0.7));
 
     // team eyes peering over the front of the sac
     m.add(part(OG.eye, glowMat(color, 1.4)).pos(-0.16, 0.26, 0.5).scl(0.8), "eye");
@@ -388,7 +451,9 @@ registerUnit("sluice", {
   animate(g, e, t, move, a) {
     // heavy heaving breath
     breathe(a.sac, t, e.id, 0.66, 0.56, 0.62, 0.05, 1.6);
-    a.bile.emissiveIntensity = 0.6 + Math.sin(t * 2.4 + e.id) * 0.25;
+    // slow bile throb + an occasional pressure "burp" flare (fidget gate)
+    const burp = fidget(t, e.id * 1.1 + 0.2, 0.09, 24) * (1 - move);
+    a.bile.emissiveIntensity = 0.6 + Math.sin(t * 2.4 + e.id) * 0.25 + burp * 0.9;
     g.userData.body.position.y = Math.abs(Math.sin(t * 8 + e.id)) * 0.025 * move;
     // mortar cough on fire
     if (a.recoil > 0) {
@@ -412,12 +477,14 @@ registerUnit("wisp", {
     const m = new ModelBuilder();
     m.addMat(shell);
 
-    // domed jellyfish bell (translucent green) over a bright team core
+    // domed jellyfish bell (translucent green) over a bright team core, with a
+    // deeper-green underside so the bell reads dimensional from above.
     m.add(part(OG.core, glowMat(color, 1.6)).pos(0, 0.02, 0).scl(0.85), "core");
+    m.add(part(OG.blob, oozeShellDeep(0.28)).pos(0, -0.06, 0).scl(0.42, 0.2, 0.42));
     const bell = part(OG.blobHi, shell).pos(0, 0.06, 0).scl(0.46, 0.36, 0.46).shadow();
     m.add(bell, "bell");
-    // bell underside lip (team membrane)
-    m.add(part(OG.membrane, teamMat(color, 0.6)).pos(0, -0.06, 0).rot(Math.PI / 2, 0, 0).scl(0.44));
+    // bell underside lip (team membrane) — more saturated glow
+    m.add(part(OG.membrane, teamMat(color, 0.75)).pos(0, -0.06, 0).rot(Math.PI / 2, 0, 0).scl(0.44));
 
     // spore motes freckling the dome
     m.add(part(OG.bubble, shell).pos(-0.16, 0.16, 0.12).scl(1.0));

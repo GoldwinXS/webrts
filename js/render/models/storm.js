@@ -34,7 +34,7 @@
 import * as THREE from "three";
 import { ModelBuilder, part, wrapBuilding } from "./parts.js";
 import { registerUnit, registerBuilding, addLamp } from "./registry.js";
-import { G, SCAFFOLD, toonGradient, teamMat, glowMat } from "./core.js";
+import { G, SCAFFOLD, toonGradient, teamMat, glowMat, fidget } from "./core.js";
 
 // ---------------------------------------------------------------------------
 // Shared palette. Opaque family materials are module-scope singletons (like
@@ -282,8 +282,11 @@ registerUnit("volt", {
     g.userData.body.position.y = 0.55 + Math.sin(t * 2.4 + e.id) * 0.06 + move * 0.045;
     g.userData.body.rotation.x = move * 0.12;
     floatPieces(a, t, e.id);
-    // idle blade hum; forward chop on hit (renderer sets recoil=0.08)
-    a.bladeGrp.rotation.y = Math.sin(t * 1.5 + e.id) * 0.25;
+    // idle blade hum + an occasional slow show-off TWIRL of the lightning blade
+    // (a lazy full spin during a rare fidget window); forward chop on hit
+    // (renderer sets recoil=0.08) overrides it.
+    const twirl = fidget(t, e.id * 1.6, 0.09, 12) * (1 - move);
+    a.bladeGrp.rotation.y = Math.sin(t * 1.5 + e.id) * 0.25 + twirl * Math.PI * 2;
     if (a.recoil > 0) {
       a.recoil = Math.max(0, a.recoil - 0.5 / 60);
       a.bladeGrp.rotation.x = -a.recoil * 14;          // slash arc
@@ -358,7 +361,16 @@ registerUnit("arc", {
     g.userData.body.position.y = 0.52 + Math.sin(t * 2.5 + e.id) * 0.06 + move * 0.04;
     g.userData.body.rotation.x = move * 0.12;
     floatPieces(a, t, e.id);
-    a.orbit.rotation.y = t * 3.2 + e.id;
+    // IDLE FIDGET: the orbiting spark nodes normally drift at a steady rate, but
+    // every so often WHIP UP to a fast spin for a beat then settle. Integrated
+    // from a per-frame dt so the extra speed only ever adds forward motion (no
+    // snap-back). a.orbAngle carries the accumulated angle across frames.
+    const dt = a.lastT === undefined ? 0 : Math.min(0.1, Math.max(0, t - a.lastT));
+    a.lastT = t;
+    if (a.orbAngle === undefined) a.orbAngle = e.id;
+    const boost = fidget(t, e.id * 2.4, 0.08, 8) * 14;   // up to +14 rad/s burst
+    a.orbAngle += dt * (3.2 + boost);
+    a.orbit.rotation.y = a.orbAngle;
     if (a.recoil > 0) {
       a.recoil = Math.max(0, a.recoil - 0.6 / 60);
       a.coreMat.emissiveIntensity = 2.0 + a.recoil * 14;
