@@ -1858,8 +1858,8 @@ export class Renderer {
       if (g.userData.anim) {
         const k = g.userData.anim.kind;
         if (k === "tank") this.updateTankAim(g, e, alpha);
-        else if (k === "turret" && e.done) this.updateTurretAim(g, e);
-        else if (k === "refinery" && e.done) g.userData.harvesting = this.refineryHarvesting(e);
+        else if ((k === "turret" || k === "tesla") && e.done) this.updateTurretAim(g, e);
+        else if ((k === "refinery" || k === "extractor" || k === "sump") && e.done) g.userData.harvesting = this.refineryHarvesting(e);
       }
       animateVisual(g, e, t, amt);
 
@@ -2007,6 +2007,42 @@ export class Renderer {
         case "complete":
           if (ev.owner === this.localPlayer) this.fx.shockRing(W2(ev.x), W2(ev.y), 0x1c7d3f, 2.2, 0.6);
           break;
+        case "chain": {
+          // Arc chain lightning jumping victim -> victim (cyan-white)
+          const srcVis = this.sim.fog[this.localPlayer][fpToTile(ev.fy) * this.sim.map.w + fpToTile(ev.fx)] === 2;
+          if (!vis && !srcVis) break;
+          const ax = W2(ev.fx), az = W2(ev.fy), bx = W2(ev.tx), bz = W2(ev.ty);
+          this.fx.spawnArc(ax, az, bx, bz, 0xbdf3ff,
+            this.heightAt(ax, az) + 0.6, this.heightAt(bx, bz) + 0.6);
+          break;
+        }
+        case "ability": {
+          if (ev.kind === "blink") {
+            // Volt Blink / Zephyr Slipstream: arc between endpoints + poofs.
+            // (The top-level vis gate reads ev.x/ev.y which blink lacks —
+            // check both endpoints' fog explicitly.)
+            const fog = this.sim.fog[this.localPlayer], w = this.sim.map.w;
+            const vFrom = fog[fpToTile(ev.fromY) * w + fpToTile(ev.fromX)] === 2;
+            const vTo = fog[fpToTile(ev.toY) * w + fpToTile(ev.toX)] === 2;
+            if (!vFrom && !vTo) break;
+            const ax = W2(ev.fromX), az = W2(ev.fromY);
+            const bx = W2(ev.toX), bz = W2(ev.toY);
+            const lift = UNITS[this.sim.byId.get(ev.id)?.type]?.fly ? 2.2 : 0.55;
+            this.fx.spawnArc(ax, az, bx, bz, 0x9fefff,
+              this.heightAt(ax, az) + lift, this.heightAt(bx, bz) + lift);
+            this.fx.spawnPoof(ax, az, PLAYER_COLORS[ev.owner]);
+            this.fx.spawnPoof(bx, bz, PLAYER_COLORS[ev.owner]);
+          } else if (ev.kind === "tempest_hit") {
+            // Fulminar storm strike: vertical arc from the sky + ground flash
+            if (!vis) break;
+            const wx = W2(ev.x), wz = W2(ev.y);
+            const gy = this.heightAt(wx, wz);
+            this.fx.spawnArc(wx, wz, wx, wz, 0xdff6ff, gy + 6, gy + 0.08);
+            this.fx.sparks.burst(wx, gy + 0.3, wz, 12, 0x9fefff, 3, 0.4, 2.5);
+            this.fx.shockRing(wx, wz, 0x9fefff, 1.4, 0.3);
+          }
+          break;
+        }
         case "trained":
           break; // spawn poof handled on mesh creation
       }

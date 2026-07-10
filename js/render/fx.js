@@ -250,6 +250,58 @@ export class Effects {
     this.sparks.burst(x, 0.2 + this.gy(x, z), z, 10, color, 1.6, 0.4, 2);
   }
 
+  // Jagged lightning polyline between two world points: 8 segments with random
+  // perpendicular jitter, additive line, re-jittered every few frames so it
+  // crackles, dead in ~0.15-0.25s. fromY/toY are ABSOLUTE world heights (like
+  // bolt); when omitted the endpoints sit ~0.6 above the terrain. Passing the
+  // same x/z for both ends with a high fromY gives a vertical strike.
+  spawnArc(ax, az, bx, bz, color = 0x9feeff, fromY, toY) {
+    const ay = fromY !== undefined ? fromY : 0.6 + this.gy(ax, az);
+    const by = toY !== undefined ? toY : 0.6 + this.gy(bx, bz);
+    const segs = 8;
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array((segs + 1) * 3), 3));
+    const line = new THREE.Line(geo, this.basic(color, 1));
+    line.frustumCulled = false;
+    const data = { kind: "arc", t: 0, dur: 0.15 + Math.random() * 0.1, ax, ay, az, bx, by, bz, segs, flick: 0 };
+    this.jitterArc(line, data);
+    this.add(line, data);
+    // endpoint flashes so the strike points read
+    const fa = new THREE.Mesh(this.flashGeo, this.basic(color, 0.9));
+    fa.position.set(ax, ay, az);
+    this.add(fa, { kind: "flash", t: 0, dur: 0.1 });
+    const fb = new THREE.Mesh(this.flashGeo, this.basic(color, 0.9));
+    fb.position.set(bx, by, bz);
+    this.add(fb, { kind: "flash", t: 0, dur: 0.12 });
+  }
+
+  // (re)roll the arc's jitter: endpoints pinned, interior points displaced
+  // along the two perpendiculars of the A->B axis.
+  jitterArc(line, d) {
+    const pos = line.geometry.attributes.position.array;
+    const dx = d.bx - d.ax, dy = d.by - d.ay, dz = d.bz - d.az;
+    const len = Math.hypot(dx, dy, dz) || 1;
+    // first perpendicular: axis x worldUp (falls back to +X for vertical arcs)
+    let px = -dz, py = 0, pz = dx;
+    const pl = Math.hypot(px, py, pz);
+    if (pl < 0.001) { px = 1; py = 0; pz = 0; } else { px /= pl; pz /= pl; }
+    // second perpendicular: axis x first
+    const qx = (dy * pz - dz * py) / len;
+    const qy = (dz * px - dx * pz) / len;
+    const qz = (dx * py - dy * px) / len;
+    const amp = Math.min(0.55, len * 0.1 + 0.08);
+    for (let i = 0; i <= d.segs; i++) {
+      const f = i / d.segs;
+      const mid = (i === 0 || i === d.segs) ? 0 : 1;   // pin the endpoints
+      const j1 = (Math.random() - 0.5) * 2 * amp * mid;
+      const j2 = (Math.random() - 0.5) * 2 * amp * mid;
+      pos[i * 3]     = d.ax + dx * f + px * j1 + qx * j2;
+      pos[i * 3 + 1] = d.ay + dy * f + py * j1 + qy * j2;
+      pos[i * 3 + 2] = d.az + dz * f + pz * j1 + qz * j2;
+    }
+    line.geometry.attributes.position.needsUpdate = true;
+  }
+
   update(dt) {
     this.sparks.update(dt);
     this.smoke.update(dt);
@@ -265,6 +317,7 @@ export class Effects {
         }
         this.scene.remove(fx.obj);
         if (fx.obj.material?.dispose) fx.obj.material.dispose();
+        if (fx.kind === "arc") fx.obj.geometry.dispose();   // per-arc geometry
         this.live.splice(i, 1);
         continue;
       }
@@ -288,6 +341,12 @@ export class Effects {
         case "flash":
           fx.obj.scale.setScalar(1 + p * 2.2);
           fx.obj.material.opacity = 0.95 * (1 - p);
+          break;
+        case "arc":
+          // crackle: re-roll the jitter every few frames, flicker the fade
+          fx.flick -= dt;
+          if (fx.flick <= 0) { fx.flick = 0.035; this.jitterArc(fx.obj, fx); }
+          fx.obj.material.opacity = (1 - p) * (0.65 + Math.random() * 0.35);
           break;
         case "ring":
           fx.obj.scale.setScalar(0.4 + p * fx.maxScale * 2.4);

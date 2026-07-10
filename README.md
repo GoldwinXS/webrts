@@ -4,6 +4,17 @@ A StarCraft-inspired 3D real-time strategy game that runs entirely in the
 browser. Vanilla JS + Three.js, no build step — deployable on any static host,
 including GitHub Pages, with working PvP multiplayer.
 
+## Three factions
+
+- **The Cogs** — industrious robots. Build, repair, out-tech. Siege tanks,
+  stimmed marines, rocket barrages.
+- **The Ooze** — gooey swarm. Creep spreads organically tile-by-tile from the
+  Nucleus and Goo Vents (and crumbles back when they die); Ooze units heal on
+  it, move faster on it, and buildings must be planted on it.
+- **The Tempest** — living lightning in floating armor. Regenerating shields,
+  a power field that gates building placement, chain lightning, blink dashes,
+  phase-shifted ghosts, and the Fulminar's channeled lightning storm.
+
 ## Features
 
 - **3D battlefield** — Three.js scene with an RTS camera (pan, rotate, zoom),
@@ -14,8 +25,11 @@ including GitHub Pages, with working PvP multiplayer.
   Assembly (trains Zappers and Clanks)
 - **Combat** — attack-move, auto-acquisition, ranged and melee units;
   destroy every enemy building to win
-- **Skirmish AI** — rule-based opponent that expands its economy, keeps supply
-  ahead, and sends growing attack waves
+- **SC2-style maps** — curved lanes with enforced chokepoints, contested gold
+  expansions (richer trips, smaller pool), neutral watchtowers that grant
+  vision to whoever holds them, themed biomes (verdant / ashen / frozen)
+- **Skirmish AI** — rule-based opponent for all three factions that expands
+  its economy, keeps supply ahead, and sends growing attack waves
 - **PvP multiplayer** — deterministic lockstep over a direct WebRTC data
   channel (PeerJS public broker for the handshake only). Share a 5-letter
   match code; no game server anywhere.
@@ -54,6 +68,9 @@ branch `main`, root folder. The game (including multiplayer) works from the
 | Right-click | Move / gather / attack, context-sensitive |
 | A | Attack-move (then click a target or location) |
 | S | Stop |
+| Ctrl/Alt+1-9 | Set control group (exclusive: a unit lives in one group) |
+| Shift+1-9 | Add to group (steals from other groups) |
+| Delete | Remove selected units/buildings |
 | Arrows / screen edge | Pan camera |
 | Q / E or middle-drag | Rotate camera |
 | Wheel | Zoom |
