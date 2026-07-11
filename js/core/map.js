@@ -493,9 +493,12 @@ function buildCandidate(seed, opts) {
     for (let e = placed; e < extraPairs; e++) {
       const reach = plateauR + 13 + e * 8 + (rng() % 4);
       const perp = perpOffset(c0, (e & 1) ? 6 : -6, rng);
+      // Same EDGE FLOOR as findExpansionPocket (>=6 from every border): even this
+      // tight-geometry fallback must not jam a CP footprint into a map corner.
+      const edgeClamp = (v, n) => Math.max(6, Math.min(n - 7, v));
       const ex = {
-        x: clampTile(start0.x + c0.dx * reach + perp.x, W),
-        y: clampTile(start0.y + c0.dy * reach + perp.y, H),
+        x: edgeClamp(start0.x + c0.dx * reach + perp.x, W),
+        y: edgeClamp(start0.y + c0.dy * reach + perp.y, H),
       };
       flattenBlobPocket(ex.x, ex.y, 5, 3, (ex.x * 131 + ex.y * 977) | 0);
       clearArea3(ex, 3);
@@ -1149,6 +1152,53 @@ function buildCandidate(seed, opts) {
   const [natPx, natPy] = partner(nat0.x, nat0.y);
   const naturals = [{ x: nat0.x, y: nat0.y }, { x: natPx, y: natPy }];
 
+  // ---- BARRIER PINCH ERODER (consistency pass) -----------------------------
+  // Kills "paths are not clear" outliers and barrier clutter: an OPEN lowland tile
+  // squeezed to width 1 between two BARRIER tiles on the same axis (barriers to its
+  // N&S, or to its E&W) is an accidental 1-wide slit through a barrier clump — the
+  // kind of pinch that makes a route read as unclear. Sweep the whole map (ordering-
+  // independent, so it is robust to which shortest path the final BFS happens to
+  // pick) and OPEN one flanking barrier so the slit widens to >= 2. Registered
+  // choke corridors, ramps, base interiors and CLIFF faces are exempt — only tagged
+  // barriers are eroded, via the paired setter, so symmetry and the barrier/cliff
+  // distinction hold. Runs BEFORE freckle cleanup so any stub it leaves is swept.
+  {
+    const chokeCollar = new Set();
+    for (const c of chokes) for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+      const x = c.x + dx, y = c.y + dy; if (inb(x, y)) chokeCollar.add(idx(x, y));
+    }
+    const bases = [start0, start1, nat0, { x: nat1x, y: nat1y }, ...expansions];
+    const nearBase = (x, y) => {
+      for (const b of bases) if (Math.abs(x - b.x) <= plateauR + 2 && Math.abs(y - b.y) <= plateauR + 2) return true;
+      return false;
+    };
+    const isBarrier = (x, y) => inb(x, y) && barrierKind[idx(x, y)];
+    const erodable = (x, y) => isBarrier(x, y) && !rampTiles[idx(x, y)] && !chokeCollar.has(idx(x, y));
+    // Fixed scan order -> deterministic. A widened slit can expose another one
+    // tile over, so repeat until stable (bounded passes).
+    for (let pass = 0; pass < 3; pass++) {
+      let changed = false;
+      for (let y = 1; y < H - 1; y++)
+        for (let x = 1; x < W - 1; x++) {
+          const i = idx(x, y);
+          if (rock[i] || height[i] !== 0) continue;              // open lowland only
+          if (rampTiles[i] || chokeCollar.has(i)) continue;
+          if (nearBase(x, y)) continue;
+          // vertical slit: barriers N & S -> open the one that is erodable.
+          if (isBarrier(x, y - 1) && isBarrier(x, y + 1)) {
+            const t = erodable(x, y - 1) ? { x, y: y - 1 } : (erodable(x, y + 1) ? { x, y: y + 1 } : null);
+            if (t) { setRock(t.x, t.y, 0); changed = true; }
+          }
+          // horizontal slit: barriers E & W.
+          if (isBarrier(x - 1, y) && isBarrier(x + 1, y)) {
+            const t = erodable(x - 1, y) ? { x: x - 1, y } : (erodable(x + 1, y) ? { x: x + 1, y } : null);
+            if (t) { setRock(t.x, t.y, 0); changed = true; }
+          }
+        }
+      if (!changed) break;
+    }
+  }
+
   // ---- global freckle cleanup ----------------------------------------------
   // Any downstream eraser (lane carve, resource clear, choke stamp, ramp) can
   // punch a rounded barrier wall into a 4-DISCONNECTED remnant — a single barrier
@@ -1171,6 +1221,62 @@ function buildCandidate(seed, opts) {
         if (bn === 0) { setRock(x, y, 0); changed = true; }   // clears rock+barrierKind+partner
       }
     if (!changed) break;
+  }
+
+  // ---- FINAL BARRIER-SLIT ERODER (consistency pass) ------------------------
+  // Freckle cleanup opens isolated barrier tiles, which can EXPOSE a fresh width-1
+  // barrier slit (an open lowland tile now flanked by barriers N&S or E&W) that the
+  // pre-freckle eroder never saw. Repeat the map-wide slit eroder once more, now on
+  // the settled barrier layer, so NO open route tile is pinched to a 1-wide slit by
+  // barriers — regardless of which shortest path the final BFS picks (ordering-
+  // independent; this is what makes the >= 2 route-clearance guarantee robust).
+  // Exempts choke corridors / ramps / base interiors / cliffs; paired setter keeps
+  // symmetry. A trailing freckle sweep cleans any stub the erosion leaves.
+  {
+    const chokeCollar = new Set();
+    for (const c of chokes) for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+      const x = c.x + dx, y = c.y + dy; if (inb(x, y)) chokeCollar.add(idx(x, y));
+    }
+    const bases = [start0, start1, nat0, { x: nat1x, y: nat1y }, ...expansions];
+    const nearBase = (x, y) => {
+      for (const b of bases) if (Math.abs(x - b.x) <= plateauR + 2 && Math.abs(y - b.y) <= plateauR + 2) return true;
+      return false;
+    };
+    const isBarrier = (x, y) => inb(x, y) && barrierKind[idx(x, y)];
+    const erodable = (x, y) => isBarrier(x, y) && !rampTiles[idx(x, y)] && !chokeCollar.has(idx(x, y));
+    for (let pass = 0; pass < 3; pass++) {
+      let changed = false;
+      for (let y = 1; y < H - 1; y++)
+        for (let x = 1; x < W - 1; x++) {
+          const i = idx(x, y);
+          if (rock[i] || height[i] !== 0 || rampTiles[i] || chokeCollar.has(i) || nearBase(x, y)) continue;
+          if (isBarrier(x, y - 1) && isBarrier(x, y + 1)) {
+            const t = erodable(x, y - 1) ? { x, y: y - 1 } : (erodable(x, y + 1) ? { x, y: y + 1 } : null);
+            if (t) { setRock(t.x, t.y, 0); changed = true; }
+          }
+          if (isBarrier(x - 1, y) && isBarrier(x + 1, y)) {
+            const t = erodable(x - 1, y) ? { x: x - 1, y } : (erodable(x + 1, y) ? { x: x + 1, y } : null);
+            if (t) { setRock(t.x, t.y, 0); changed = true; }
+          }
+        }
+      if (!changed) break;
+    }
+    // trailing freckle sweep for any stub the erosion isolated.
+    for (let pass = 0; pass < 2; pass++) {
+      let changed = false;
+      for (let y = 0; y < H; y++)
+        for (let x = 0; x < W; x++) {
+          const i = idx(x, y);
+          if (!barrierKind[i]) continue;
+          let bn = 0;
+          if (x + 1 < W && barrierKind[idx(x + 1, y)]) bn++;
+          if (x - 1 >= 0 && barrierKind[idx(x - 1, y)]) bn++;
+          if (y + 1 < H && barrierKind[idx(x, y + 1)]) bn++;
+          if (y - 1 >= 0 && barrierKind[idx(x, y - 1)]) bn++;
+          if (bn === 0) { setRock(x, y, 0); changed = true; }
+        }
+      if (!changed) break;
+    }
   }
 
   // Final gold sweep: if any later feature (mesa, barrier blob, choke wall)
@@ -1645,15 +1751,35 @@ function buildCandidate(seed, opts) {
   // Walk inward from a rim anchor until we find a pocket whose 11x11 footprint is
   // far enough from every base (and the anchor's own partner) to seat an
   // expansion. Returns {x,y} or null. Deterministic (fixed inward stepping).
+  //
+  // ACCEPTANCE (consistency pass — kills "expansions spawn in weird areas"):
+  //   * EDGE FLOOR: the pocket center must sit >= EXP_EDGE tiles from every map
+  //     border so its 9x9 CP footprint is never cut off / jammed into a corner.
+  //     A rim anchor near the very edge is walked further inward until it clears.
+  //   * CENTER FLOOR: the pocket must keep clear of the mid-map so it never lands
+  //     under the (map-centered) elevation island grown later in step 4 — an
+  //     expansion embedded in the center island reads as a stranded high pocket.
+  // These run BEFORE center/barrier terrain exists, so they are geometric floors
+  // (edge + center distance), not free-tile counts; the later flatten + spoke
+  // reservation guarantee the pocket ends up open lowland on the lane network.
   function findExpansionPocket(rc, starts, nat0, expansions, plateauR, natR, partner, r) {
-    const toCx = Math.sign((W >> 1) - rc.x), toCy = Math.sign((H >> 1) - rc.y);
+    const EXP_EDGE = 6;                              // >= 6 tiles from every border
+    const cx = W >> 1, cy = H >> 1;
+    const toCx = Math.sign(cx - rc.x), toCy = Math.sign(cy - rc.y);
     const jx = (r() % 3) - 1, jy = (r() % 3) - 1;
-    for (let step = 0; step <= 10; step++) {
+    // extend the inward walk (was 10) so a rim anchor jammed against the edge can
+    // always reach a spot the EDGE/CENTER floors accept before giving up.
+    for (let step = 0; step <= 16; step++) {
       const x = clampTile(rc.x + toCx * step + jx, W);
       const y = clampTile(rc.y + toCy * step + jy, H);
       let ok = true;
+      // EDGE FLOOR: keep the whole CP footprint off the map border.
+      if (x < EXP_EDGE || y < EXP_EDGE || x > W - 1 - EXP_EDGE || y > H - 1 - EXP_EDGE) ok = false;
+      // CENTER FLOOR: stay off the mid-map elevation island's footprint (its
+      // terraced skirt reaches ~9 tiles out; 10 keeps a clean lowland gap).
+      if (ok && Math.abs(x - cx) <= 10 && Math.abs(y - cy) <= 10) ok = false;
       // clear of both mains
-      for (const s of starts) if (Math.abs(x - s.x) <= plateauR + 6 && Math.abs(y - s.y) <= plateauR + 6) { ok = false; break; }
+      if (ok) for (const s of starts) if (Math.abs(x - s.x) <= plateauR + 6 && Math.abs(y - s.y) <= plateauR + 6) { ok = false; break; }
       if (ok) {
         // clear of the natural and its partner
         const [pnx, pny] = partner(nat0.x, nat0.y);
@@ -1711,13 +1837,30 @@ function growBarriers(rng, palette, ctx) {
   // Protected: no barrier tile may land here. Generous margins so blobs frame
   // (not block) the economy. Mining arcs reach ~9 tiles from a base center.
   const mineralSet = new Set(minerals.map((m) => ((m.y / 256) | 0) * W + ((m.x / 256) | 0)));
+  // Dilate the reserved-lane mask by 1 tile: barriers keep a >=1-tile clean GAP
+  // from every reserved route instead of growing flush against it. This straightens
+  // corridors and is the biggest lever on the "paths not clear" outliers — a survey
+  // measured ~half of all winding (path length / straight-line > 1.6) came from
+  // barrier clutter hugging the lanes. One tile only, so barriers still visibly
+  // FRAME the routes; they just no longer pinch them into an S-curve.
+  const reservedCollar = new Uint8Array(W * H);
+  if (reserved) {
+    for (let y = 0; y < H; y++)
+      for (let x = 0; x < W; x++) {
+        if (!reserved[idx(x, y)]) continue;
+        for (const [dx, dy] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          const nx = x + dx, ny = y + dy;
+          if (inb(nx, ny)) reservedCollar[idx(nx, ny)] = 1;
+        }
+      }
+  }
   const protectedAt = (x, y) => {
     if (!inb(x, y)) return true;
     if (x < 1 || y < 1 || x >= W - 1 || y >= H - 1) return true;
     const i = idx(x, y);
     if (rampTiles[i]) return true;                    // never on a ramp
     if (rock[i]) return true;                         // already blocked (cliff)
-    if (reserved && reserved[i]) return true;         // never ON a reserved lane (keep routes clear)
+    if (reservedCollar[i]) return true;               // never ON or beside a reserved lane (keep routes clear + straight)
     if (mineralSet.has(i)) return true;
     // keep clear of every base main (mining arc radius) and expansion. The main
     // margin is plateauR+4 (not +3): the cliff ring outer face sits at plateauR+1,
@@ -2285,6 +2428,42 @@ function validateVerbose(map) {
   }
 
   return null;
+}
+
+// Shortest 4-connected path (list of {x,y}) from (ax,ay) to (bx,by) over passable
+// tiles, or null if unreachable. Fixed neighbour order -> deterministic path.
+// Used by the route un-pinch pass to find where the real main->main route runs.
+function shortestPath(rock, ax, ay, bx, by) {
+  const w = MAP_W, h = MAP_H;
+  const idx = (x, y) => y * w + x;
+  const inb = (x, y) => x >= 0 && y >= 0 && x < w && y < h;
+  if (rock[idx(ax, ay)] || rock[idx(bx, by)]) return null;
+  const dist = new Int32Array(w * h).fill(-1);
+  dist[idx(ax, ay)] = 0;
+  const q = [idx(ax, ay)]; let head = 0;
+  while (head < q.length) {
+    const n = q[head++]; const x = n % w, y = (n / w) | 0;
+    if (x === bx && y === by) break;
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const nx = x + dx, ny = y + dy;
+      if (!inb(nx, ny)) continue;
+      const m = idx(nx, ny);
+      if (dist[m] !== -1 || rock[m]) continue;
+      dist[m] = dist[n] + 1; q.push(m);
+    }
+  }
+  if (dist[idx(bx, by)] < 0) return null;
+  const path = []; let x = bx, y = by;
+  path.push({ x, y });
+  while (!(x === ax && y === ay)) {
+    const d = dist[idx(x, y)]; let moved = false;
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const nx = x + dx, ny = y + dy;
+      if (inb(nx, ny) && dist[idx(nx, ny)] === d - 1) { x = nx; y = ny; path.push({ x, y }); moved = true; break; }
+    }
+    if (!moved) break;
+  }
+  return path.reverse();
 }
 
 // BFS flood over passable tiles (4-connected).

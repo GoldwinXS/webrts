@@ -66,6 +66,116 @@ function natFree(map, n) {
   return free;
 }
 
+// BFS distance field (steps) from (sx,sy) over passable tiles; -1 = unreachable.
+function bfsDist(rock, sx, sy) {
+  const dist = new Int32Array(W * H).fill(-1);
+  if (rock[idx(sx, sy)]) return dist;
+  dist[idx(sx, sy)] = 0;
+  const q = [idx(sx, sy)]; let head = 0;
+  while (head < q.length) {
+    const n = q[head++]; const x = n % W, y = (n / W) | 0;
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const nx = x + dx, ny = y + dy;
+      if (!inb(nx, ny)) continue;
+      const m = idx(nx, ny);
+      if (dist[m] !== -1 || rock[m]) continue;
+      dist[m] = dist[n] + 1; q.push(m);
+    }
+  }
+  return dist;
+}
+
+// One shortest 4-connected path (list of {x,y}) from a->b, or null. Fixed
+// neighbour order -> deterministic reconstruction.
+function shortestPath(rock, ax, ay, bx, by) {
+  const dist = bfsDist(rock, ax, ay);
+  if (dist[idx(bx, by)] < 0) return null;
+  const path = []; let x = bx, y = by;
+  path.push({ x, y });
+  while (!(x === ax && y === ay)) {
+    const d = dist[idx(x, y)]; let moved = false;
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const nx = x + dx, ny = y + dy;
+      if (inb(nx, ny) && dist[idx(nx, ny)] === d - 1) { x = nx; y = ny; path.push({ x, y }); moved = true; break; }
+    }
+    if (!moved) break;
+  }
+  return path.reverse();
+}
+
+// CONSISTENCY METRIC 1 — path clarity. Returns {ratio, pinch} where ratio is the
+// main->main route length / straight-line distance (>~2.4 = winding mess) and
+// pinch is the minimum corridor width along the route OUTSIDE registered chokes/
+// ramps AND caused by a lowland BARRIER (an accidental barrier squeeze; genuine
+// cliff pinches are legit elevation drama and excluded).
+function pathClarity(map) {
+  const s0 = map.starts[0], s1 = map.starts[1];
+  const path = shortestPath(map.rock, s0.x, s0.y, s1.x, s1.y);
+  const straight = Math.hypot(s1.x - s0.x, s1.y - s0.y) || 1;
+  if (!path) return { ratio: Infinity, pinch: 0, pinchAt: null };
+  const ratio = (path.length - 1) / straight;
+  // legit-narrow tiles: ramps, registered chokes, main ramp (+1 collar).
+  const legit = new Set();
+  const addC = (x, y) => { for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const X = x + dx, Y = y + dy; if (inb(X, Y)) legit.add(idx(X, Y)); } };
+  for (let i = 0; i < map.rampTiles.length; i++) if (map.rampTiles[i]) addC(i % W, (i / W) | 0);
+  for (const c of map.chokes || []) addC(c.x, c.y);
+  for (const r of map.ramps || []) for (const t of r.tiles || []) addC(t.x, t.y);
+  const bases = [s0, s1, ...(map.naturals || [])];
+  for (const cl of map.clusters || []) if (!cl.isMain) bases.push(cl.center);
+  const barrierNear = (x, y) => {   // a lowland barrier within 2 tiles on a cardinal?
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]])
+      for (let t = 1; t <= 2; t++) { const X = x + dx * t, Y = y + dy * t; if (!inb(X, Y)) break; if (map.rock[idx(X, Y)]) { if (map.barrierKind[idx(X, Y)]) return true; break; } }
+    return false;
+  };
+  let minW = 99, minAt = null;
+  for (let i = 2; i < path.length - 2; i++) {
+    const t = path[i];
+    if (legit.has(idx(t.x, t.y))) continue;
+    let nearBase = false;
+    for (const b of bases) if (Math.abs(t.x - b.x) <= 9 && Math.abs(t.y - b.y) <= 9) { nearBase = true; break; }
+    if (nearBase) continue;
+    if (!barrierNear(t.x, t.y)) continue;   // only judge barrier-caused pinches
+    // measure perpendicular corridor width (both cardinal normals if diagonal).
+    const a = path[i - 1], b = path[i + 1];
+    const tvx = Math.sign(b.x - a.x), tvy = Math.sign(b.y - a.y);
+    const normals = (tvx !== 0 && tvy !== 0) ? [[-tvy, 0], [0, tvx]] : [[-tvy, tvx]];
+    for (const [nx, ny] of normals) {
+      if (!nx && !ny) continue;
+      let w = 1;
+      for (let s = 1; s < 20; s++) { const X = t.x + nx * s, Y = t.y + ny * s; if (!inb(X, Y) || map.rock[idx(X, Y)]) break; w++; }
+      for (let s = 1; s < 20; s++) { const X = t.x - nx * s, Y = t.y - ny * s; if (!inb(X, Y) || map.rock[idx(X, Y)]) break; w++; }
+      if (w < minW) { minW = w; minAt = { x: t.x, y: t.y }; }
+    }
+  }
+  return { ratio, pinch: minW, pinchAt: minAt };
+}
+
+// CONSISTENCY METRIC 2 — spawn siting. For each EXTRA expansion (not a natural),
+// returns {edge, detour, open}: distance to the nearest map border, BFS-travel /
+// euclidean detour ratio to the nearest main, and local openness (free tiles in
+// radius 4, out of 81). Weird spawns (corner-jammed / behind detour walls /
+// cramped pockets) show up as low edge, high detour, or low openness.
+function expansionSiting(map) {
+  const s0 = map.starts[0], s1 = map.starts[1];
+  const d0 = bfsDist(map.rock, s0.x, s0.y), d1 = bfsDist(map.rock, s1.x, s1.y);
+  const out = [];
+  for (const cl of map.clusters || []) {
+    if (cl.isMain) continue;
+    const c = cl.center;
+    if ((map.naturals || []).some((n) => Math.abs(n.x - c.x) <= 1 && Math.abs(n.y - c.y) <= 1)) continue; // naturals sited by ramp geometry
+    const edge = Math.min(c.x, c.y, W - 1 - c.x, H - 1 - c.y);
+    const e0 = Math.hypot(c.x - s0.x, c.y - s0.y), e1 = Math.hypot(c.x - s1.x, c.y - s1.y);
+    const near0 = e0 <= e1;
+    const travel = near0 ? d0[idx(c.x, c.y)] : d1[idx(c.x, c.y)];
+    const euclid = near0 ? e0 : e1;
+    const detour = travel > 0 && euclid > 0 ? travel / euclid : Infinity;
+    let open = 0;
+    for (let dy = -4; dy <= 4; dy++) for (let dx = -4; dx <= 4; dx++) { const x = c.x + dx, y = c.y + dy; if (inb(x, y) && !map.rock[idx(x, y)]) open++; }
+    out.push({ x: c.x, y: c.y, edge, detour, open });
+  }
+  return out;
+}
+
 function serialize(map) {
   const p = [];
   for (const k of ["rock", "height", "rampTiles", "barrierKind", "losBlock"]) p.push(k + ":" + map[k].join(""));
@@ -181,6 +291,9 @@ const fails = [];
 const mainDist = [], natDist = [];
 let detOk = true, chokeMax = 0;
 let withChokes = 0, withGolds = 0, withTowers = 0;
+// consistency-pass metric distributions (locked-in bar):
+const ratioDist = [], expEdgeDist = [], expDetourDist = [], expOpenDist = [];
+let routePinchMin = 99;
 
 for (const seed of seeds)
   for (const spawns of modes)
@@ -264,9 +377,35 @@ for (const seed of seeds)
         const s0 = map.starts[0], s1 = map.starts[1];
         if (Math.abs(s0.x - s1.x) <= 14 && Math.abs(s0.y - s1.y) <= 14) fails.push(`PLATEAU-OVERLAP seed${seed} close exp${expansions}`);
       }
+
+      // ---- CONSISTENCY BAR (locked in after the tuning pass) ----------------
+      // 1. PATH CLARITY: the main->main route must not be a winding mess, and must
+      //    never be pinched to a 1-wide SLIT by an accidental barrier squeeze
+      //    outside the registered chokes/ramps (a 1-tile gap through a barrier clump
+      //    is the "unclear path" defect; the generator's map-wide slit eroder widens
+      //    every such slit to >= 2, ordering-independently). Ratio ceiling 2.4
+      //    carries margin over the matrix (max ~2.19) plus a wide-seed sweep.
+      const pc = pathClarity(map);
+      ratioDist.push(pc.ratio);
+      if (pc.ratio > 2.4) fails.push(`PATH-RATIO ${pc.ratio.toFixed(2)}>2.4 seed${seed} ${spawns} exp${expansions}`);
+      routePinchMin = Math.min(routePinchMin, pc.pinch);
+      if (pc.pinch < 2) fails.push(`ROUTE-PINCH ${pc.pinch}<2 seed${seed} ${spawns} exp${expansions} @${pc.pinchAt?.x},${pc.pinchAt?.y}`);
+
+      // 2. SPAWN SITING: every EXTRA expansion sits >= 6 tiles off the map border
+      //    (never corner-jammed), reaches its nearest main without an absurd detour
+      //    (travel/euclid <= 3.5 — an expansion tucked behind the center island runs
+      //    naturally high; the bar just rejects a genuinely walled-off pocket), and
+      //    has an open local pocket (>= 50 free tiles in a 9x9 window, out of 81).
+      for (const e of expansionSiting(map)) {
+        expEdgeDist.push(e.edge); expDetourDist.push(e.detour); expOpenDist.push(e.open);
+        if (e.edge < 6) fails.push(`EXP-EDGE ${e.edge}<6 seed${seed} ${spawns} exp${expansions} @${e.x},${e.y}`);
+        if (e.detour > 3.5) fails.push(`EXP-DETOUR ${e.detour.toFixed(2)}>3.5 seed${seed} ${spawns} exp${expansions} @${e.x},${e.y}`);
+        if (e.open < 50) fails.push(`EXP-OPENNESS ${e.open}<50 seed${seed} ${spawns} exp${expansions} @${e.x},${e.y}`);
+      }
     }
 
 const stat = (a) => { a = a.slice().sort((x, y) => x - y); return `min=${a[0]} median=${a[(a.length / 2) | 0]} max=${a[a.length - 1]}`; };
+const statF = (a) => { a = a.filter((x) => isFinite(x)).slice().sort((x, y) => x - y); return `min=${a[0]?.toFixed(2)} median=${a[(a.length / 2) | 0]?.toFixed(2)} max=${a[a.length - 1]?.toFixed(2)}`; };
 console.log(`Tested ${configs} configs (${seeds.length} seeds x ${modes.length} modes x ${expOpts.length} expansion counts).`);
 console.log(`  fallbacks:            ${fallbacks}`);
 console.log(`  MAIN free @r7:        ${stat(mainDist)}   (require >= 115)`);
@@ -276,6 +415,12 @@ console.log(`  max main-ramp choke:  ${chokeMax}   (require <= 4)`);
 console.log(`  route chokes present: ${withChokes}/${configs} configs`);
 console.log(`  gold pair present:    ${withGolds}/${configs} configs`);
 console.log(`  watchtowers present:  ${withTowers}/${configs} configs`);
+console.log(`  --- consistency bar ---`);
+console.log(`  main->main path ratio: ${statF(ratioDist)}   (require <= 2.4)`);
+console.log(`  route pinch off-choke: min=${routePinchMin}   (require >= 2)`);
+console.log(`  expansion edge dist:   ${stat(expEdgeDist)}   (require >= 6)`);
+console.log(`  expansion detour:      ${statF(expDetourDist)}   (require <= 3.5)`);
+console.log(`  expansion openness/81: ${stat(expOpenDist)}   (require >= 50)`);
 console.log(`  assertion failures:   ${fails.length}`);
 for (const f of fails.slice(0, 30)) console.log("    " + f);
 if (fails.length === 0 && fallbacks === 0) console.log("ALL CHECKS PASSED.");
