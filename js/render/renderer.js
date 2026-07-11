@@ -724,6 +724,282 @@ export class Renderer {
     const tName = th.name;
     const mixT = (a, b, k) => [CH(a[0] + (b[0] - a[0]) * k), CH(a[1] + (b[1] - a[1]) * k), CH(a[2] + (b[2] - a[2]) * k)];
 
+    // A tile counts as OPEN ground (eligible for washes/cover/detail) when it is
+    // passable, not a ramp, and not sitting under a barrier prop — the same
+    // placement guard the later passes lean on, so we never paint over walls,
+    // carved ramps, or prop stands.
+    const isOpen = (x, y) => !rockAt(x, y) && !isRamp(x, y);
+
+    // Corner-height sampler over the smoothed grid; used to read the true local
+    // slope of the displaced mesh (ramps AND the gentle roll of plateau edges),
+    // which is finer than the integer level field alone.
+    const HG = this.heightGrid, GW = this.gw;
+    const cornerH = (cx, cy) => {
+      if (cx < 0) cx = 0; else if (cx > GW - 1) cx = GW - 1;
+      let cyc = cy; if (cyc < 0) cyc = 0; else if (cyc > this.gh - 1) cyc = this.gh - 1;
+      return HG[cyc * GW + cx];
+    };
+    // Sun azimuth on the ground plane. The key light sits at world
+    // (w*0.3, 42, h*0.15) aiming at the map center, so on the XZ plane it comes
+    // from the -X / -Z quadrant -> lit faces point toward -X (west) and -Z
+    // (north-ish in tile space is +y=south). We resolve facing per tile from the
+    // height gradient and dot it against this sun direction.
+    const sunDir = (() => {
+      const sx = (w * 0.3) - w / 2, sz = (h * 0.15) - h / 2;   // light pos rel. center
+      const l = Math.hypot(sx, sz) || 1;
+      return { x: sx / l, z: sz / l };                         // points FROM center TO light
+    })();
+
+    // ---- 2c. GROUND-COVER VARIETY: large soft biome patches --------------------
+    // Low-frequency blob noise (coarse pixHash lattice, smoothly interpolated)
+    // shifts the base tone between 2-3 related hues per biome so big open fields
+    // read as a living meadow / drift / snowfield instead of one flat carpet.
+    // Painted as broad translucent washes UNDER nothing new but OVER the stamped
+    // dabs at low alpha, so the gouache dabs still show through. Skipped on
+    // walls/ramps/props (isOpen) and left to fade at their edges.
+    {
+      // two coarse value-noise fields (different lattice offsets) sampled per
+      // tile and smoothstep-blended between neighbours -> soft organic blobs
+      // ~6-10 tiles across. Deterministic (pixHash), so identical every load.
+      const SC = 6;                                   // lattice spacing in tiles
+      const smooth = (a, b, k) => a + (b - a) * (k * k * (3 - 2 * k));
+      const latt = (lx, ly, salt) => (pixHash(lx * 131 + salt * 17, ly * 197 + salt * 31) % 1000) / 1000;
+      const vnoise = (x, y, salt) => {
+        const fx = x / SC, fy = y / SC;
+        const lx = Math.floor(fx), ly = Math.floor(fy);
+        const tx = fx - lx, ty = fy - ly;
+        const a = latt(lx, ly, salt), b = latt(lx + 1, ly, salt);
+        const c = latt(lx, ly + 1, salt), d = latt(lx + 1, ly + 1, salt);
+        return smooth(smooth(a, b, tx), smooth(c, d, tx), ty);
+      };
+      // 2-3 cover hues per biome (all close cousins of the ground tone) that the
+      // noise fields select between: a dry/warm variant and a dark/rich variant.
+      const dryHue  = tName === "verdant" ? [150, 168, 96]     // sun-dried grass gold-green
+                    : tName === "ashen"   ? [206, 158, 110]    // pale dust
+                    :                       [214, 230, 244];   // bright snow sheen
+      const darkHue = tName === "verdant" ? [60, 104, 66]      // dark moss
+                    : tName === "ashen"   ? [150, 78, 50]      // char / scorched terracotta
+                    :                       [150, 168, 190];   // grey rock-dust drift
+      const dryCss = `rgb(${dryHue[0]},${dryHue[1]},${dryHue[2]})`;
+      const darkCss = `rgb(${darkHue[0]},${darkHue[1]},${darkHue[2]})`;
+      ctx.save();
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          if (!isOpen(x, y)) continue;
+          const px = x * PX, py = y * PX;
+          const nd = vnoise(x, y, 1);         // dry-cover field
+          const nm = vnoise(x, y, 2);         // dark-cover field
+          // Each field only paints where it crests (thresholded) so between the
+          // blobs the plain stamped tone still shows -> distinct patches.
+          if (nd > 0.62) {
+            ctx.globalAlpha = Math.min(0.16, (nd - 0.62) * 0.55);
+            ctx.fillStyle = dryCss;
+            ctx.fillRect(px, py, PX, PX);
+          }
+          if (nm > 0.64) {
+            ctx.globalAlpha = Math.min(0.15, (nm - 0.64) * 0.5);
+            ctx.fillStyle = darkCss;
+            ctx.fillRect(px, py, PX, PX);
+          }
+        }
+      }
+      ctx.globalAlpha = 1;
+      ctx.restore();
+    }
+
+    // ---- 2d. SLOPE + ELEVATION SHADING -----------------------------------------
+    // Per open tile, read the local slope/facing off the smoothed height grid and
+    // wash a warm sunlit tint onto sun-facing slopes, a cool shadow tint onto
+    // slopes facing away; then a progressive sun-warm/lighten by elevation so
+    // plateaus visibly glow above the lowland. All at 0.06-0.14 alpha over the
+    // existing paint, so it modulates rather than repaints.
+    {
+      const warm = tName === "verdant" ? "255,236,176"        // golden sun
+                 : tName === "ashen"   ? "255,224,150"
+                 :                       "255,240,214";        // warm light on snow
+      const cool = tName === "verdant" ? "40,66,104"          // cool blue shadow
+                 : tName === "ashen"   ? "70,58,96"            // violet canyon shade
+                 :                       "78,120,170";         // blue ice shadow
+      ctx.save();
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          if (!isOpen(x, y)) continue;
+          const px = x * PX, py = y * PX;
+          // slope gradient from the 4 tile corners of the smoothed grid: the
+          // corner at (x,y)..(x+1,y+1). dz/dx and dz/dz give the facing normal.
+          const hNW = cornerH(x, y),     hNE = cornerH(x + 1, y);
+          const hSW = cornerH(x, y + 1), hSE = cornerH(x + 1, y + 1);
+          const dzdx = ((hNE + hSE) - (hNW + hSW)) * 0.5;    // + means rising toward +x
+          const dzdz = ((hSW + hSE) - (hNW + hNE)) * 0.5;    // + means rising toward +z
+          const slope = Math.hypot(dzdx, dzdz);
+          if (slope > 0.02) {
+            // downhill-facing direction on the plane = -gradient, normalised.
+            const inv = 1 / (slope || 1);
+            const fxd = -dzdx * inv, fzd = -dzdz * inv;
+            // dot the downhill facing with the sun direction: +1 = faces sun.
+            const facing = fxd * sunDir.x + fzd * sunDir.z;
+            const mag = Math.min(1, slope * 1.6);             // steeper -> stronger
+            if (facing > 0) {
+              ctx.globalAlpha = 0.14 * facing * mag;
+              ctx.fillStyle = `rgba(${warm},1)`;
+            } else {
+              ctx.globalAlpha = 0.12 * (-facing) * mag;
+              ctx.fillStyle = `rgba(${cool},1)`;
+            }
+            ctx.fillRect(px, py, PX, PX);
+          }
+          // elevation glow: higher ground catches more sun. Warm-lighten wash
+          // whose strength climbs with the tile level (0 at lowland).
+          const lvl = Math.max(0, Math.min(3, lvlAt(x, y)));
+          if (lvl > 0) {
+            ctx.globalAlpha = 0.06 * lvl;
+            ctx.fillStyle = `rgba(${warm},1)`;
+            ctx.fillRect(px, py, PX, PX);
+          }
+        }
+      }
+      ctx.globalAlpha = 1;
+      ctx.restore();
+    }
+
+    // ---- 2e. EDGE DARKENING / AO + plateau rim ---------------------------------
+    // Contact shadow where open ground meets the BASE of a cliff (the wall
+    // grounding into the terrain): a soft gradient fading from the shared cliff
+    // face into the tile. And a thin sunlit rim wash along plateau TOP edges on
+    // the sun-facing side, so raised ground catches a bright lip.
+    {
+      const aoTint = tName === "verdant" ? "24,44,30"
+                   : tName === "ashen"   ? "78,38,20"
+                   :                       "44,64,96";
+      const rim = tName === "verdant" ? "255,244,196"
+                : tName === "ashen"   ? "255,228,158"
+                :                       "246,252,255";
+      // Is (x,y) a cliff base neighbour on side (dx,dy)? i.e. the neighbour tile
+      // is a taller cliff face and this tile is open lower ground.
+      const AO = Math.max(3, (PX * 0.55) | 0);
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          if (!isOpen(x, y)) continue;
+          const l = lvlAt(x, y);
+          const px = x * PX, py = y * PX;
+          // contact shadow: gradient from each side that abuts a higher cliff.
+          const higherWall = (nx, ny) => rockAt(nx, ny) && lvlAt(nx, ny) > l;
+          const contact = (side) => {
+            let gx0, gy0, gx1, gy1, rw, rh;
+            if (side === 0) { gx0 = px; gy0 = py; gx1 = px + AO; gy1 = py; rw = AO; rh = PX; }        // wall on -x
+            else if (side === 1) { gx0 = px + PX; gy0 = py; gx1 = px + PX - AO; gy1 = py; rw = AO; rh = PX; } // +x
+            else if (side === 2) { gx0 = px; gy0 = py; gx1 = px; gy1 = py + AO; rw = PX; rh = AO; }    // -y
+            else { gx0 = px; gy0 = py + PX; gx1 = px; gy1 = py + PX - AO; rw = PX; rh = AO; }          // +y
+            const g = ctx.createLinearGradient(gx0, gy0, gx1, gy1);
+            g.addColorStop(0, `rgba(${aoTint},0.34)`);
+            g.addColorStop(1, `rgba(${aoTint},0)`);
+            ctx.fillStyle = g;
+            if (side === 0) ctx.fillRect(px, py, AO, PX);
+            else if (side === 1) ctx.fillRect(px + PX - AO, py, AO, PX);
+            else if (side === 2) ctx.fillRect(px, py, PX, AO);
+            else ctx.fillRect(px, py + PX - AO, PX, AO);
+          };
+          if (higherWall(x - 1, y)) contact(0);
+          if (higherWall(x + 1, y)) contact(1);
+          if (higherWall(x, y - 1)) contact(2);
+          if (higherWall(x, y + 1)) contact(3);
+        }
+      }
+      // Sunlit rim on plateau TOP edges: an open, raised tile whose neighbour
+      // drops away gets a thin bright lip on the side that both drops AND faces
+      // the sun, so terrace tops catch light.
+      const RIM = Math.max(2, (PX / 8) | 0);
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          if (!isOpen(x, y)) continue;
+          const l = lvlAt(x, y);
+          if (l <= 0) continue;
+          const px = x * PX, py = y * PX;
+          const drops = (nx, ny) => lvlAt(nx, ny) < l;
+          // side unit vectors in tile space: -x,+x,-y,+y. Light the ones facing
+          // the sun (dot with sunDir > 0).
+          const sides = [
+            [-1, 0, drops(x - 1, y)], [1, 0, drops(x + 1, y)],
+            [0, -1, drops(x, y - 1)], [0, 1, drops(x, y + 1)],
+          ];
+          for (const [sx, sz, dropped] of sides) {
+            if (!dropped) continue;
+            const face = sx * sunDir.x + sz * sunDir.z;
+            if (face <= 0.1) continue;                    // shadow side gets no rim
+            ctx.fillStyle = `rgba(${rim},${(0.14 * face).toFixed(3)})`;
+            if (sx < 0) ctx.fillRect(px, py, RIM, PX);
+            else if (sx > 0) ctx.fillRect(px + PX - RIM, py, RIM, PX);
+            else if (sz < 0) ctx.fillRect(px, py, PX, RIM);
+            else ctx.fillRect(px, py + PX - RIM, PX, RIM);
+          }
+        }
+      }
+    }
+
+    // ---- 2f. SPARSE GROUND DETAIL: pebble clusters + tuft shadows ---------------
+    // Only on flat, open, low-relief tiles well away from walls/ramps/props, and
+    // only on a deterministic sparse subset, so the open midfield gets faint
+    // hand-painted incident without ever reading as noise. No lane/trail data is
+    // exposed cleanly by the map, so game-trails are intentionally skipped.
+    {
+      // a tile is "quiet" if it and its 4 neighbours are all open and on the same
+      // level (truly flat interior ground), keeping detail off cliff shoulders.
+      const quiet = (x, y) => {
+        if (!isOpen(x, y)) return false;
+        const l = lvlAt(x, y);
+        for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]])
+          if (!isOpen(x + dx, y + dy) || lvlAt(x + dx, y + dy) !== l) return false;
+        return true;
+      };
+      const pebCap = tName === "verdant" ? mixT(th.ground, [180, 186, 170], 0.5)
+                   : tName === "ashen"   ? mixT(th.ground, [214, 178, 138], 0.5)
+                   :                       mixT(th.ground, [206, 218, 232], 0.5);
+      const pebUnder = shade(pebCap, -0.32);
+      const tuft = tName === "verdant" ? shade(th.ground, -0.22)
+                 : tName === "ashen"   ? shade(th.ground, -0.2)
+                 :                       shade(th.ground, -0.16);
+      ctx.imageSmoothingEnabled = true;
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          if (!quiet(x, y)) continue;
+          // deterministic sparse trigger: only ~1 in 7 quiet tiles gets detail.
+          const hsel = pixHash(x + 313, y + 911) % 100;
+          if (hsel >= 15) continue;
+          const px = x * PX, py = y * PX;
+          const jx = (pixHash(x, y) % 18) + 7, jy = (pixHash(y, x) % 18) + 7;
+          if (hsel < 8) {
+            // pebble cluster: 2-3 tiny lit stones with a shadow underside
+            const n = 2 + (pixHash(x + 5, y) % 2);
+            for (let i = 0; i < n; i++) {
+              const ox = jx + ((pixHash(x + i * 7, y + i * 3) % 9) - 4);
+              const oy = jy + ((pixHash(x + i * 3, y + i * 9) % 9) - 4);
+              const r = 1.4 + (pixHash(x + i, y + i) % 10) / 10;
+              ctx.globalAlpha = 0.5;
+              ctx.fillStyle = rgbStr(pebUnder);
+              ctx.beginPath(); ctx.arc(ox, oy + 1, r, 0, Math.PI * 2); ctx.fill();
+              ctx.globalAlpha = 0.7;
+              ctx.fillStyle = rgbStr(pebCap);
+              ctx.beginPath(); ctx.arc(ox, oy, r, 0, Math.PI * 2); ctx.fill();
+            }
+          } else {
+            // tuft shadow: a soft elongated smudge, like a clump of growth
+            // casting shade toward the sun-away side. Verdant-only bright fleck.
+            ctx.globalAlpha = 0.28;
+            ctx.fillStyle = rgbStr(tuft);
+            ctx.beginPath();
+            ctx.ellipse(px + jx, py + jy + 1, 3.2, 1.6, 0, 0, Math.PI * 2);
+            ctx.fill();
+            if (tName === "verdant") {
+              ctx.globalAlpha = 0.5;
+              ctx.fillStyle = rgbStr(mixT(th.groundHi, [150, 224, 120], 0.4));
+              ctx.beginPath(); ctx.arc(px + jx, py + jy - 1.5, 1.2, 0, Math.PI * 2); ctx.fill();
+            }
+          }
+          ctx.globalAlpha = 1;
+        }
+      }
+    }
+
     // ---- 3. losBlock tiles: soft feathered shade, no hard tile boundary ------
     // Used to be a flat per-tile fillRect at 0.26 alpha, which painted a crisp
     // dark SQUARE under every vision-blocking doodad (shrubs etc.) — reads as
@@ -1928,6 +2204,14 @@ export class Renderer {
     group.userData.flyer = true;
     group.userData.cruise = 2.2;
     group.userData.yawPrev = 0;
+    // Render-side glide state: the smoothed XZ position lags the sim position via
+    // a critically-damped spring (velocity carried on userData). Init lazily on
+    // the first render frame from the sim position (glideInit flag), then the
+    // spring integrates it. bankZ/pitchX are the smoothed lean angles blended
+    // toward the velocity so turns roll and accel/decel pitch the nose.
+    group.userData.glideInit = false;
+    group.userData.gx = 0; group.userData.gz = 0;    // smoothed world position
+    group.userData.gvx = 0; group.userData.gvz = 0;  // smoothed velocity
     // detach the selection ring so it draws at terrain level, not at altitude
     const ring = group.userData.ring;
     if (ring) {
@@ -2040,14 +2324,45 @@ export class Renderer {
         continue;
       }
 
-      const x = W2(e.px + (e.x - e.px) * alpha);
-      const z = W2(e.py + (e.y - e.py) * alpha);
-      const terrainY = this.heightAt(x, z);
+      let x = W2(e.px + (e.x - e.px) * alpha);
+      let z = W2(e.py + (e.y - e.py) * alpha);
+      let terrainY = this.heightAt(x, z);
       if (g.userData.flyer) {
+        // RENDER-SIDE GLIDE: the flyer's XZ position chases the sim position via
+        // a critically-damped spring (per-flyer velocity on userData), so it lags
+        // ~0.25s and overshoots slightly on stops -> it reads as gliding inertia.
+        // The sim position is untouched; only the visual group lags. The smoothed
+        // (x,z) then REPLACES the locals so every downstream attachment (blob
+        // shadow, detached ring, health bar, buff overlays) tracks the glide too.
+        const ud = g.userData;
+        const simX = x, simZ = z;
+        if (!ud.glideInit) { ud.gx = simX; ud.gz = simZ; ud.gvx = 0; ud.gvz = 0; ud.glideInit = true; }
+        // Critically-damped spring: omega sets the follow stiffness. ~5.0 lands
+        // the lag around 0.25-0.3s with a gentle overshoot on hard stops.
+        const omega = 5.0;
+        const cdt = Math.min(dt, 1 / 20);   // clamp step so a hitch can't explode it
+        const ax = omega * omega * (simX - ud.gx) - 2 * omega * ud.gvx;
+        const az = omega * omega * (simZ - ud.gz) - 2 * omega * ud.gvz;
+        ud.gvx += ax * cdt; ud.gvz += az * cdt;
+        ud.gx += ud.gvx * cdt; ud.gz += ud.gvz * cdt;
+        // Cap the visual offset so a flyer never detaches from its sim location in
+        // a fight (targeting/fx use sim positions). Clamp to ~1.2 tiles.
+        const CAP = 1.2;
+        let ox = ud.gx - simX, oz = ud.gz - simZ;
+        const od = Math.hypot(ox, oz);
+        if (od > CAP) { const s = CAP / od; ud.gx = simX + ox * s; ud.gz = simZ + oz * s; }
+        x = ud.gx; z = ud.gz;
+        terrainY = this.heightAt(x, z);
+        // banking/pitch INTO the smoothed velocity: roll on turns (lateral accel),
+        // nose-down under forward accel, nose-up flare on decel. Stored as targets
+        // that models.js-independent body rotation eases toward in the yaw block.
+        const spd = Math.hypot(ud.gvx, ud.gvz);
+        ud.glideSpeed = spd;
+        ud.glideVX = ud.gvx; ud.glideVZ = ud.gvz;
         // cruise altitude above terrain + gentle idle bob
         const bob = Math.sin(t * 1.6 + e.id * 1.3) * 0.14;
         g.position.set(x, terrainY + g.userData.cruise + bob, z);
-        // blob shadow directly below on the terrain surface
+        // blob shadow directly below on the terrain surface (smoothed position)
         const sh = g.userData.blobShadow;
         if (sh) { sh.position.set(x, terrainY + 0.03, z); sh.visible = g.visible; }
       } else if (e.building || e.type === "geyser" || e.type === "mineral") {
@@ -2107,21 +2422,40 @@ export class Renderer {
         }
       }
 
-      if (!blinkActive && g.userData.body && moving) {
+      if (!blinkActive && g.userData.flyer && g.userData.body) {
+        // FLYER attitude is driven by the SMOOTHED glide velocity (not the raw
+        // sim direction) so yaw, bank and pitch all agree with the gliding body:
+        // it yaws to where it's actually drifting, rolls into the lateral turn,
+        // and pitches nose-down on acceleration / flares nose-up on decel.
+        const ud = g.userData, body = ud.body;
+        const spd = ud.glideSpeed || 0;
+        if (spd > 0.15) {
+          const targetYaw = Math.atan2(ud.glideVX, ud.glideVZ);
+          let dy = targetYaw - body.rotation.y;
+          while (dy > Math.PI) dy -= Math.PI * 2;
+          while (dy < -Math.PI) dy += Math.PI * 2;
+          body.rotation.y += dy * Math.min(1, dt * 6);
+          // roll into the turn: bank proportional to how fast the heading swings.
+          const roll = Math.max(-0.6, Math.min(0.6, -dy * 2.2));
+          body.rotation.z += (roll - body.rotation.z) * Math.min(1, dt * 5);
+        } else {
+          // hovering/settling: level the roll back out
+          body.rotation.z += (0 - body.rotation.z) * Math.min(1, dt * 3);
+        }
+        // pitch from along-track acceleration: accelerating -> nose dips forward,
+        // decelerating (gliding to a stop) -> nose flares up. Uses the change in
+        // glide speed frame-to-frame, smoothed onto rotation.x.
+        const prevSpd = ud.glidePrevSpeed || 0;
+        const accel = (spd - prevSpd) / Math.max(Math.min(dt, 1 / 20), 1e-3);
+        ud.glidePrevSpeed = spd;
+        const targetPitch = Math.max(-0.28, Math.min(0.28, -accel * 0.14));
+        body.rotation.x += (targetPitch - body.rotation.x) * Math.min(1, dt * 5);
+      } else if (!blinkActive && g.userData.body && moving) {
         const targetYaw = Math.atan2(e.x - e.px, e.y - e.py);
         let dy = targetYaw - g.userData.body.rotation.y;
         while (dy > Math.PI) dy -= Math.PI * 2;
         while (dy < -Math.PI) dy += Math.PI * 2;
-        const rate = g.userData.flyer ? Math.min(1, dt * 6) : Math.min(1, dt * 12);
-        g.userData.body.rotation.y += dy * rate;
-        // flyers bank/roll into turns: roll proportional to yaw delta, clamped
-        if (g.userData.flyer) {
-          const roll = Math.max(-0.6, Math.min(0.6, -dy * 2.2));
-          g.userData.body.rotation.z += (roll - g.userData.body.rotation.z) * Math.min(1, dt * 5);
-        }
-      } else if (g.userData.flyer && g.userData.body) {
-        // level out when not turning
-        g.userData.body.rotation.z += (0 - g.userData.body.rotation.z) * Math.min(1, dt * 3);
+        g.userData.body.rotation.y += dy * Math.min(1, dt * 12);
       }
       // Stationary ranged attackers (marine/tank/wraith/banshee/etc.) turn to
       // face their live attack target instead of holding stale travel facing.
@@ -2357,6 +2691,17 @@ export class Renderer {
             const now = (performance.now() - this.clockStart) / 1000;
             const yaw = Math.atan2(ev.toX - ev.fromX, ev.toY - ev.fromY);
             this.blinkFx.set(ev.id, { yaw, start: now, dur: 0.4 });
+            // Snap the flyer's glide spring to the teleport destination so it
+            // doesn't rubber-band across the whole map chasing the old position
+            // (the spring would otherwise fling from fromX/Y to toX/Y). Clearing
+            // glideInit re-seeds gx/gz from the new sim position next frame and
+            // zeroes the carried velocity.
+            const bg = this.meshes.get(ev.id);
+            if (bg && bg.userData.flyer) {
+              bg.userData.glideInit = false;
+              bg.userData.gvx = 0; bg.userData.gvz = 0;
+              bg.userData.glidePrevSpeed = 0;
+            }
           } else if (ev.kind === "tempest_hit") {
             // Fulminar storm strike: vertical arc from the sky + ground flash
             if (!vis) break;
