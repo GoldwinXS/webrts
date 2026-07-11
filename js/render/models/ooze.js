@@ -436,32 +436,96 @@ registerUnit("sluice", {
     m.add(part(OG.eye, glowMat(color, 1.4)).pos(-0.16, 0.26, 0.5).scl(0.8), "eye");
     m.add(part(OG.eye, glowMat(color, 1.4)).pos(0.16, 0.26, 0.5).scl(0.8));
 
-    // hunched acid-mortar SNOUT jutting forward-down (the siege spout)
+    // hunched acid-mortar SNOUT jutting forward-down (the siege spout). When
+    // burrowed it swings UP to a mortar-lob angle and pulses bile-green.
     const snout = new THREE.Group();
     snout.add(part(OG.pore, OOZE_DARK).rot(-1.1, 0, 0).scl(1.1, 1.0, 1.1).mesh);
-    snout.add(part(OG.poreLip, glowMat(BILE, 0.8)).pos(0, 0.02, 0.24).rot(0.4, 0, 0).scl(0.7).mesh);
+    const snoutLip = part(OG.poreLip, glowMat(BILE, 0.8)).pos(0, 0.02, 0.24).rot(0.4, 0, 0).scl(0.7);
+    snout.add(snoutLip.mesh);
     snout.position.set(0, 0.02, 0.5);
     m.addGroup(snout, "snout");
 
+    // BURROW MOUND: a squashed goo-blob ring that bulges up around the base only
+    // while burrowed — sells the "sunk into the ground" read. Built once, hidden
+    // at rest; its scale/opacity are driven by the burrow factor in animate.
+    // Sits low (y just above the floor) and wide so it hugs the sac's footprint.
+    const mound = new THREE.Group();
+    const moundMat = oozeShell(0.3);
+    for (let i = 0; i < 7; i++) {
+      const ang = (i / 7) * Math.PI * 2;
+      const b = part(OG.blobHi, moundMat)
+        .pos(Math.cos(ang) * 0.5, 0.0, Math.sin(ang) * 0.5)
+        .scl(0.34, 0.18, 0.34).mesh;
+      mound.add(b);
+    }
+    // one flatter central goo pool tying the ring together
+    mound.add(part(OG.blobHi, moundMat).pos(0, -0.02, 0).scl(0.62, 0.14, 0.62).mesh);
+    // seated so the ring's lowest point rests at ~floor level even at its build
+    // scale — keeps liftToGround from shoving the whole unit up (float bug).
+    mound.position.y = 0.07;                 // just above the ground decal
+    mound.visible = false;
+    m.addGroup(mound, "mound");
+
     m.liftToGround();
-    m.setAnim({ kind: "sluice", sac: sac.mesh, bile: m.named.bile.material, snout, recoil: 0 });
+    m.setAnim({
+      kind: "sluice", sac: sac.mesh, bile: m.named.bile.material, snout, snoutLip: snoutLip.mesh, recoil: 0,
+      // burrow state
+      mound, moundMat,
+      bodyHome: m.body.position.y,   // rest body height (liftToGround baked)
+      sink: 0,                       // 0 = surfaced, 1 = fully burrowed (lerped)
+      lastT: 0,                      // for frame-time deltas
+    });
     return m.build();
   },
 
   animate(g, e, t, move, a) {
+    // --- smooth burrow sink factor (frame-time lerp toward e.burrowed) ---
+    let dt = t - a.lastT;
+    a.lastT = t;
+    if (!(dt > 0) || dt > 0.1) dt = 1 / 60;
+    const target = e.burrowed ? 1 : 0;
+    const k = Math.min(1, dt * 4.0);   // ~0.35s each way
+    a.sink += (target - a.sink) * k;
+    const s = a.sink;
+
     // heavy heaving breath
     breathe(a.sac, t, e.id, 0.66, 0.56, 0.62, 0.05, 1.6);
-    // slow bile throb + an occasional pressure "burp" flare (fidget gate)
+
+    // body SINKS so only the top third shows once fully burrowed. bodyHome is
+    // the rest height; drop it ~0.42 (the sac is ~0.56 tall * scale) so roughly
+    // the top third clears the mound. Walk-bob only applies while surfaced.
+    const bob = Math.abs(Math.sin(t * 8 + e.id)) * 0.025 * move * (1 - s);
+    g.userData.body.position.y = a.bodyHome - s * 0.42 + bob;
+
+    // the goo mound bulges up around the base as it sinks (squash-mound ring).
+    // The mound is a child of body, but body itself sinks by s*0.42 above — so
+    // add that back to the mound's local y to keep it PLANTED at ground level
+    // while the sac descends through it (that relative motion is the burrow read).
+    a.mound.visible = s > 0.02;
+    if (s > 0.02) {
+      const w = 0.6 + s * 0.55;                 // spreads as it commits
+      a.mound.scale.set(w, 0.5 + s * 0.9, w);
+      a.mound.position.y = 0.07 + s * 0.42;     // cancel body sink → stays at ground
+      // gentle roil so the mound looks wet/alive, not a static decal
+      a.moundMat.emissiveIntensity = 0.25 + s * (0.25 + Math.sin(t * 3 + e.id) * 0.12);
+    }
+
+    // slow bile throb + an occasional pressure "burp" flare (fidget gate).
+    // While burrowed the maw glows harder (charged siege-mortar read).
     const burp = fidget(t, e.id * 1.1 + 0.2, 0.09, 24) * (1 - move);
-    a.bile.emissiveIntensity = 0.6 + Math.sin(t * 2.4 + e.id) * 0.25 + burp * 0.9;
-    g.userData.body.position.y = Math.abs(Math.sin(t * 8 + e.id)) * 0.025 * move;
-    // mortar cough on fire
+    a.bile.emissiveIntensity = 0.6 + Math.sin(t * 2.4 + e.id) * 0.25 + burp * 0.9 + s * 0.7;
+
+    // maw points UP into a mortar-lob angle when burrowed and pulses bile-green.
+    // Composed as a rest bias lerped by sink; recoil below can still override.
+    const upAim = -s * 0.75;                     // negative rot.x tilts the pore up
+    a.snout.rotation.x += (upAim - a.snout.rotation.x) * 0.2;
+    a.snoutLip.material.emissiveIntensity = 0.8 + s * (0.9 + Math.sin(t * 4 + e.id) * 0.7);
+
+    // mortar cough on fire (heavier kick when burrowed = hitting harder)
     if (a.recoil > 0) {
       a.recoil = Math.max(0, a.recoil - 0.7 / 60);
-      a.snout.rotation.x = a.recoil * 0.6;
-      a.bile.emissiveIntensity = 0.6 + a.recoil * 2.0;
-    } else {
-      a.snout.rotation.x += (0 - a.snout.rotation.x) * 0.2;
+      a.snout.rotation.x = upAim + a.recoil * 0.6 * (1 + s * 0.6);
+      a.bile.emissiveIntensity = 0.6 + a.recoil * 2.0 + s * 0.7;
     }
   },
 });

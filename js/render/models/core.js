@@ -133,6 +133,11 @@ const G = {
   tankBarrel: new THREE.CylinderGeometry(0.05, 0.065, 0.66, 12).rotateX(Math.PI / 2).translate(0, 0, 0.33),
   tankBarrel2: new THREE.CylinderGeometry(0.07, 0.075, 0.4, 12).rotateX(Math.PI / 2).translate(0, 0, 0.14),
   tankMuzzle: new THREE.CylinderGeometry(0.09, 0.09, 0.16, 12).rotateX(Math.PI / 2),
+  // Anchor-mode stabilizer outriggers (Thumper siege deploy). A tapered strut
+  // pivoting from its top (translate so the mesh hangs DOWN from its origin) and
+  // a wide splayed tin footpad that plants on the ground. Built once, shared.
+  tankOutrigger: new THREE.CylinderGeometry(0.05, 0.075, 0.42, 8).translate(0, -0.21, 0),
+  tankFootpad: new THREE.CylinderGeometry(0.12, 0.15, 0.07, 10),
   // wraith
   wraithFuse: new THREE.CylinderGeometry(0.09, 0.17, 0.95, 12).rotateX(Math.PI / 2),
   wraithSpine: new THREE.BoxGeometry(0.1, 0.1, 0.6),

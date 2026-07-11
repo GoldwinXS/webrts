@@ -365,18 +365,82 @@ registerUnit("tank", {
     barrelGroup.add(part(G.tankBarrel2, TIN).mesh);
     barrelGroup.add(part(G.tankBarrel, shell).pos(0, 0, 0.05).scl(1.25, 1.25, 0.8).mesh);
     barrelGroup.add(part(G.tankMuzzle, COPPER).pos(0, 0, 0.56).scl(1.1, 1.1, 0.7).mesh);
-    barrelGroup.add(part(G.tankMuzzle, glowMat(AMBER, 1.5)).pos(0, 0, 0.62).scl(0.6).mesh);
+    // amber charge-glow at the muzzle tip — pulses when anchored ("hitting harder")
+    const chargeMat = glowMat(AMBER, 1.5);
+    barrelGroup.add(part(G.tankMuzzle, chargeMat).pos(0, 0, 0.62).scl(0.6).mesh);
     barrelGroup.position.set(0, 0, 0.34);
     turret.add(barrelGroup);
     turret.position.set(0, 0.68, -0.02);
     m.addGroup(turret, "turret");
 
+    // ANCHOR-MODE OUTRIGGERS: four stabilizer struts folded UP against the hull
+    // corners at rest; they swing out/down and plant footpads when sieged. Each
+    // leg is a group that pivots about its top mount; a per-corner sign steers
+    // the fold direction. Deploy is driven by a lerped factor in animate.
+    const outriggers = [];
+    for (const [cx, cz] of [[0.42, 0.42], [-0.42, 0.42], [0.42, -0.42], [-0.42, -0.42]]) {
+      const leg = new THREE.Group();
+      const strut = part(G.tankOutrigger, GUNMETAL).mesh;
+      leg.add(strut);
+      leg.add(part(G.tankFootpad, TIN).pos(0, -0.42, 0).mesh);
+      leg.position.set(cx, 0.34, cz);
+      leg.userData.sx = Math.sign(cx);      // +1 right, -1 left (fold outward on x)
+      leg.userData.sz = Math.sign(cz);      // +1 front, -1 back (fold outward on z)
+      // Start STOWED (folded up) so their footpads don't dangle below the
+      // treads and inflate the bbox — which would make liftToGround shove the
+      // whole tank up and float the treads. Matches the d=0 pose in animate.
+      leg.rotation.x = Math.PI * 0.62 * leg.userData.sz;
+      leg.rotation.z = leg.userData.sx * (0.28 + 0.35);
+      leg.visible = false;                  // hidden until deploy begins
+      m.addGroup(leg, "outrigger" + outriggers.length);
+      outriggers.push(leg);
+    }
+
     m.liftToGround();
-    m.setAnim({ kind: "tank", turret, barrelGroup, barrelHome: 0.34, recoil: 0 });
+    m.setAnim({
+      kind: "tank", turret, barrelGroup, barrelHome: 0.34, recoil: 0,
+      // anchor-mode state
+      outriggers, chargeMat,
+      hullHome: m.body.position.y,   // rest hull height (liftToGround baked)
+      deploy: 0,                     // 0 = mobile, 1 = fully anchored (lerped)
+      lastT: 0,                      // for frame-time deltas
+    });
     return m.build();
   },
 
   animate(g, e, t, move, a) {
+    // --- smooth anchor deploy factor (frame-time lerp toward e.sieged) ---
+    // dt from stored last t; clamp so a tab-out or first frame can't snap/NaN.
+    let dt = t - a.lastT;
+    a.lastT = t;
+    if (!(dt > 0) || dt > 0.1) dt = 1 / 60;
+    const target = e.sieged ? 1 : 0;
+    // ~0.3s transition each way: approach at rate*dt, capped to avoid overshoot.
+    const k = Math.min(1, dt * 4.5);
+    a.deploy += (target - a.deploy) * k;
+    const d = a.deploy;
+
+    // hull lowers onto the ground as it anchors (classic artillery squat).
+    // Kept shallow so the treads settle rather than clip deep into terrain.
+    g.userData.body.position.y = a.hullHome - d * 0.09;
+
+    // outriggers fold out+down from the hull corners. At rest (d=0) they lie
+    // tucked up flat against the hull (rotated inward ~ +/- to hide under it);
+    // fully deployed (d=1) they splay outward-down onto their footpads.
+    for (let i = 0; i < a.outriggers.length; i++) {
+      const leg = a.outriggers[i];
+      const sx = leg.userData.sx, sz = leg.userData.sz;
+      // A clean "swing down and out" fold, driven by one factor so it never
+      // tumbles: when stowed (d=0) the leg is rotated up to lie tucked flat
+      // against the hull side; as d->1 it swings down about its top mount to
+      // hang straight, then plants. rot.z holds a steady outward splay so the
+      // planted stance is wide (stable artillery footprint), not knock-kneed.
+      leg.rotation.x = (1 - d) * (Math.PI * 0.62) * sz; // tucked up when stowed, vertical when planted
+      leg.rotation.z = sx * (0.28 + (1 - d) * 0.35);     // splayed outward, a touch wider while folding
+      leg.visible = d > 0.02;                             // hidden entirely when fully mobile
+    }
+
+    // --- turret yaw (unchanged contract) ---
     const aim = g.userData.aimYaw;
     if (aim !== undefined) {
       let dy = aim - a.turret.rotation.y;
@@ -384,9 +448,20 @@ registerUnit("tank", {
       while (dy < -Math.PI) dy += Math.PI * 2;
       a.turret.rotation.y += dy * 0.12;
     }
+
+    // --- barrel elevation + extension compose with turret yaw (barrel is a
+    // child of turret, so this rot.x is applied in turret-local space AFTER the
+    // yaw — elevation and yaw don't fight). Elevate ~30deg + extend when anchored.
+    a.barrelGroup.rotation.x = -d * 0.52;          // ~30deg up (negative = muzzle rises)
+    a.barrelGroup.scale.z = 1 + d * 0.3;           // barrel extends out
+
+    // charge-pulse the muzzle amber while deployed; scale recoil by deploy factor
+    a.chargeMat.emissiveIntensity = 1.5 + d * (1.4 + Math.sin(t * 4) * 1.1);
+
     if (a.recoil > 0) {
       a.recoil = Math.max(0, a.recoil - 0.9 / 60);
-      a.barrelGroup.position.z = a.barrelHome - a.recoil * 3.2;
+      // anchored = a heavier kick (up to ~1.5x) to sell the harder hit
+      a.barrelGroup.position.z = a.barrelHome - a.recoil * 3.2 * (1 + d * 0.5);
     } else {
       a.barrelGroup.position.z += (a.barrelHome - a.barrelGroup.position.z) * 0.2;
     }
