@@ -1275,3 +1275,130 @@ input[type="range"]::-moz-range-thumb {
 }
 .cmp-end-box { min-width: 360px; }
 .cmp-end-sub { color: var(--ink-dim); font-size: var(--fs-sm); margin: 4px 0 18px; }
+
+/* ---------- campaign CINEMATICS ---------- */
+/* full-screen overlay layer for letterbox bars, cinematic dialogue, title
+   cards, fade-to-black, and the input-blocking shield. Sits above the HUD but
+   below the mission end panel (z 24). Mostly pointer-transparent; the input
+   block + skip button opt into pointer events. */
+#cinematic-layer { position: fixed; inset: 0; pointer-events: none; z-index: 20; }
+
+/* while a cinematic plays, hide the whole in-game HUD (topbar, minimap, command
+   card, selection, objective tracker, mission dialogue bar). The cinematic layer
+   itself is a sibling of #hud / #campaign-layer, so it stays visible. */
+body.cinematic #hud,
+body.cinematic #campaign-layer { opacity: 0; pointer-events: none; transition: opacity 0.25s ease; }
+
+/* letterbox bars: slide in from top/bottom, ~12% height each. */
+.cin-bar {
+  position: absolute; left: 0; right: 0;
+  height: 12%;
+  background: #000;
+  transform: translateY(0);
+  transition: transform 0.5s cubic-bezier(0.4, 0.0, 0.2, 1);
+  pointer-events: none;
+  z-index: 2;
+}
+.cin-bar-top { top: 0; transform: translateY(-100%); }
+.cin-bar-bot { bottom: 0; transform: translateY(100%); }
+.cin-bar-top.in { transform: translateY(0); }
+.cin-bar-bot.in { transform: translateY(0); }
+
+/* full-screen fade-to-black plate (opacity driven from JS with an inline
+   transition duration). */
+.cin-fade {
+  position: absolute; inset: 0;
+  background: #000; opacity: 0;
+  pointer-events: none;
+  z-index: 3;
+}
+.cin-fade.on { opacity: 1; }
+
+/* big centered title-card text. */
+.cin-label {
+  position: absolute; top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(80vw, 900px);
+  text-align: center;
+  font-size: clamp(28px, 5vw, 56px);
+  font-weight: 800;
+  letter-spacing: 1.5px;
+  color: #f4efe6;
+  text-shadow: 0 3px 14px rgba(0, 0, 0, 0.8);
+  z-index: 4;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.35s ease;
+}
+.cin-label.in { opacity: 1; }
+.cin-label.hidden { display: none; }
+
+/* cinematic dialogue: bigger than the mission bar, bottom-center ABOVE the
+   bottom letterbox bar. */
+.cin-dialogue {
+  position: absolute;
+  left: 50%; bottom: 14%;
+  transform: translateX(-50%);
+  width: min(760px, 82vw);
+  padding: 14px 22px 16px;
+  text-align: center;
+  background: rgba(10, 12, 16, 0.62);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 16px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  z-index: 4;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.25s ease;
+}
+.cin-dialogue.in { opacity: 1; }
+.cin-dialogue.hidden { display: none; }
+.cin-dlg-speaker {
+  font-size: var(--fs-sm);
+  font-weight: 800;
+  letter-spacing: 1.4px;
+  text-transform: uppercase;
+  color: #ffd479;
+  margin-bottom: 5px;
+}
+.cin-dlg-text {
+  font-size: clamp(16px, 2.1vw, 22px);
+  line-height: 1.4;
+  color: #f2efe9;
+  min-height: 1.4em;
+}
+
+/* full-screen input shield: swallows pointer events (keydown is swallowed via a
+   capture-phase listener in JS). */
+.cin-input-block {
+  position: absolute; inset: 0;
+  pointer-events: auto;
+  cursor: default;
+  z-index: 1;
+}
+.cin-input-block.hidden { display: none; }
+
+/* Skip button: bottom-right, porcelain, plain text (no emoji). */
+.cin-skip {
+  position: absolute;
+  right: 22px; bottom: calc(12% + 16px);
+  z-index: 5;
+  pointer-events: auto;
+  padding: 8px 18px;
+  font: inherit;
+  font-size: var(--fs-sm);
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: var(--ink);
+  background: var(--porcelain, #f4efe6);
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  border-radius: 12px;
+  box-shadow: var(--inner-hi), 0 3px 0 rgba(73, 58, 34, 0.18), var(--shadow);
+  cursor: pointer;
+  transition: transform 0.08s ease, box-shadow 0.08s ease;
+}
+.cin-skip:hover { transform: translateY(-1px); }
+.cin-skip:active { transform: translateY(1px); box-shadow: var(--inner-hi), 0 1px 0 rgba(73, 58, 34, 0.12); }
+.cin-skip.hidden { display: none; }

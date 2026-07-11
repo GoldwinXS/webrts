@@ -16,6 +16,17 @@
 import { FP, tileToFp } from "../core/fixed.js";
 import { UNITS, BUILDINGS, FACTIONS } from "../core/data.js";
 import { ACTS, MISSIONS, MISSION_BY_ID, FIRST_MISSION } from "./missions.js";
+import { buildMissionMap } from "./maps.js";
+import { CinematicPlayer } from "./cinematic.js";
+
+// Build a mission's custom map (opts.customMap) from its optional ASCII `map`
+// def, or return null if the mission uses procedural generation. Shared by the
+// boot path (main.js) so the Sim gets the hand-authored layout at construction.
+// OPTIONAL: missions without a `map` field generate procedurally as before.
+export function buildCustomMapFor(mission) {
+  if (mission && mission.map && mission.map.grid) return buildMissionMap(mission.map);
+  return null;
+}
 
 const PROGRESS_KEY = "webrts-campaign";
 const $ = (id) => document.getElementById(id);
@@ -87,11 +98,42 @@ export class CampaignRunner {
     this._dlgUntil = 0;     // wall-clock ms the current line auto-dismisses
     this._dlgActive = false;
 
+    // marker lookup comes from the (optional) custom map's markers table.
+    this.markers = (this.sim.map && this.sim.map.markers) || {};
+
+    // cinematic player: owns letterbox/dialogue/input-block DOM + the scene
+    // state machine. Driven from update(); gates the sim via blocksSim().
+    this.cinematic = new CinematicPlayer(this);
+
     this.ctx = this.buildCtx();
     this.buildDom();
 
-    // intro card (title + blurb) + first spoken line
+    // intro card (title + blurb) + first spoken line, then an optional auto-play
+    // intro cinematic. `introCinematic` plays AFTER the intro card is dismissed
+    // (documented: card first, then the scene) so the blurb still reads.
     this.showIntro();
+  }
+
+  // ---- sim gating -----------------------------------------------------------
+  // main.js's frame loop consults this BEFORE stepping the game. A cinematic
+  // pauses the sim by default (unless a { simRun:true } step toggled it on).
+  blocksSim() { return this.cinematic ? this.cinematic.blocksSim() : false; }
+
+  // resolve a marker NAME to its {x,y} tile coords (or null). Exposed via ctx.
+  marker(name) { return this.markers[name] ? { x: this.markers[name].x, y: this.markers[name].y } : null; }
+
+  // Coerce a coordinate ARG that may be: a marker-name string, a {x,y} tile
+  // object, or a plain (tx, ty) pair. Always returns {x,y} tile coords. Unknown
+  // marker names fall back to the player start so a script never crashes.
+  resolveTileArg(a, b) {
+    if (typeof a === "string") {
+      const m = this.marker(a);
+      if (m) return m;
+      const s = this.sim.map.starts[0];
+      return { x: s.x, y: s.y };
+    }
+    if (a && typeof a === "object" && a.x !== undefined) return { x: a.x, y: a.y };
+    return { x: a | 0, y: b | 0 };
   }
 
   // ---- ctx: the scripting surface handed to setup/triggers ----------------
@@ -126,13 +168,32 @@ export class CampaignRunner {
       // enemy for a tutorial or to clear the default AI base before scripting.
       clearPlayer: (pid) => self.clearPlayer(pid),
 
-      // Spawn one unit for `pid` at TILE coords (converted to fp centers).
-      spawnFor: (pid, type, tx, ty) => sim.spawnUnit(pid, type, tileToFp(tx | 0), tileToFp(ty | 0)),
+      // Resolve a marker NAME (from an ASCII mission map) to {x,y} tile coords.
+      marker: (name) => self.marker(name),
+
+      // Spawn one unit for `pid` at TILE coords OR a marker NAME. The first coord
+      // arg may be a marker-name string (in which case the 4th arg is ignored).
+      spawnFor: (pid, type, tx, ty) => {
+        const p = self.resolveTileArg(tx, ty);
+        return sim.spawnUnit(pid, type, tileToFp(p.x | 0), tileToFp(p.y | 0));
+      },
+      // Alias: spawn(pid, type, at) where `at` is a marker name or {x,y} tile.
+      spawn: (pid, type, at) => {
+        const p = self.resolveTileArg(at);
+        return sim.spawnUnit(pid, type, tileToFp(p.x | 0), tileToFp(p.y | 0));
+      },
 
       // Spawn a hostile wave of `n` units of `type` at the mission's ooze-origin
       // and attack-move them toward the player's start. Bumps _wavesDone by the
       // given wave index so objectives/win can track progress.
       spawnWave: (type, n, waveIndex) => self.spawnWave(type, n, waveIndex),
+
+      // ---- cinematics ----
+      // Fire-and-forget: queue + play a named cinematic from mission.cinematics.
+      playCinematic: (name) => self.cinematic.play(name),
+      isCinematicRunning: () => self.cinematic.isRunning(),
+      // Cheap input lock for non-cinematic scripted moments (reuses the overlay).
+      lockInput: (on) => self.cinematic.lockInput(on),
 
       // Pre-place a small, pre-damaged enemy base for an assault mission.
       woundEnemyBase: (pid) => self.woundEnemyBase(pid),
@@ -170,6 +231,15 @@ export class CampaignRunner {
 
   // ---- per-frame update (called from the main loop) -----------------------
   update() {
+    // drive the cinematic state machine first (frame-paced, ~60fps).
+    if (this.cinematic && this.cinematic.isRunning()) {
+      this.cinematic.update(1 / 60);
+      // while a scene plays we still let the dialogue bar tick (rare overlap),
+      // but hold mission triggers/objectives/win-lose until it ends so scripted
+      // beats can't be pre-empted by a trigger firing mid-scene.
+      this.tickDialogue();
+      return;
+    }
     if (this.ended) { this.tickDialogue(); return; }
     const sim = this.sim, m = this.mission;
 
@@ -362,10 +432,19 @@ export class CampaignRunner {
     `;
     $("campaign-layer").appendChild(card);
     const dismiss = () => {
+      if (card._dismissed) return;
+      card._dismissed = true;
       card.classList.add("out");
       setTimeout(() => card.remove(), 400);
-      // first spoken line + intro dialogue chain
-      if (m.intro) this.queueLine(m.intro.speaker, m.intro.text);
+      // Optional auto-play intro cinematic AFTER the card (documented order:
+      // card first so the blurb reads, then the scene). If present it takes
+      // precedence over the plain intro line chain (a cinematic can carry its
+      // own dialogue via `say` steps); otherwise fall back to the intro line.
+      if (m.introCinematic && m.cinematics && m.cinematics[m.introCinematic]) {
+        this.cinematic.play(m.introCinematic);
+      } else if (m.intro) {
+        this.queueLine(m.intro.speaker, m.intro.text);
+      }
     };
     card.addEventListener("click", dismiss);
     // auto-dismiss after ~4.5s

@@ -9,7 +9,7 @@ import { GameAudio } from "./audio.js";
 import { rebind } from "./ui/keys.js";
 import { TICK_MS, UNITS, BUILDINGS, FACTIONS } from "./core/data.js";
 import { FP, HALF, tileToFp } from "./core/fixed.js";
-import { CampaignRunner, mountCampaign } from "./campaign/campaign.js";
+import { CampaignRunner, mountCampaign, buildCustomMapFor } from "./campaign/campaign.js";
 
 const audio = new GameAudio();
 document.addEventListener("pointerdown", () => audio.init(), { once: true });
@@ -268,8 +268,19 @@ function startGame(mode, seed, netConn, opts, showcase, campaignMission) {
   }
 
   let hudTimer = 0;
+  let camPrevAlpha = 0;
   function frame(now) {
-    const alpha = game.update(now);
+    // Campaign cinematics PAUSE the sim: when the runner reports blocksSim(),
+    // skip game.update() this frame (no ticks advance) but keep rendering +
+    // driving the campaign layer so the scene plays. alpha holds so interpolation
+    // freezes cleanly. Skirmish/MP never sets `campaign`, so this is a no-op there.
+    let alpha;
+    if (campaign && campaign.blocksSim()) {
+      alpha = camPrevAlpha;
+    } else {
+      alpha = game.update(now);
+      camPrevAlpha = alpha;
+    }
     input.update(1 / 60);
     // campaign layer: evaluate triggers/objectives/win-lose off the live sim
     // (after the sim has stepped this frame). Cheap; only runs in campaign.
@@ -368,6 +379,15 @@ function startCampaignMission(mission) {
   const opts = Object.assign({}, mission.mapOpts || {});
   opts.factions = mission.factions || ["cogs", "cogs"];
   if (mission.aiDifficulty) opts.aidifficulty = mission.aiDifficulty;
+  // Optional hand-authored ASCII map: build it and hand it to the Sim as
+  // opts.customMap (Sim uses it verbatim, skipping generateMap). mapSeed then
+  // only seeds sim randomness. Missions without `map` generate procedurally.
+  try {
+    const customMap = buildCustomMapFor(mission);
+    if (customMap) opts.customMap = customMap;
+  } catch (e) {
+    console.error("Custom mission map failed to build; falling back to procedural:", e);
+  }
   // mode "ai" gives us player 0 = local, player 1 = AI. Missions with ai:false
   // still use "ai" mode but the runner strips the AI so player 1 stays scripted.
   const seed = mission.mapSeed | 0;
