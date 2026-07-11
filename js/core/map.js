@@ -104,14 +104,14 @@ export function generateMap(seed, opts = {}) {
     const s = (seed + attempt * 1000003) | 0;
     const map = buildCandidate(s, resolved);
     if (validate(map)) {
-      map.theme = resolved.theme < 0 ? ((seed >>> 0) % THEMES.length) : (resolved.theme % THEMES.length);
+      map.theme = resolved.theme;          // concrete since resolveOpts
       map.themeName = THEMES[map.theme].name;
       return map;
     }
   }
   // Never fail to start a match: hand back a known-good simple layout.
   const fb = fallbackMap();
-  fb.theme = resolved.theme < 0 ? ((seed >>> 0) % THEMES.length) : (resolved.theme % THEMES.length);
+  fb.theme = resolved.theme;
   fb.themeName = THEMES[fb.theme].name;
   return fb;
 }
@@ -131,7 +131,14 @@ function resolveOpts(seed, opts) {
     expansions = 1 + (r() % 2);                    // 1 or 2 extra pairs
   }
   const losBlockers = opts.losBlockers === undefined ? true : !!opts.losBlockers;
-  const theme = (opts.theme === undefined || opts.theme < 0) ? -1 : (opts.theme | 0);
+  // Theme resolves CONCRETELY here (stable per seed), never per-attempt: the
+  // barrier palette used during construction and the theme attached to the
+  // final map must be the same value. (It used to stay -1 and get re-derived
+  // from the ATTEMPT sub-seed inside buildCandidate — any map that validated
+  // on attempt > 0 grew another theme's barriers: lava basalt on frozen maps.)
+  const theme = (opts.theme === undefined || opts.theme < 0)
+    ? ((seed >>> 0) % THEMES.length)
+    : ((opts.theme | 0) % THEMES.length);
   // Vertical PROFILE is resolved from this STABLE per-seed stream (not the
   // per-attempt build rng), so each seed keeps a consistent elevation character
   // across the 24 validation retries — this gives an even spread of profiles
