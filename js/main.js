@@ -5,6 +5,7 @@ import { Renderer } from "./render/renderer.js";
 import { Input } from "./ui/input.js";
 import { Hud } from "./ui/hud.js";
 import { Net, makeCode } from "./net/net.js";
+import { Lobby } from "./net/lobby.js";
 import { GameAudio } from "./audio.js";
 import { rebind } from "./ui/keys.js";
 import { TICK_MS, UNITS, BUILDINGS, FACTIONS } from "./core/data.js";
@@ -334,6 +335,10 @@ $("btn-host").addEventListener("click", async () => {
   say(`Match code: ${code} - waiting for opponent...`);
   $("code-display").textContent = code;
   $("code-display").classList.remove("hidden");
+  // Also advertise this open game in the serverless lobby (if the player left
+  // "List publicly" checked). The lobby only DISCOVERS the code — the match
+  // connection itself is exactly the same as a manual host.
+  postCurrentGame(code);
   net.onOpen = () => {
     // host picks the seed AND the map options; both sides start identically.
     const seed = (Math.random() * 0x7fffffff) | 0;
@@ -343,13 +348,17 @@ $("btn-host").addEventListener("click", async () => {
     // need to cross for lockstep determinism).
     const { aidifficulty, ...netOpts } = opts;
     net.send({ k: "start", seed, opts: netOpts });
+    tearDownLobby();          // match starting: unpost + free the lobby id
     startGame("host", seed, net, opts);
   };
 });
 
-$("btn-join").addEventListener("click", async () => {
+// The shared join-by-code path. Both the manual "Join" button and clicking a
+// lobby room row funnel through here, so the match connection / lockstep is
+// identical regardless of how the code was discovered.
+async function joinByCode(code) {
   if (typeof Peer === "undefined") return say("PeerJS failed to load - check your connection", true);
-  const code = $("join-code").value.trim().toUpperCase();
+  code = (code || "").trim().toUpperCase();
   if (code.length < 4) return say("Enter the 5-letter match code", true);
   say("Connecting...");
   net = new Net();
@@ -361,14 +370,161 @@ $("btn-join").addEventListener("click", async () => {
   net.onMessage = (msg) => {
     // the join flow ignores local options; use exactly what the host sent so
     // both sides construct an identical map (lockstep requirement).
-    if (msg.k === "start") startGame("client", msg.seed, net, msg.opts || {});
+    if (msg.k === "start") { tearDownLobby(); startGame("client", msg.seed, net, msg.opts || {}); }
   };
   net.onOpen = () => say("Connected - starting...");
   net.onClose = () => say("Connection failed or host left", true);
   setTimeout(() => {
     if (!window.RTS) say("No response from host - check the code", true);
   }, 8000);
+}
+
+$("btn-join").addEventListener("click", () => joinByCode($("join-code").value));
+
+// ---------- serverless lobby wiring ----------
+// A second, independent Peer instance (see lobby.js) discovers open matches
+// over the PeerJS broker. It NEVER touches the match Net class, so any lobby
+// failure leaves manual codes fully working.
+const LIST_PUBLIC_KEY = "webrts-list-public";
+const listPublicEl = $("list-public");
+if (listPublicEl) {
+  try {
+    const saved = localStorage.getItem(LIST_PUBLIC_KEY);
+    if (saved !== null) listPublicEl.checked = saved === "1";
+  } catch {}
+  listPublicEl.addEventListener("change", () => {
+    try { localStorage.setItem(LIST_PUBLIC_KEY, listPublicEl.checked ? "1" : "0"); } catch {}
+  });
+}
+
+let lobby = null;
+let latestRooms = [];
+
+function esc(s) {
+  // DOM-safe: room names are untrusted free text. We only ever set them via
+  // textContent (below) so this is belt-and-suspenders; never innerHTML a name.
+  return String(s == null ? "" : s);
+}
+
+function ageText(ts) {
+  const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+  if (s < 60) return "just now";
+  const m = Math.floor(s / 60);
+  return m + (m === 1 ? " min ago" : " min ago");
+}
+
+function renderRooms() {
+  const box = $("lobby-rooms");
+  if (!box) return;
+  box.textContent = "";
+  if (!latestRooms.length) {
+    const empty = document.createElement("div");
+    empty.className = "lobby-empty";
+    empty.textContent = lobby && lobby.role === "offline"
+      ? "Lobby unavailable - you can still create or join by code."
+      : "No open matches right now. Create one, or join by code.";
+    box.appendChild(empty);
+    return;
+  }
+  for (const r of latestRooms) {
+    const row = document.createElement("div");
+    row.className = "lobby-room";
+    const body = document.createElement("div");
+    body.className = "lobby-room-body";
+    const name = document.createElement("div");
+    name.className = "lobby-room-name";
+    name.textContent = esc(r.name);                 // textContent => no HTML injection
+    const sub = document.createElement("div");
+    sub.className = "lobby-room-sub";
+    const bits = [];
+    if (r.map) bits.push(esc(r.map));
+    if (r.faction) bits.push(esc(r.faction));
+    bits.push(ageText(r.ts || Date.now()));
+    sub.textContent = bits.join("  -  ");
+    body.appendChild(name);
+    body.appendChild(sub);
+    const join = document.createElement("div");
+    join.className = "lobby-room-join";
+    join.textContent = "Join";
+    row.appendChild(body);
+    row.appendChild(join);
+    row.addEventListener("click", () => joinByCode(r.code));
+    box.appendChild(row);
+  }
+}
+
+function setLobbyState(role) {
+  const el = $("lobby-state");
+  if (!el) return;
+  el.classList.remove("is-host", "is-client", "is-offline");
+  if (role === "host") { el.textContent = "Lobby: connected (host)"; el.classList.add("is-host"); }
+  else if (role === "client") { el.textContent = "Lobby: connected"; el.classList.add("is-client"); }
+  else if (role === "connecting") { el.textContent = "Lobby: connecting..."; }
+  else { el.textContent = "Lobby: offline - use codes"; el.classList.add("is-offline"); }
+}
+
+// Summarize the currently-selected map options for a room listing.
+function mapSummary(opts) {
+  const themeIdx = opts.theme;
+  const theme = (typeof themeIdx === "number" && THEME_NAMES[themeIdx]) ? THEME_NAMES[themeIdx] : "random theme";
+  const spawns = opts.spawns ? opts.spawns + " spawns" : "random spawns";
+  const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+  return `${cap(theme)} - ${cap(spawns)}`;
+}
+
+// Advertise the open game we just created (if "List publicly" is on).
+function postCurrentGame(code) {
+  if (!lobby || !listPublicEl || !listPublicEl.checked) return;
+  const opts = readMapOpts();
+  const faction = (opts.factions && opts.factions[0]) || "";
+  const player = "Player";
+  const room = { code, name: `${player}'s game`, map: mapSummary(opts), faction };
+  lobby.post(room);
+  const mine = $("lobby-mine");
+  if (mine) {
+    mine.classList.remove("hidden");
+    mine.textContent = "";
+    const b = document.createElement("b");
+    b.textContent = code;
+    mine.appendChild(document.createTextNode("Listed as "));
+    mine.appendChild(b);
+    mine.appendChild(document.createTextNode(" - waiting for an opponent"));
+  }
+}
+
+// Match starting or leaving the menu: unpost + destroy the lobby peer so we
+// free the well-known id and never strand a ghost host.
+function tearDownLobby() {
+  const mine = $("lobby-mine");
+  if (mine) mine.classList.add("hidden");
+  if (lobby) { try { lobby.unpost(); } catch {} try { lobby.destroy(); } catch {} lobby = null; }
+}
+
+function startLobby() {
+  if (lobby || typeof Peer === "undefined") return;
+  lobby = new Lobby();
+  lobby.onStatus = (role) => setLobbyState(role);
+  lobby.onRooms = (rooms) => { latestRooms = rooms || []; renderRooms(); };
+  setLobbyState("connecting");
+  lobby.start();
+}
+
+$("btn-lobby-refresh")?.addEventListener("click", () => {
+  if (lobby && lobby.role !== "offline") {
+    // client asks the host for a fresh list; host just re-renders its own table
+    if (lobby.role === "client") lobby._sendToHost({ k: "list" });
+    renderRooms();
+  } else {
+    startLobby();
+  }
 });
+
+// periodic age re-render so "X min ago" stays fresh
+setInterval(() => { if (!menu.classList.contains("hidden") && latestRooms.length) renderRooms(); }, 30000);
+
+// Boot the lobby once PeerJS is available. It runs quietly in the background;
+// if the broker is unreachable it degrades to "offline" and codes still work.
+startLobby();
 
 // ---------- campaign wiring ----------
 // The campaign is entirely self-contained: it only constructs a Game when the

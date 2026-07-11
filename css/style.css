@@ -349,6 +349,140 @@ kbd {
   box-shadow: 0 1px 3px rgba(58, 68, 82, 0.15);
 }
 
+/* list-publicly checkbox — sits under the Create/Join row */
+.list-public {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 2px 0;
+  font-size: var(--fs-sm);
+  font-weight: 700;
+  color: var(--ink-dim);
+  cursor: pointer;
+  user-select: none;
+}
+.list-public input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+/* ---------- serverless lobby: "Find Match" ---------- */
+.find-match {
+  margin-top: 22px;
+  padding-top: 20px;
+  border-top: 1px solid var(--edge);
+  text-align: left;
+}
+.find-match-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.find-match-title {
+  font-size: var(--fs-xs);
+  font-weight: 800;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.find-match-right { display: inline-flex; align-items: center; gap: 8px; }
+.lobby-state {
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  color: var(--muted);
+}
+.lobby-state.is-host,
+.lobby-state.is-client { color: var(--good-deep); }
+.lobby-state.is-offline { color: var(--bad-deep); }
+.lobby-refresh {
+  padding: 4px 12px;
+  font-family: inherit;
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  color: var(--ink-dim);
+  background: rgba(73, 58, 34, 0.06);
+  border: 1px solid var(--edge);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.14s, border-color 0.14s, color 0.14s;
+}
+.lobby-refresh:hover { background: rgba(73, 58, 34, 0.12); color: var(--ink); border-color: var(--edge-bright); }
+
+/* "your game is listed" banner while hosting a posted room */
+.lobby-mine {
+  margin-bottom: 10px;
+  padding: 9px 12px;
+  font-size: var(--fs-sm);
+  font-weight: 700;
+  color: var(--good-deep);
+  background: rgba(47, 158, 79, 0.10);
+  border: 1px solid rgba(47, 158, 79, 0.35);
+  border-radius: 12px;
+  box-shadow: var(--inner-hi);
+}
+.lobby-mine b { color: var(--good-deep); }
+
+/* the room list */
+.lobby-rooms {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+.lobby-empty {
+  padding: 12px 4px;
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  text-align: center;
+}
+.lobby-room {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 12px;
+  border: 1px solid var(--edge);
+  border-radius: 12px;
+  background: linear-gradient(180deg, #ffffff, #f7f2e9);
+  box-shadow: var(--inner-hi), var(--bevel);
+  cursor: pointer;
+  transition: background 0.14s, border-color 0.14s, transform 0.12s, box-shadow 0.14s;
+}
+.lobby-room:hover {
+  border-color: rgba(233, 138, 21, 0.55);
+  transform: translateY(-1px);
+  box-shadow: var(--inner-hi), var(--bevel), 0 6px 16px rgba(255, 156, 32, 0.22);
+}
+.lobby-room-body { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1; }
+.lobby-room-name {
+  font-size: var(--fs-md);
+  font-weight: 700;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.lobby-room-sub {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  letter-spacing: 0.2px;
+}
+.lobby-room-join {
+  flex: none;
+  padding: 5px 14px;
+  font-size: var(--fs-xs);
+  font-weight: 800;
+  letter-spacing: 0.5px;
+  color: var(--accent-deep);
+  background: var(--accent-soft);
+  border: 1px solid rgba(233, 138, 21, 0.4);
+  border-radius: 999px;
+}
+
 /* controls reference — two-column key grid */
 .menu-help {
   margin-top: 26px;

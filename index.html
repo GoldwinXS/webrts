@@ -46,9 +46,28 @@
             <button id="btn-join" class="menu-btn">Join</button>
           </div>
         </div>
+        <label id="list-public-row" class="list-public">
+          <input type="checkbox" id="list-public" checked />
+          <span>List my match publicly so people can find it</span>
+        </label>
         <button id="btn-showcase" class="menu-btn">Dev Gallery</button>
         <div id="code-display" class="code hidden"></div>
         <div id="menu-msg" class="menu-msg"></div>
+      </div>
+
+      <!-- serverless lobby: discover open matches via a peer-hosted rendezvous -->
+      <div class="find-match">
+        <div class="find-match-head">
+          <span class="find-match-title">Find Match</span>
+          <span class="find-match-right">
+            <span id="lobby-state" class="lobby-state">Lobby: offline</span>
+            <button type="button" id="btn-lobby-refresh" class="lobby-refresh" title="Refresh list">Refresh</button>
+          </span>
+        </div>
+        <div id="lobby-mine" class="lobby-mine hidden"></div>
+        <div id="lobby-rooms" class="lobby-rooms">
+          <div class="lobby-empty">No open matches right now. Create one, or join by code.</div>
+        </div>
       </div>
 
       <div class="map-opts">
@@ -149,6 +168,12 @@
         <span id="res-gas">0</span></span>
       <span class="res"><svg viewBox="0 0 16 16" width="14" height="14"><rect x="2" y="6" width="12" height="8" rx="1" fill="#8b949e"/><rect x="5" y="2" width="6" height="4" rx="1" fill="#8b949e"/></svg>
         <span id="res-supply">0 / 0</span></span>
+      <span class="res"><svg viewBox="0 0 16 16" width="14" height="14">
+        <!-- game clock -->
+        <circle cx="8" cy="8" r="6.4" fill="none" stroke="#8b949e" stroke-width="1.6"/>
+        <path d="M8 4.4 L8 8 L10.8 9.8" fill="none" stroke="#8b949e" stroke-width="1.6" stroke-linecap="round"/>
+        </svg>
+        <span id="res-time">0:00</span></span>
       <span id="net-status" class="status hidden"></span>
       <div class="topbar-actions">
         <button id="btn-fullscreen" class="icon-btn" title="Fullscreen (edge scrolling needs it)">
