@@ -106,9 +106,24 @@ export class AI {
     // reset was blowing the expansion's saving-timeout race in testing.
     for (const w of workers) {
       if (w.order.kind === "idle" && w.id !== this.expandMoteId) {
-        const patch = sim.nearestEntity(w.x, w.y, FP * 16, (e) => e.type === "mineral" && e.amount > 0);
+        // Near patch first (cheap, common case). If the local line is mined
+        // out, WIDEN progressively rather than idling: FP*40, then map-wide —
+        // scoring by proximity to our NEAREST OWN FINISHED DEPOSIT so a
+        // stranded worker walks to another of OUR bases, never to a patch that
+        // sits closer to an enemy deposit than to any of ours.
+        let patch = sim.nearestEntity(w.x, w.y, FP * 16, (e) => e.type === "mineral" && e.amount > 0);
+        if (!patch) patch = this.bestReGatherPatch(sim, w, hqs, FP * 40);
+        if (!patch) patch = this.bestReGatherPatch(sim, w, hqs, FP * 999);
         if (patch) cmds.push({ t: "gather", ids: [w.id], targetId: patch.id });
       }
+    }
+
+    // 1a-2. SATURATION REBALANCING (every ~50 ticks): shed excess/stranded
+    // gatherers from over-saturated or depleted bases to under-capacity patches
+    // near our OTHER deposits, so income doesn't collapse when a main mines out
+    // while a second base sits under-worked.
+    if (sim.tick % 50 === 0 && hqs.length > 1) {
+      this.rebalanceGatherers(sim, cmds, hqs, workers);
     }
 
     // 1b. EXPANSION (runs EARLY so the deposit build claims minerals before the
@@ -685,6 +700,100 @@ export class AI {
     return cmds;
   }
 
+  // Best patch for a stranded/idle worker to re-gather, within maxDist of the
+  // worker. Scores by proximity to our NEAREST OWN FINISHED DEPOSIT, and NEVER
+  // returns a patch that sits closer to an enemy deposit than to any of ours
+  // (don't feed workers into the enemy's base). Deterministic: id-order scan,
+  // tie-break by lower distance-to-own-deposit then lower id.
+  bestReGatherPatch(sim, w, hqs, maxDist) {
+    if (!hqs.length) return null;
+    // enemy finished deposits (for the "not nearer the enemy" guard)
+    const enemyDeps = [];
+    for (const e of sim.entities) {
+      if (e.building && e.done && e.owner >= 0 && e.owner !== this.pid &&
+          BUILDINGS[e.type]?.deposit) enemyDeps.push(e);
+    }
+    const md2 = maxDist * maxDist;
+    let best = null, bestOwnD2 = 0;
+    for (const e of sim.entities) {
+      if (e.type !== "mineral" || e.amount <= 0) continue;
+      if (dist2(w.x, w.y, e.x, e.y) > md2) continue;
+      // nearest OWN deposit distance
+      let ownD2 = Infinity;
+      for (const hq of hqs) { const d = dist2(hq.x, hq.y, e.x, e.y); if (d < ownD2) ownD2 = d; }
+      // reject if any enemy deposit is closer than our nearest own
+      let enemyCloser = false;
+      for (const ed of enemyDeps) { if (dist2(ed.x, ed.y, e.x, e.y) < ownD2) { enemyCloser = true; break; } }
+      if (enemyCloser) continue;
+      if (!best || ownD2 < bestOwnD2 || (ownD2 === bestOwnD2 && e.id < best.id)) {
+        best = e; bestOwnD2 = ownD2;
+      }
+    }
+    return best;
+  }
+
+  // Saturation-aware rebalancing. For each OWN finished deposit, count the
+  // gatherers assigned to its local patches vs the local capacity (live patches
+  // within ~8 tiles × 2 = the ~2-workers-per-patch saturation ceiling). Deposits
+  // that are OVER capacity (or whose local patches are depleted, so their
+  // gatherers are stranded) shed one excess gatherer each to a patch near an
+  // UNDER-capacity deposit — an explicit gather command to a specific patch.
+  // Deterministic throughout: deposits scanned in id order, workers in id order.
+  rebalanceGatherers(sim, cmds, hqs, workers) {
+    const near2 = (FP * 8) * (FP * 8);
+    // capacity + assigned per deposit (id order)
+    const deps = hqs.slice().sort((a, b) => a.id - b.id);
+    const info = deps.map((hq) => {
+      let cap = 0, live = 0;
+      for (const e of sim.entities) {
+        if (e.type !== "mineral" || e.amount <= 0) continue;
+        if (dist2(hq.x, hq.y, e.x, e.y) <= near2) { cap += 2; live++; }
+      }
+      return { hq, cap, live, assigned: 0 };
+    });
+    // assign each gathering worker to its nearest deposit bucket
+    const workerDep = new Map();
+    for (const w of workers) {
+      if (w.order.kind !== "gather" || w.order.resource === "gas") continue;
+      if (w.id === this.expandMoteId) continue;
+      let bi = -1, bd = Infinity;
+      for (let i = 0; i < info.length; i++) {
+        const d = dist2(info[i].hq.x, info[i].hq.y, w.x, w.y);
+        if (d < bd) { bd = d; bi = i; }
+      }
+      if (bi >= 0) { info[bi].assigned++; workerDep.set(w.id, bi); }
+    }
+    // an under-capacity deposit is one with spare room AND live patches to fill
+    const receivers = info.filter((d) => d.live > 0 && d.assigned < d.cap);
+    if (!receivers.length) return;
+    // shed from over-saturated or depleted (no live patch) deposits, one worker
+    // each cycle per donor, to the most under-worked receiver. Workers scanned
+    // in id order for determinism.
+    const sorted = workers.filter((w) => workerDep.has(w.id)).sort((a, b) => a.id - b.id);
+    for (const w of sorted) {
+      const di = workerDep.get(w.id);
+      const donor = info[di];
+      const oversat = donor.assigned > donor.cap;
+      const stranded = donor.live === 0;
+      if (!oversat && !stranded) continue;
+      // pick the receiver with the biggest deficit (cap-assigned), tie by id
+      let rcv = null, bestDeficit = 0;
+      for (const r of receivers) {
+        const deficit = r.cap - r.assigned;
+        if (deficit <= 0) continue;
+        if (!rcv || deficit > bestDeficit || (deficit === bestDeficit && r.hq.id < rcv.hq.id)) {
+          rcv = r; bestDeficit = deficit;
+        }
+      }
+      if (!rcv) break;
+      // pick a specific under-worked live patch near the receiver deposit
+      const patch = sim.pickPatch(rcv.hq, FP * 10);
+      if (!patch) continue;
+      cmds.push({ t: "gather", ids: [w.id], targetId: patch.id });
+      donor.assigned--; rcv.assigned++;
+    }
+  }
+
   // A point at the enemy's starting mineral line (for harass). Falls back to
   // the enemy start tile. Deterministic: nearest mineral to the enemy start.
   enemyMineralLine(sim) {
@@ -768,6 +877,13 @@ export class AI {
       }
     }
     const thinning = nearbyMinerals < 3000;
+    // DEPLETION: minerals near our deposits have all but run out (income is
+    // dying). Banking-to-richMinerals stalls exactly here — with no income the
+    // bank never climbs to the tier threshold — so a depleted base MUST expand
+    // regardless of the bank flag, or it just slowly mines its main to zero and
+    // the game "gets easy" (the reported symptom). The difficulty cap still
+    // gates it (Easy = 0 expansions, so Easy stays home even when depleted).
+    const depleted = nearbyMinerals < 1200;
     const armyProduction = sim.entities.some((e) => e.owner === this.pid && e.building && e.done &&
       (e.type === "barracks" || e.type === "den" || e.type === "forge"));
     // Expand as an OPENING priority: once army production is online and the
@@ -775,7 +891,7 @@ export class AI {
     // already steamrolled a passive opponent). A lower bar than full saturation
     // so the deposit actually completes while the game is still going.
     const developed = workers.length >= 8 && armyProduction;
-    if (!rich && !thinning && !developed) return;
+    if (!rich && !thinning && !developed && !depleted) return;
 
     // We WANT to expand. If we can't afford the deposit yet, flag "saving" so
     // the faction branches pause their army training this cycle and let the

@@ -76,12 +76,21 @@ export class Sim {
     // creep canvas only when needed. Presentation-facing, not checksummed.
     this.gooVersion = 0;
 
+    // Per-patch amount VARIANCE so a base's patches don't all mine out on the
+    // same trip. Each patch gets its base amount ±spread%, deterministically
+    // derived from an integer hash of its position + seed (patchAmount below) —
+    // NO Math.random(), so lockstep peers agree. FAIRNESS: symmetry partners
+    // must get IDENTICAL amounts, so the hash key is normalized over the
+    // mirrored pair (see patchKey): both rotate and reflect partners are
+    // computed and the MIN packed coord is used, making the key symmetric.
     for (const m of this.map.minerals) {
-      this.addEntity({ type: "mineral", owner: -1, x: m.x, y: m.y, hp: 0, maxHp: 0, amount: PATCH_AMOUNT, radius: (FP * 0.4) | 0, minerBy: 0 });
+      const amount = this.patchAmount(m.x, m.y, PATCH_AMOUNT, 25);   // ±25%
+      this.addEntity({ type: "mineral", owner: -1, x: m.x, y: m.y, hp: 0, maxHp: 0, amount, radius: (FP * 0.4) | 0, minerBy: 0 });
     }
     // Gold patches: contested mid-map minerals — smaller pool, richer trips.
     for (const m of (this.map.golds || [])) {
-      this.addEntity({ type: "mineral", rich: true, owner: -1, x: m.x, y: m.y, hp: 0, maxHp: 0, amount: GOLD_PATCH_AMOUNT, radius: (FP * 0.4) | 0, minerBy: 0 });
+      const amount = this.patchAmount(m.x, m.y, GOLD_PATCH_AMOUNT, 15); // ±15%
+      this.addEntity({ type: "mineral", rich: true, owner: -1, x: m.x, y: m.y, hp: 0, maxHp: 0, amount, radius: (FP * 0.4) | 0, minerBy: 0 });
     }
     // Neutral watchtowers: sole ground presence nearby claims the tower's
     // vision for that player (see updateFog). claimedBy is sim state.
@@ -119,6 +128,53 @@ export class Sim {
       }
     }
     this.updateFog();
+  }
+
+  // ---------- mineral variance ----------
+  // A tiny integer avalanche mixer (splitmix32 finalizer) — deterministic,
+  // Math.random-free, and well-scrambled so nearby patch coords produce very
+  // different amounts. Returns a uint32.
+  hashMix(v) {
+    let x = (v ^ (this.seed | 0)) >>> 0;
+    x = Math.imul(x ^ (x >>> 16), 0x45d9f3b) >>> 0;
+    x = Math.imul(x ^ (x >>> 16), 0x45d9f3b) >>> 0;
+    x = (x ^ (x >>> 16)) >>> 0;
+    return x;
+  }
+
+  // Canonical, symmetry-FAIR key for a patch at fp coords (x,y). A mirrored pair
+  // must hash to the same value so partner patches carry identical amounts.
+  // The map is either 180° rotational OR axis-reflected symmetric, and the sim
+  // isn't told which — so we compute BOTH candidate partners (over-normalizing
+  // across both symmetry types is harmless for fairness) and key off the MIN
+  // packed coord across {self, rotate-partner, reflect-x-partner,
+  // reflect-y-partner}. `partner(tx,ty)` in map.js emits fp tile centers, and a
+  // tile t maps to fp t*FP+HALF; its rotate partner (W-1-t) maps to fp
+  // W*FP-(t*FP+HALF), i.e. mapW*FP - x. Same algebra gives the reflect cases.
+  patchKey(x, y) {
+    const W = this.map.w * FP, H = this.map.h * FP;
+    const rx = W - x, ry = H - y;     // rotate partner (and each reflect axis reuses one coord)
+    // pack a coord pair into one integer (coords < 64*256 = 16384 < 2^15)
+    const pack = (px, py) => (((px & 0xffff) << 16) | (py & 0xffff)) >>> 0;
+    // candidates: self, rotate(rx,ry), reflect-across-vertical(rx,y),
+    // reflect-across-horizontal(x,ry). MIN over all keeps it order-independent.
+    let k = pack(x, y);
+    const c1 = pack(rx, ry), c2 = pack(rx, y), c3 = pack(x, ry);
+    if (c1 < k) k = c1;
+    if (c2 < k) k = c2;
+    if (c3 < k) k = c3;
+    return k;
+  }
+
+  // Deterministic per-patch amount: base ±spreadPct%, centered on base. Uses the
+  // symmetry-fair patchKey so mirror partners are identical, and the hashMix
+  // avalanche so neighbouring patches differ. Offset is signed and symmetric
+  // about 0, so the expected total stays centered on `base`.
+  patchAmount(x, y, base, spreadPct) {
+    const hash = this.hashMix(this.patchKey(x, y));
+    const range = 2 * spreadPct + 1;                 // e.g. ±25 -> 51 buckets
+    const pct = (hash % range) - spreadPct;          // -spreadPct .. +spreadPct
+    return (base + ((base * pct) / 100 | 0)) | 0;
   }
 
   // ---------- entity helpers ----------
@@ -1644,7 +1700,13 @@ export class Sim {
         // refinery/sump destroyed: give up (worker can't re-target a geyser itself)
         if (!node || !isGasBuilding(node.type) || !node.done) { this.popNext(u); return; }
       } else if (!node || node.amount <= 0) {
-        const next = this.pickPatch(u, FP * 14);
+        // Target patch is mined out / gone: re-target within the same base
+        // cluster (FP*14). If nothing that close remains, retry ONCE wider
+        // (FP*40) so a worker whose whole near patch died still finds the rest
+        // of its base rather than idling — but never map-wide (that's the AI's
+        // job; a human keeps agency over cross-map hauls). Deterministic,
+        // applies to ALL players (pickPatch scans in id order).
+        const next = this.pickPatch(u, FP * 14) || this.pickPatch(u, FP * 40);
         if (next) { o.targetId = next.id; u.path = null; }
         else this.popNext(u);
         return;
