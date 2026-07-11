@@ -146,6 +146,12 @@ export class Effects {
     // hemisphere shell for the Shield Dome bubble (top half of a sphere,
     // open bottom so it reads as a dome sitting on the ground).
     this.domeGeo = new THREE.SphereGeometry(1, 24, 12, 0, Math.PI * 2, 0, Math.PI * 0.5);
+    // small elongated rocket body (a stubby capsule-ish cylinder) for the
+    // Rumble barrage tracers — points along +Z so lookAt() aims it down-range.
+    this.rocketGeo = new THREE.CylinderGeometry(0.06, 0.11, 0.42, 7);
+    this.rocketGeo.rotateX(Math.PI / 2);   // long axis -> +Z (matches bolt/lookAt)
+    // flat stretched quad for dash afterimages (a soft additive streak plane)
+    this.streakGeo = new THREE.PlaneGeometry(1, 1);
     // optional terrain height sampler (set by the renderer). When present,
     // effects are lifted onto the terrain surface. Call signatures unchanged.
     this.heightAt = null;
@@ -312,17 +318,80 @@ export class Effects {
     this.sparks.burst(x, 0.25 + y, z, 14, color, 3, 0.45, 1.6);
   }
 
-  // Sentinel Shield Dome: a translucent cyan hemisphere that pops in over the
-  // field radius and fades out (~0.5s), plus a bright edge hoop so the ground
-  // footprint reads. `r` is the world radius.
+  // Sentinel Shield Dome CAST flash: a beefier translucent cyan hemisphere that
+  // pops in over the field radius and fades out, a bright double edge hoop, an
+  // upward burst of shield sparks and a rising energy flash so the CAST reads as
+  // a big event. The DURATION is now sold by a persistent per-unit shimmer in
+  // the render loop (renderer reads domeUntil), so this is the punchy one-shot.
   dome(x, z, r, color = 0x66d8ff) {
     const y = this.gy(x, z);
-    const m = new THREE.Mesh(this.domeGeo, this.basic(color, 0.32));
+    const m = new THREE.Mesh(this.domeGeo, this.basic(color, 0.42));
     m.material.side = THREE.DoubleSide;
     m.position.set(x, 0.02 + y, z);
-    m.scale.set(r, r * 0.62, r);   // slightly squashed dome
-    this.add(m, { kind: "dome", t: 0, dur: 0.55, r });
-    this.hoop(x, z, color, r * 0.85, r, 0.5, 0.85);
+    m.scale.set(r, r * 0.66, r);   // slightly squashed dome
+    this.add(m, { kind: "dome", t: 0, dur: 0.8, r });
+    // twin edge hoops (crisp footprint + a trailing echo) so the radius reads
+    this.hoop(x, z, color, r * 0.75, r, 0.5, 0.9);
+    this.hoop(x, z, color, r * 0.35, r * 1.05, 0.7, 0.55);
+    // shield sparks jetting up + a bright core flash rising off the caster
+    this.sparks.burst(x, 0.4 + y, z, 18, color, 2.2, 0.5, 4);
+    this.sparks.burst(x, 0.3 + y, z, 8, 0xffffff, 1.4, 0.4, 3);
+    const f = new THREE.Mesh(this.flashGeo, this.basic(color, 0.9));
+    f.position.set(x, 0.7 + y, z);
+    f.scale.setScalar(2.6);
+    this.add(f, { kind: "flash", t: 0, dur: 0.3 });
+  }
+
+  // Rumble Rocket Barrage tracer: a small glowing rocket that flies from the
+  // banshee's launch point up-and-over to the impact point over ~200ms, leaving
+  // smoke puffs, then hands off to the caller's explosion. from/to are world
+  // (x,z); fromY/toY are absolute world heights. The rocket arcs (a low lob) so
+  // it reads as a launched projectile rather than a straight bolt.
+  rocket(ax, az, ay, bx, bz, by, color = 0xffb347) {
+    const m = new THREE.Mesh(this.rocketGeo, new THREE.MeshBasicMaterial({
+      color, transparent: true, opacity: 0.98,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+    }));
+    m.position.set(ax, ay, az);
+    const d = Math.hypot(bx - ax, bz - az);
+    const dur = Math.max(0.15, Math.min(0.28, d / 26));
+    const arc = 0.9 + d * 0.18;   // lob height scales gently with distance
+    this.add(m, { kind: "rocket", t: 0, dur, ax, ay, az, bx, by, bz, arc, color, trail: 0 });
+    // launch flash + a puff of exhaust at the muzzle
+    const fl = new THREE.Mesh(this.flashGeo, this.basic(color, 0.9));
+    fl.position.set(ax, ay, az);
+    this.add(fl, { kind: "flash", t: 0, dur: 0.09 });
+    this.smoke.puff(ax, ay, az, 0.5, 0.7);
+  }
+
+  // Blink / Slipstream dash streak: 2-3 fading additive afterimage planes strung
+  // along the teleport path plus a stretched capsule streak, selling the travel
+  // the instant-teleport sim state can't. from/to are world (x,z); y is the
+  // absolute streak height (unit body height). tint is the team/ability color.
+  dashStreak(ax, az, bx, bz, y, color = 0x9fefff) {
+    const dx = bx - ax, dz = bz - az;
+    const d = Math.hypot(dx, dz) || 0.001;
+    const ux = dx / d, uz = dz / d;
+    const yaw = Math.atan2(ux, uz);
+    // 3 ghost silhouettes fading from start (dim) to end (bright), each a soft
+    // additive quad standing upright and facing broadside to the path.
+    const ghosts = 3;
+    for (let i = 0; i < ghosts; i++) {
+      const f = (i + 0.5) / ghosts;
+      const gx = ax + dx * f, gz = az + dz * f;
+      const q = new THREE.Mesh(this.streakGeo, this.basic(color, 0.28 + f * 0.28));
+      q.position.set(gx, y, gz);
+      q.rotation.y = yaw;
+      q.scale.set(0.5, 0.9, 1);
+      this.add(q, { kind: "streak", t: 0, dur: 0.32 + i * 0.04, startA: 0.28 + f * 0.28 });
+    }
+    // one long stretched core streak spanning the whole path (a bright capsule)
+    const core = new THREE.Mesh(this.streakGeo, this.basic(color, 0.7));
+    const mx = (ax + bx) / 2, mz = (az + bz) / 2;
+    core.position.set(mx, y, mz);
+    core.rotation.y = yaw + Math.PI / 2;   // stand the plane along the travel axis
+    core.scale.set(d, 0.5, 1);
+    this.add(core, { kind: "streak", t: 0, dur: 0.26, startA: 0.7 });
   }
 
   // Phantom phase blink: a quick refraction-ish flash + an afterimage hoop that
@@ -415,6 +484,13 @@ export class Effects {
       const p = fx.t / fx.dur;
       if (p >= 1) {
         if (fx.kind === "bolt") this.sparks.burst(fx.bx, fx.by || 0, fx.bz, 5, fx.color, 2, 0.3, 1);
+        if (fx.kind === "rocket") {
+          // rocket impact: fiery burst + smoke + a small shock hoop at the point
+          this.sparks.burst(fx.bx, fx.by, fx.bz, 16, fx.color, 4, 0.5, 2.2);
+          this.sparks.burst(fx.bx, fx.by, fx.bz, 6, 0xfff0c8, 2.4, 0.4, 1.8);
+          this.smoke.puff(fx.bx, fx.by, fx.bz, 0.9, 1.2);
+          this.hoop(fx.bx, fx.bz, 0xff8a3a, 0.3, 1.3, 0.35, 0.85);
+        }
         if (fx.kind === "wreck") {
           // impact: ground explosion where the wreck landed
           this.unitDeath(fx.x, fx.z, fx.color);
@@ -442,6 +518,28 @@ export class Effects {
           if (fx.t - fx.trail > 0.12) { fx.trail = fx.t; this.smoke.puff(fx.x, yy, fx.z, 0.5, 0.6); }
           break;
         }
+        case "rocket": {
+          // fly along the path with a low parabolic lob; orient the nose along
+          // the instantaneous velocity; drop smoke puffs as an exhaust trail.
+          const px = fx.ax + (fx.bx - fx.ax) * p;
+          const pz = fx.az + (fx.bz - fx.az) * p;
+          const lin = fx.ay + (fx.by - fx.ay) * p;
+          const py = lin + fx.arc * 4 * p * (1 - p);   // parabola peaking mid-flight
+          fx.obj.position.set(px, py, pz);
+          // aim the nose at a point slightly ahead on the arc
+          const p2 = Math.min(1, p + 0.06);
+          const nx = fx.ax + (fx.bx - fx.ax) * p2;
+          const nz = fx.az + (fx.bz - fx.az) * p2;
+          const ny = (fx.ay + (fx.by - fx.ay) * p2) + fx.arc * 4 * p2 * (1 - p2);
+          fx.obj.lookAt(nx, ny, nz);
+          fx.obj.material.opacity = 0.98;
+          if (fx.t - fx.trail > 0.02) { fx.trail = fx.t; this.smoke.puff(px, py, pz, 0.34, 0.5); }
+          break;
+        }
+        case "streak":
+          // dash afterimage: hold briefly then fade out
+          fx.obj.material.opacity = (fx.startA ?? 0.6) * (1 - p);
+          break;
         case "flash":
           fx.obj.scale.setScalar(1 + p * 2.2);
           fx.obj.material.opacity = 0.95 * (1 - p);

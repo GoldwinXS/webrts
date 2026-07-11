@@ -19,6 +19,7 @@ import { makeUnitVisual, makeBuildingVisual, makeMineralVisual, makeGeyserVisual
 import { UNITS } from "../core/data.js";
 import { THEMES } from "../core/map.js";
 import { Effects } from "./fx.js";
+import { buildCliffDressing } from "./cliffs.js";
 
 const W2 = (v) => v / FP;   // fp -> world units (1 tile = 1.0)
 const PX = 32;              // ground texture pixels per tile (32px seamless tiles)
@@ -57,7 +58,11 @@ export class Renderer {
 
     this.theme = THEMES[sim.map.theme || 0] || THEMES[0];
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(this.theme.sky);
+    // Dark slate stage as the clear/background so the off-map void below the
+    // horizon reads as a near-black table (the bright map sits like a diorama);
+    // the sky dome paints the actual sky above. Not pure black — theme-tinted.
+    const stageBg = new THREE.Color(0x161b22).lerp(new THREE.Color(this.theme.fog), 0.14);
+    this.scene.background = stageBg;
     this.scene.fog = new THREE.Fog(this.theme.fog, 55, 150);
 
     const start = sim.map.starts[localPlayer];
@@ -74,6 +79,8 @@ export class Renderer {
     this.buildLights();
     this.buildGround();
     this.buildBarriers();
+    // 3D rock cladding on every cliff face — walls read as rock, not quads
+    this.cliffDressing = buildCliffDressing(this.scene, this.sim.map, this.theme, (x, z) => this.heightAt(x, z));
     this.buildDecos();
     this.buildSky();      // bright daytime gradient dome (replaces deep-space stars)
     this.fx = new Effects(this.scene);
@@ -89,6 +96,9 @@ export class Renderer {
     this.buildTargetRings();
     this.buildPlacementGrid();
     this.taskFxTimers = new Map();   // entity id -> next spark time (render-only)
+    this.blinkFx = new Map();        // entity id -> { yaw, start, dur } blink override
+    this.domeShimmer = new Map();    // entity id -> persistent shield hemisphere mesh
+    this.buffFxTimers = new Map();   // entity id -> next duration-buff spark time
 
     // post-processing: MSAA target + bloom (threshold 1.0 = only HDR emissive blooms)
     const rt = new THREE.WebGLRenderTarget(innerWidth, innerHeight, { samples: 4, type: THREE.HalfFloatType });
@@ -150,15 +160,28 @@ export class Renderer {
     // ash, cold peach sun over ice — gives the skyline a time-of-day feel
     const glow = new THREE.Color(this.theme.name === "ashen" ? 0xffb27a
                : this.theme.name === "frozen" ? 0xffd9c2 : 0xffe9b0);
+    // Dark slate STAGE below the horizon: the off-map void reads as a theme-
+    // tinted near-black table so the bright map sits like a lit diorama on it.
+    // Not pure black (that fights the bright palette) — 0x161b22 whispered
+    // toward the theme fog color.
+    const stage = new THREE.Color(0x161b22).lerp(new THREE.Color(this.theme.fog), 0.14);
     const pos = geo.attributes.position;
     const col = new Float32Array(pos.count * 3);
     const c = new THREE.Color();
     for (let i = 0; i < pos.count; i++) {
-      const t = Math.max(0, Math.min(1, (pos.getY(i) / R + 0.12) / 0.85));
-      c.copy(horizon).lerp(zenith, t);
-      // low-band glow, strongest right at the horizon, gone by mid-sky
-      const g = Math.max(0, 0.35 - t) / 0.35;
-      c.lerp(glow, g * g * 0.55);
+      const yN = pos.getY(i) / R;                 // -1 (nadir) .. +1 (zenith)
+      const t = Math.max(0, Math.min(1, (yN + 0.12) / 0.85));
+      if (yN < 0) {
+        // below horizon: ramp the horizon color down into the dark stage, so
+        // the very bottom of the dome is near-black slate with no hard seam.
+        const d = Math.min(1, -yN / 0.28);        // 0 at horizon -> 1 by y=-0.28*R
+        c.copy(horizon).lerp(stage, d * d);
+      } else {
+        c.copy(horizon).lerp(zenith, t);
+        // low-band glow, strongest right at the horizon, gone by mid-sky
+        const g = Math.max(0, 0.35 - t) / 0.35;
+        c.lerp(glow, g * g * 0.55);
+      }
       col[i * 3] = c.r; col[i * 3 + 1] = c.g; col[i * 3 + 2] = c.b;
     }
     geo.setAttribute("color", new THREE.BufferAttribute(col, 3));
@@ -1737,6 +1760,85 @@ export class Renderer {
     }
   }
 
+  // Per-unit ability-duration overlays, driven every frame off raw sim fields
+  // (domeUntil / stimUntil / frenzyUntil / burnUntil). Render-only, cheap, and
+  // attached to a scene-level pool keyed by entity id so they follow the unit
+  // and pop/clear the instant the buff expires.
+  updateBuffOverlays(g, e, x, z, t, terrainY) {
+    const tick = this.sim.tick;
+    const bodyY = terrainY + (g.userData.flyer ? g.userData.cruise || 2.0 : 0);
+
+    // 1) Sentinel Shield Dome: a persistent translucent cyan hemisphere +
+    //    rim-pulse around any unit whose domeUntil is still in the future.
+    const domed = e.maxShield && e.domeUntil && tick < e.domeUntil;
+    let shim = this.domeShimmer.get(e.id);
+    if (domed) {
+      if (!shim) {
+        if (!this.shimmerGeo) {
+          this.shimmerGeo = new THREE.SphereGeometry(1, 18, 10, 0, Math.PI * 2, 0, Math.PI * 0.55);
+        }
+        const mat = new THREE.MeshBasicMaterial({
+          color: 0x8ce8ff, transparent: true, opacity: 0.3,
+          blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+        });
+        shim = new THREE.Mesh(this.shimmerGeo, mat);
+        shim.frustumCulled = false;
+        this.scene.add(shim);
+        this.domeShimmer.set(e.id, shim);
+      }
+      // size the bubble to the unit; gentle breathing so it shimmers alive
+      const r = (UNITS[e.type]?.radius || 100) / FP + 0.5;
+      const pulse = 0.82 + 0.18 * Math.sin(t * 4 + e.id);
+      shim.visible = g.visible;
+      shim.position.set(x, bodyY + 0.05, z);
+      shim.scale.set(r * pulse, r * 0.9 * pulse, r * pulse);
+      shim.material.opacity = (0.22 + 0.12 * Math.sin(t * 5 + e.id)) * (g.visible ? 1 : 0);
+    } else if (shim) {
+      // expired: a quick pop hoop where it vanished, then dispose the shimmer
+      if (g.visible) this.fx.hoop(x, z, 0x8ce8ff, 0.4, 1.4, 0.35, 0.7);
+      this.scene.remove(shim);
+      shim.material.dispose();
+      this.domeShimmer.delete(e.id);
+    }
+
+    // 2) Speed/attack buffs (stim / frenzy / burners): a pulsing tint on the
+    //    unit body's emissive + periodic upward speed-line sparks while active.
+    const stimmed = e.stimUntil && tick < e.stimUntil;
+    const frenzied = e.frenzyUntil && tick < e.frenzyUntil;
+    const burning = e.burnUntil && tick < e.burnUntil;
+    const buffed = stimmed || frenzied || burning;
+    if (buffed && !this.flashes.has(e.id)) {
+      // don't fight the damage flash: only tint on frames where no flash runs.
+      const col = frenzied ? 0x8ff23a : burning ? 0xff8a3a : 0xffb733;
+      // lazily remember each material's base emissive so we can restore exactly
+      if (!g.userData.baseEmissive) {
+        g.userData.baseEmissive = (g.userData.mats || []).map((m) =>
+          m.emissive ? { hex: m.emissive.getHex(), i: m.emissiveIntensity } : null);
+      }
+      const glow = 0.35 + 0.35 * Math.abs(Math.sin(t * 9 + e.id));
+      for (const m of g.userData.mats || []) {
+        if (m.emissive) { m.emissive.setHex(col); m.emissiveIntensity = Math.max(m.emissiveIntensity || 0, glow); }
+      }
+      g.userData.buffTinted = true;
+      // periodic speed-line sparks jetting up off the unit
+      const next = this.buffFxTimers.get(e.id) || 0;
+      if (t >= next && g.visible) {
+        this.buffFxTimers.set(e.id, t + 0.18);
+        this.fx.sparks.burst(x, bodyY + 0.3, z, 3, col, 0.9, 0.32, 4.5);
+      }
+    } else if (g.userData.buffTinted && !buffed) {
+      // buff ended: restore each material's captured base emissive exactly
+      const base = g.userData.baseEmissive;
+      const mats = g.userData.mats || [];
+      for (let i = 0; i < mats.length; i++) {
+        const m = mats[i], b = base && base[i];
+        if (m.emissive && b) { m.emissive.setHex(b.hex); m.emissiveIntensity = b.i; }
+      }
+      g.userData.buffTinted = false;
+      g.userData.baseEmissive = null;
+    }
+  }
+
   makeRallyFlag() {
     const g = new THREE.Group();
     const pole = new THREE.Mesh(SHARED.pole, new THREE.MeshBasicMaterial({ color: 0xcccccc }));
@@ -1932,6 +2034,9 @@ export class Renderer {
         // keep the flyer's detached extras in sync with fog visibility
         if (g.userData.blobShadow) g.userData.blobShadow.visible = false;
         if (g.userData.ringDetached) g.userData.ringDetached.visible = false;
+        // keep any shield shimmer hidden while the unit is fogged out
+        const shim = this.domeShimmer.get(e.id);
+        if (shim) shim.visible = false;
         continue;
       }
 
@@ -1978,7 +2083,31 @@ export class Renderer {
       const prev = this.moveAmt.get(e.id) || 0;
       const amt = prev + (moving - prev) * Math.min(1, dt * 10);
       this.moveAmt.set(e.id, amt);
-      if (g.userData.body && moving) {
+
+      // --- Blink / Slipstream body override: snap-face the travel direction and
+      // apply a wind-up-squash -> overshoot-settle scale kick, so the instant
+      // teleport (px==x, no interpolation) still reads as a dash. Takes over the
+      // yaw for its short window, then normal yaw/aim resumes.
+      const blink = this.blinkFx.get(e.id);
+      let blinkActive = false;
+      if (blink && g.userData.body) {
+        const bp = (t - blink.start) / blink.dur;
+        if (bp >= 1) {
+          this.blinkFx.delete(e.id);
+          g.userData.body.scale.set(1, 1, 1);
+        } else {
+          blinkActive = true;
+          g.userData.body.rotation.y = blink.yaw;   // immediate face
+          // scale kick: first 35% squashes forward (stretch z, pinch x/y), then
+          // overshoots past 1 and settles — a classic dash anticipation/recovery.
+          let sz, sxy;
+          if (bp < 0.35) { const k = bp / 0.35; sz = 1 + 0.5 * k; sxy = 1 - 0.22 * k; }
+          else { const k = (bp - 0.35) / 0.65; const os = Math.sin(k * Math.PI) * 0.18; sz = 1.5 - 0.5 * k + os; sxy = 0.78 + 0.22 * k - os * 0.6; }
+          g.userData.body.scale.set(sxy, sxy, sz);
+        }
+      }
+
+      if (!blinkActive && g.userData.body && moving) {
         const targetYaw = Math.atan2(e.x - e.px, e.y - e.py);
         let dy = targetYaw - g.userData.body.rotation.y;
         while (dy > Math.PI) dy -= Math.PI * 2;
@@ -2000,7 +2129,7 @@ export class Renderer {
       // this only needs to drive the whole-body yaw for the rest. Gated on
       // "ranged" (range beyond melee reach) so brutes/workers don't spin to
       // face melee targets they're already walking into.
-      if (g.userData.body && !moving && e.unit) {
+      if (!blinkActive && g.userData.body && !moving && e.unit) {
         const o = e.order;
         const hasTarget = (o?.kind === "attack" || o?.kind === "attackmove") && o.targetId != null;
         const u = UNITS[e.type];
@@ -2073,7 +2202,10 @@ export class Renderer {
         if (sel) g.userData.ring.material.opacity = 0.75 + Math.sin(t * 5) * 0.2;
       }
       if (g.userData.bar) {
-        const show = (sel || e.hp < e.maxHp || (e.maxShield && e.shield < e.maxShield)) && e.maxHp > 0;
+        // Overcharged shields (dome) count too, so the bar stays up to advertise
+        // the buff even at full hp/base shield.
+        const overcharged = e.maxShield && e.shield > e.maxShield;
+        const show = (sel || e.hp < e.maxHp || (e.maxShield && e.shield < e.maxShield) || overcharged) && e.maxHp > 0;
         g.userData.bar.visible = show;
         if (show) {
           const frac = Math.max(0, e.hp / e.maxHp);
@@ -2081,14 +2213,28 @@ export class Renderer {
           g.userData.barFg.position.x = -(1 - frac) / 2;
           g.userData.barFg.material.color.setHSL(frac * 0.33, 0.75, 0.5);
           if (g.userData.shieldFg) {
+            // Clamp width at full, but when OVERCHARGED (shield > maxShield via a
+            // dome) brighten/pulse the strip toward white so the buff is legible
+            // instead of silently clamping. Base shield reads steady cyan.
             const sf = Math.max(0, Math.min(1, e.shield / e.maxShield));
             g.userData.shieldFg.scale.x = sf;
             g.userData.shieldFg.position.x = -(1 - sf) / 2;
             g.userData.shieldFg.visible = sf > 0;
+            const m = g.userData.shieldFg.material;
+            if (overcharged) {
+              const pulse = 0.5 + 0.5 * Math.sin(t * 8 + e.id);
+              m.color.setRGB(0.55 + 0.45 * pulse, 0.9, 1.0);   // cyan -> white flicker
+            } else {
+              m.color.setHex(0x64d8ff);
+            }
           }
           g.userData.bar.quaternion.copy(this.camera.cam.quaternion);
         }
       }
+
+      // ---- per-unit ability DURATION overlays (read sim fields directly) ----
+      // Cheap render-only cues so timed buffs read WHILE active at gameplay zoom.
+      if (e.unit && e.hp > 0) this.updateBuffOverlays(g, e, x, z, t, terrainY);
     }
 
     for (const [id, g] of this.meshes) {
@@ -2096,6 +2242,10 @@ export class Renderer {
         this.scene.remove(g);
         if (g.userData.blobShadow) this.scene.remove(g.userData.blobShadow);
         if (g.userData.ringDetached) this.scene.remove(g.userData.ringDetached);
+        const shim = this.domeShimmer.get(id);
+        if (shim) { this.scene.remove(shim); shim.material.dispose(); this.domeShimmer.delete(id); }
+        this.blinkFx.delete(id);
+        this.buffFxTimers.delete(id);
         this.meshes.delete(id);
         this.moveAmt.delete(id);
       }
@@ -2183,20 +2333,30 @@ export class Renderer {
         }
         case "ability": {
           if (ev.kind === "blink") {
-            // Volt Blink / Zephyr Slipstream: arc between endpoints + poofs.
-            // (The top-level vis gate reads ev.x/ev.y which blink lacks —
-            // check both endpoints' fog explicitly.)
+            // Volt Blink / Zephyr Slipstream: arc between endpoints + poofs +
+            // a dash streak with fading afterimages. (The top-level vis gate
+            // reads ev.x/ev.y which blink lacks — check endpoints' fog.)
             const fog = this.sim.fog[this.localPlayer], w = this.sim.map.w;
             const vFrom = fog[fpToTile(ev.fromY) * w + fpToTile(ev.fromX)] === 2;
             const vTo = fog[fpToTile(ev.toY) * w + fpToTile(ev.toX)] === 2;
             if (!vFrom && !vTo) break;
             const ax = W2(ev.fromX), az = W2(ev.fromY);
             const bx = W2(ev.toX), bz = W2(ev.toY);
-            const lift = UNITS[this.sim.byId.get(ev.id)?.type]?.fly ? 2.2 : 0.55;
+            const fly = UNITS[this.sim.byId.get(ev.id)?.type]?.fly;
+            const lift = fly ? 2.2 : 0.55;
             this.fx.spawnArc(ax, az, bx, bz, 0x9fefff,
               this.heightAt(ax, az) + lift, this.heightAt(bx, bz) + lift);
+            // stretched afterimage streak along the path at body height
+            const streakY = this.heightAt((ax + bx) / 2, (az + bz) / 2) + (fly ? 2.2 : 0.6);
+            this.fx.dashStreak(ax, az, bx, bz, streakY, 0x9fefff);
             this.fx.spawnPoof(ax, az, PLAYER_COLORS[ev.owner]);
             this.fx.spawnPoof(bx, bz, PLAYER_COLORS[ev.owner]);
+            // yaw the model to face the travel direction + a scale kick, sold in
+            // the render loop (departure squash -> arrival overshoot settle).
+            // Timed on the same render clock as render() (t since clockStart).
+            const now = (performance.now() - this.clockStart) / 1000;
+            const yaw = Math.atan2(ev.toX - ev.fromX, ev.toY - ev.fromY);
+            this.blinkFx.set(ev.id, { yaw, start: now, dur: 0.4 });
           } else if (ev.kind === "tempest_hit") {
             // Fulminar storm strike: vertical arc from the sky + ground flash
             if (!vis) break;
@@ -2263,8 +2423,20 @@ export class Renderer {
           } else if (ev.kind === "barrage_hit") {
             if (!vis) break;
             const wx = W2(ev.x), wz = W2(ev.y);
-            this.fx.sparks.burst(wx, this.heightAt(wx, wz) + 0.3, wz, 14, 0xffb347, 4, 0.5, 2);
-            this.fx.shockRing(wx, wz, 0xff8a3a, 1.2, 0.3);
+            // Launch a visible rocket from the caster (the Rumble/Banshee) that
+            // arcs to the impact point; the rocket's own arrival spawns the
+            // explosion (fx.rocket), so we no longer burst here immediately.
+            const caster = this.sim.byId.get(ev.id);
+            const impactY = this.heightAt(wx, wz) + 0.3;
+            if (caster) {
+              const cx = W2(caster.x), cz = W2(caster.y);
+              const launchY = this.heightAt(cx, cz) + (caster.fly ? 2.0 : 0.7);
+              this.fx.rocket(cx, cz, launchY, wx, wz, impactY, 0xffb347);
+            } else {
+              // caster gone (died mid-channel): fall back to a straight burst
+              this.fx.sparks.burst(wx, impactY, wz, 14, 0xffb347, 4, 0.5, 2);
+              this.fx.shockRing(wx, wz, 0xff8a3a, 1.2, 0.3);
+            }
           }
           break;
         }

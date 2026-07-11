@@ -86,10 +86,18 @@ export class Input {
     return { x: (pt.x * FP) | 0, y: (pt.z * FP) | 0, wx: pt.x, wz: pt.z };
   }
 
+  // Pick the entity under the cursor. Exact mesh raycast has PRIORITY (a precise
+  // click on a specific unit in a clump still wins), then a tolerance fallback:
+  // small chibi units, gaps between floating Tempest armor pieces, and thin
+  // parts eat exact hits, so when the raycast misses (or hits nothing pickable)
+  // we accept the nearest entity whose center lies within a forgiving bubble
+  // scaled by its collision radius. Units are preferred over buildings on ties
+  // (units are the hard clicks; buildings are already huge targets).
   entityAt(sx, sy) {
     this.ray.setFromCamera(
       { x: (sx / innerWidth) * 2 - 1, y: -(sy / innerHeight) * 2 + 1 },
       this.renderer.camera.cam);
+    // 1) exact mesh hit — highest priority
     const groups = [...this.renderer.meshes.values()].filter((g) => g.visible);
     const hits = this.ray.intersectObjects(groups, true);
     for (const h of hits) {
@@ -99,7 +107,37 @@ export class Input {
         if (e) return e;
       }
     }
-    return null;
+    // 2) tolerance fallback: nearest entity center to the ray within a bubble.
+    // distanceSqToPoint gives the squared perpendicular distance from the ray to
+    // a world point; compare against a per-entity threshold so tiny units get a
+    // generous pick radius while precise clicks in step 1 already took priority.
+    const ray = this.ray.ray;
+    const tmp = new THREE.Vector3();
+    let best = null, bestScore = Infinity;
+    for (const g of groups) {
+      const id = g.userData.eid;
+      if (id === undefined) continue;
+      const e = this.sim.byId.get(id);
+      if (!e) continue;
+      // pickable = selectable/orderable things: own or enemy units, buildings,
+      // and resources (minerals/geysers) so gather right-clicks keep tolerance.
+      const pickable = e.unit || e.building || e.type === "mineral" || e.type === "geyser";
+      if (!pickable) continue;
+      // entity world center at roughly body height (flyers ride higher)
+      const wx = e.x / FP, wz = e.y / FP;
+      const wy = this.renderer.heightAt(wx, wz) + (e.fly ? 2.2 : (e.building ? 0.5 : 0.4));
+      tmp.set(wx, wy, wz);
+      const dist2 = ray.distanceSqToPoint(tmp);
+      // forgiving bubble: collision radius (world units) * 1.6 + 0.25 constant,
+      // so a ~0.34-tile unit gets ~0.79u of slack. Buildings get their size too.
+      const radius = (e.radius ? e.radius / FP : (e.size ? e.size * 0.5 : 0.4));
+      const tol = radius * 1.6 + 0.25;
+      if (dist2 > tol * tol) continue;
+      // score: closer to the ray wins; break ties toward UNITS over buildings.
+      const score = dist2 + (e.building ? 0.35 : 0);
+      if (score < bestScore) { bestScore = score; best = e; }
+    }
+    return best;
   }
 
   // ---------- events ----------
@@ -266,23 +304,40 @@ export class Input {
       }
     }
 
-    // own DAMAGED Cog unit/finished building: workers repair it (SC1 SCV-style).
-    // Repair stacking is allowed, so ALL selected Bearings pile on.
-    if (target && target.owner === this.pid && target.hp > 0 && target.hp < target.maxHp &&
+    // own Cog unit/finished building + Cog Bearings selected: repair it if it's
+    // damaged (SC1 SCV-style, stacking allowed so ALL Bearings pile on); if it's
+    // at FULL HP, follow-move to it so the right-click never "pushes" the target
+    // (the old fall-through issued a plain move onto the unit). A one-time hint
+    // explains that Bearings only weld damaged units.
+    if (target && target.owner === this.pid && target.hp > 0 &&
         !(target.building && !target.done)) {
       const def = target.unit ? UNITS[target.type] : (target.building ? BUILDINGS[target.type] : null);
       const isCog = def && (!def.faction || def.faction === "cogs");
       if (isCog) {
-        const wids = this.mySelectedWorkers()
-          .filter((w) => { const wd = UNITS[w.type]; return wd && (!wd.faction || wd.faction === "cogs"); })
-          .map((w) => w.id);
+        const cogWorkers = this.mySelectedWorkers()
+          .filter((w) => { const wd = UNITS[w.type]; return wd && (!wd.faction || wd.faction === "cogs"); });
+        const wids = cogWorkers.map((w) => w.id);
         if (wids.length) {
-          this.game.issue({ t: "repair", ids: wids, targetId: target.id, q });
-          this.renderer.orderPing(target.x / FP, target.y / FP, "#ffd24c");
+          const damaged = target.hp < target.maxHp;
+          if (damaged) {
+            this.game.issue({ t: "repair", ids: wids, targetId: target.id, q });
+            this.renderer.orderPing(target.x / FP, target.y / FP, "#ffd24c");
+            this.audio.ackMove(this.voiceKey());
+            // non-worker units in the selection just move to the target
+            const others = ids.filter((id) => !wids.includes(id));
+            if (others.length && g) this.game.issue({ t: "move", ids: others, x: g.x, y: g.y, q });
+            return;
+          }
+          // Full HP: don't push the target — follow-move ALL selected units to
+          // its position (v1 "follow": order a move to where it stands now).
+          // If it takes damage later, right-click again to weld.
+          this.game.issue({ t: "move", ids, x: target.x, y: target.y, q });
+          this.renderer.orderPing(target.x / FP, target.y / FP, "#7cff6b");
           this.audio.ackMove(this.voiceKey());
-          // non-worker units in the selection just move to the target
-          const others = ids.filter((id) => !wids.includes(id));
-          if (others.length && g) this.game.issue({ t: "move", ids: others, x: g.x, y: g.y, q });
+          if (!this._repairHintShown) {
+            this._repairHintShown = true;
+            this.hud.toastInfo("Target at full health - Bearings repair damaged units");
+          }
           return;
         }
       }
