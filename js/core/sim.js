@@ -32,7 +32,9 @@ const isCogDef = (def) => !!def && (!def.faction || def.faction === "cogs");
 export class Sim {
   constructor(seed, opts) {
     this.seed = seed;
-    this.map = generateMap(seed, opts);
+    // Campaign missions may hand the sim a pre-built map (hand-authored
+    // layouts) — it must have the same shape generateMap emits.
+    this.map = (opts && opts.customMap) || generateMap(seed, opts);
     this.tick = 0;
     this.nextId = 1;
     this.entities = [];
@@ -72,11 +74,11 @@ export class Sim {
     this.gooVersion = 0;
 
     for (const m of this.map.minerals) {
-      this.addEntity({ type: "mineral", owner: -1, x: m.x, y: m.y, hp: 0, maxHp: 0, amount: PATCH_AMOUNT, radius: (FP * 0.4) | 0 });
+      this.addEntity({ type: "mineral", owner: -1, x: m.x, y: m.y, hp: 0, maxHp: 0, amount: PATCH_AMOUNT, radius: (FP * 0.4) | 0, minerBy: 0 });
     }
     // Gold patches: contested mid-map minerals — smaller pool, richer trips.
     for (const m of (this.map.golds || [])) {
-      this.addEntity({ type: "mineral", rich: true, owner: -1, x: m.x, y: m.y, hp: 0, maxHp: 0, amount: GOLD_PATCH_AMOUNT, radius: (FP * 0.4) | 0 });
+      this.addEntity({ type: "mineral", rich: true, owner: -1, x: m.x, y: m.y, hp: 0, maxHp: 0, amount: GOLD_PATCH_AMOUNT, radius: (FP * 0.4) | 0, minerBy: 0 });
     }
     // Neutral watchtowers: sole ground presence nearby claims the tower's
     // vision for that player (see updateFog). claimedBy is sim state.
@@ -1662,15 +1664,37 @@ export class Sim {
       // gas node is a building (approach its edge); mineral node is a point
       const gap = gas ? this.gapTo(u, node) : dist(u.x, u.y, node.x, node.y);
       if (gap <= (gas ? (FP * 0.75) | 0 : (FP * 0.8) | 0)) {
+        // Brood-War saturation: only ONE worker actively mines a mineral
+        // patch at a time. A second arrival WAITS at the patch (and looks
+        // for a free patch nearby), so per-base income caps out around 2-2.5
+        // workers per patch — expanding is how you grow past it.
+        if (!gas && !this.claimPatch(node, u)) { o.phase = "wait"; u.path = null; return; }
         o.phase = "mining";
         u.gatherTimer = gas ? GAS_GATHER_TICKS : GATHER_TICKS;
         u.path = null;
       } else {
         this.travelTo(u, node.x, node.y, d.speed, true);
       }
+    } else if (o.phase === "wait") {
+      // queued behind another miner: retry the claim; every second, look for
+      // an unmined patch nearby and hop to it (deterministic pickPatch order)
+      const node = this.byId.get(o.targetId);
+      if (!node || node.amount <= 0) { o.phase = "to"; return; }
+      if (this.claimPatch(node, u)) {
+        o.phase = "mining";
+        u.gatherTimer = GATHER_TICKS;
+        return;
+      }
+      if (this.tick % 10 === 0) {
+        const free = this.pickPatch(u, FP * 6, true);
+        if (free && free.id !== node.id) { o.targetId = free.id; o.phase = "to"; u.path = null; }
+      }
     } else if (o.phase === "mining") {
       const node = this.byId.get(o.targetId);
       if (!node) { o.phase = "to"; return; }
+      // a mineral miner must still hold its claim (it can be stolen only by
+      // desync-proof lazy validation — e.g. this worker was shoved away)
+      if (!gas && node.minerBy !== u.id) { o.phase = "to"; return; }
       if (--u.gatherTimer <= 0) {
         if (gas) {
           // the refinery draws from its geyser; depleted geysers trickle
@@ -1689,6 +1713,7 @@ export class Sim {
           node.amount -= take;
           u.carry = take;
           u.carryKind = 0;         // 0 = minerals
+          node.minerBy = 0;        // hand the patch to the next in line
         }
         o.phase = "return";
         u.path = null;
@@ -1713,6 +1738,21 @@ export class Sim {
     }
   }
 
+  // Try to claim exclusive mining rights on a mineral patch. The claim is
+  // validated lazily (no back-pointer bookkeeping): it counts only if the
+  // claimant is alive AND actively in the mining phase on this patch —
+  // otherwise it's stale and the caller steals it. Deterministic: claims
+  // happen in entity-update (id) order.
+  claimPatch(node, u) {
+    const holder = node.minerBy ? this.byId.get(node.minerBy) : null;
+    const valid = holder && holder.hp > 0 &&
+      holder.order?.kind === "gather" && holder.order.phase === "mining" &&
+      holder.order.targetId === node.id;
+    if (valid && holder.id !== u.id) return false;
+    node.minerBy = u.id;
+    return true;
+  }
+
   // How many workers are already assigned to a patch.
   gatherersOn(patchId) {
     let n = 0;
@@ -1725,10 +1765,17 @@ export class Sim {
   // Pick the best patch near a point: fewest assigned workers first, then
   // nearest, then lowest id — fully deterministic, spreads workers across
   // the mineral line instead of stacking them on the closest patch.
-  pickPatch(at, maxDist) {
+  // freeOnly: consider only patches with no valid active miner (used by
+  // waiting workers hunting an open patch).
+  pickPatch(at, maxDist, freeOnly) {
     let best = null, bestLoad = 0, bestD2 = 0;
     for (const e of this.entities) {
       if (e.type !== "mineral" || e.amount <= 0) continue;
+      if (freeOnly) {
+        const h = e.minerBy ? this.byId.get(e.minerBy) : null;
+        if (h && h.hp > 0 && h.order?.kind === "gather" &&
+            h.order.phase === "mining" && h.order.targetId === e.id) continue;
+      }
       const d2 = dist2(at.x, at.y, e.x, e.y);
       if (d2 > maxDist * maxDist) continue;
       const load = this.gatherersOn(e.id);
@@ -2363,6 +2410,7 @@ export class Sim {
     for (const e of this.entities) {
       h.mix(e.id); h.mix(e.x); h.mix(e.y); h.mix(e.hp | 0);
       if (e.amount !== undefined) h.mix(e.amount | 0);
+      if (e.type === "mineral") h.mix(e.minerBy | 0);
       if (e.watch) h.mix((e.claimedBy | 0) + 2);
       if (e.unit) {
         h.mix(e.abilityCd | 0); h.mix(e.sieged | 0);

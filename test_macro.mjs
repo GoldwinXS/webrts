@@ -569,5 +569,40 @@ check("wall remained solid", intact);
   }
 }
 
+// ---- mining saturation: one active miner per patch ------------------------
+{
+  // try a few seeds — organic maps can be cramped
+  let s1, s2, st, reg = null;
+  for (const seed of [4242, 777, 99, 31337]) {
+    ({ s1, s2, st } = makeTwins(seed));
+    reg = openRegion(s1, 4);
+    if (reg) break;
+  }
+  if (!reg) {
+    check("saturation: open region found", false);
+  } else {
+    const px = tileToFp(reg.x + 3), py = tileToFp(reg.y + 3);
+    const mk = (s) => {
+      const patch = s.addEntity({ type: "mineral", owner: -1, x: px, y: py, hp: 0, maxHp: 0, amount: 1500, radius: (FP * 0.4) | 0, minerBy: 0 });
+      const ws = [];
+      for (let i = 0; i < 3; i++) ws.push(s.spawnUnit(0, "worker", px + (i + 1) * 300, py));
+      return { patch, ws };
+    };
+    const A = mk(s1); mk(s2);
+    st([{ pid: 0, cmds: [{ t: "gather", ids: A.ws.map(w => w.id), targetId: A.patch.id }] }]);
+    let maxMining = 0, sawWait = false;
+    for (let t = 0; t < 200; t++) {
+      st();
+      const mining = A.ws.filter(w => w.order.kind === "gather" && w.order.phase === "mining").length;
+      maxMining = Math.max(maxMining, mining);
+      if (A.ws.some(w => w.order.kind === "gather" && w.order.phase === "wait")) sawWait = true;
+    }
+    check("at most ONE worker mines a patch at a time", maxMining === 1);
+    check("extra workers queue in the wait phase", sawWait);
+    check("patch was actually mined", A.patch.amount < 1500);
+    check("saturation checksum identical", s1.checksum() === s2.checksum());
+  }
+}
+
 console.log(fail ? `\n${fail} FAILURE(S)` : "\nALL MACRO CHECKS PASSED.");
 process.exit(fail ? 1 : 0);
