@@ -34,7 +34,7 @@ const BLDG_DESC = {
   den: "Ooze unit production; morphs Nips two at a time (Broods).",
   goovent: "Ooze gas extraction. Spreads goo in a radius.",
   warren: "Ooze defensive structure; researches Burrow Tech. Fires on ground + air.",
-  roost: "Ooze air production building; researches Membrane.",
+  roost: "Ooze air production building.",
 };
 const ABIL_DESC = {
   stim: "Burst of speed and attack rate for a short time, at the cost of HP.",
@@ -47,16 +47,22 @@ const ABIL_DESC = {
   engulf: "Maw lunges at a target, dealing splash damage on landing.",
 };
 const UPG_DESC = {
+  // Cogs
   stims: "Unlocks the Overclock ability for Zappers.",
-  plating: "Adds HP to all Zappers and Clanks, current and future.",
+  ablative: "Zappers & Clanks shrug off the first hit after 5s out of combat.",
   siegetech: "Unlocks Anchor Mode for Thumpers.",
-  servos: "Thumpers move noticeably faster.",
+  overdrive: "Thumpers surge with speed for 3s after leaving Anchor Mode.",
   afterburners: "Unlocks the Afterburners ability for Darts.",
   // Ooze
-  carapace: "Adds HP to all Ooze ground units, current and future.",
-  adrenal: "Increases attack speed of Nips, Spits, and Maws.",
+  broodburst: "Nips detonate on death, splashing nearby enemies.",
+  overgrowth: "Goo spreads faster; Ooze units attack faster while on goo.",
   burrowtech: "Unlocks Burrow ability for Sluices.",
-  membrane: "Increases speed of Wisps.",
+  // Tempest
+  blinktech: "Unlocks the Blink dash for Volts.",
+  feedback: "A broken shield lashes the attacker with chain lightning.",
+  superconduct: "Chain-lightning weapons arc to one extra target.",
+  phasetech: "Unlocks Phase Shift for Phantoms.",
+  stormtech: "Unlocks the Tempest storm for Fulminars.",
 };
 const CMD_DESC = {
   attack: "Move toward a point, attacking any enemies encountered on the way.",
@@ -457,6 +463,14 @@ export class Hud {
     if (gasEl) gasEl.textContent = this.sim.gas ? this.sim.gas[this.pid] : 0;
     this.$supply.textContent = `${s.used} / ${s.cap}`;
     this.$supply.classList.toggle("warn", s.used >= s.cap);
+
+    // game clock: sim ticks are 100ms, so tick/10 = elapsed seconds. RTS
+    // players time their builds — this is load-bearing UI, not garnish.
+    const timeEl = document.getElementById("res-time");
+    if (timeEl) {
+      const secs = (this.sim.tick / 10) | 0;
+      timeEl.textContent = `${(secs / 60) | 0}:${String(secs % 60).padStart(2, "0")}`;
+    }
 
     // idle-worker button: visible only when someone is slacking
     const idle = this.sim.entities.filter((e) =>

@@ -231,31 +231,25 @@ export class AI {
         }
       }
 
-      // 5e. Ooze upgrades
-      if (barracksDone && refineries.length && !(sim.upgrades[own] & UPGRADE_BITS.carapace) &&
-          !sim.upgradeQueued(own, "carapace")) {
+      // 5e. Ooze upgrades: broodburst -> overgrowth (den), burrowtech (warren).
+      if (barracksDone && refineries.length && !(sim.upgrades[own] & UPGRADE_BITS.broodburst) &&
+          !sim.upgradeQueued(own, "broodburst")) {
         const bk = barracks.find((b) => b.done && b.queue.length < 2);
-        const u = UPGRADES.carapace;
-        if (bk && sim.canAfford(own, u.cost, u.gasCost)) cmds.push({ t: "research", buildingId: bk.id, research: "carapace" });
+        const u = UPGRADES.broodburst;
+        if (bk && sim.canAfford(own, u.cost, u.gasCost)) cmds.push({ t: "research", buildingId: bk.id, research: "broodburst" });
       }
-      if (barracksDone && (sim.upgrades[own] & UPGRADE_BITS.carapace) &&
-          !(sim.upgrades[own] & UPGRADE_BITS.adrenal) &&
-          !sim.upgradeQueued(own, "adrenal")) {
+      if (barracksDone && (sim.upgrades[own] & UPGRADE_BITS.broodburst) &&
+          !(sim.upgrades[own] & UPGRADE_BITS.overgrowth) &&
+          !sim.upgradeQueued(own, "overgrowth")) {
         const bk = barracks.find((b) => b.done && b.queue.length < 2);
-        const u = UPGRADES.adrenal;
-        if (bk && sim.canAfford(own, u.cost, u.gasCost)) cmds.push({ t: "research", buildingId: bk.id, research: "adrenal" });
+        const u = UPGRADES.overgrowth;
+        if (bk && sim.canAfford(own, u.cost, u.gasCost)) cmds.push({ t: "research", buildingId: bk.id, research: "overgrowth" });
       }
       if (factories.some((f) => f.done) && !(sim.upgrades[own] & UPGRADE_BITS.burrowtech) &&
           !sim.upgradeQueued(own, "burrowtech")) {
         const fac = factories.find((f) => f.done && f.queue.length < 2);
         const u = UPGRADES.burrowtech;
         if (fac && sim.canAfford(own, u.cost, u.gasCost)) cmds.push({ t: "research", buildingId: fac.id, research: "burrowtech" });
-      }
-      if (starports.some((sp) => sp.done) && !(sim.upgrades[own] & UPGRADE_BITS.membrane) &&
-          !sim.upgradeQueued(own, "membrane")) {
-        const sp = starports.find((sp) => sp.done && sp.queue.length < 2);
-        const u = UPGRADES.membrane;
-        if (sp && sim.canAfford(own, u.cost, u.gasCost)) cmds.push({ t: "research", buildingId: sp.id, research: "membrane" });
       }
 
       // 5f. Ooze ability micro: Engulf (maw) — jump onto enemy building
@@ -403,12 +397,12 @@ export class AI {
         }
       }
 
-      // 5d. research: capacitors -> blinktech -> stormtech
-      if (barracksDone && refineries.length && !(sim.upgrades[own] & UPGRADE_BITS.capacitors) &&
-          !sim.upgradeQueued(own, "capacitors")) {
+      // 5d. research: feedback -> blinktech -> stormtech
+      if (barracksDone && refineries.length && !(sim.upgrades[own] & UPGRADE_BITS.feedback) &&
+          !sim.upgradeQueued(own, "feedback")) {
         const bk = barracks.find((b) => b.done && b.queue.length < 2);
-        const u = UPGRADES.capacitors;
-        if (bk && sim.canAfford(own, u.cost, u.gasCost)) cmds.push({ t: "research", buildingId: bk.id, research: "capacitors" });
+        const u = UPGRADES.feedback;
+        if (bk && sim.canAfford(own, u.cost, u.gasCost)) cmds.push({ t: "research", buildingId: bk.id, research: "feedback" });
       }
       if (vaults.length && !(sim.upgrades[own] & UPGRADE_BITS.blinktech) &&
           !sim.upgradeQueued(own, "blinktech")) {
@@ -559,18 +553,33 @@ export class AI {
         }
       }
 
-      // 5d. research: stims, siegetech, afterburners
+      // 5d. research: stims -> ablative (barracks), siegetech -> overdrive
+      // (factory), afterburners (starport).
       if (barracksDone && doneRefineries.length && !(sim.upgrades[own] & UPGRADE_BITS.stims) &&
           !sim.upgradeQueued(own, "stims")) {
         const bk = barracks.find((b) => b.done && b.queue.length < 2);
         const u = UPGRADES.stims;
         if (bk && sim.canAfford(own, u.cost, u.gasCost)) cmds.push({ t: "research", buildingId: bk.id, research: "stims" });
       }
+      if (barracksDone && (sim.upgrades[own] & UPGRADE_BITS.stims) &&
+          !(sim.upgrades[own] & UPGRADE_BITS.ablative) &&
+          !sim.upgradeQueued(own, "ablative")) {
+        const bk = barracks.find((b) => b.done && b.queue.length < 2);
+        const u = UPGRADES.ablative;
+        if (bk && sim.canAfford(own, u.cost, u.gasCost)) cmds.push({ t: "research", buildingId: bk.id, research: "ablative" });
+      }
       if (factories.some((f) => f.done) && !(sim.upgrades[own] & UPGRADE_BITS.siegetech) &&
           !sim.upgradeQueued(own, "siegetech")) {
         const fac = factories.find((f) => f.done && f.queue.length < 2);
         const u = UPGRADES.siegetech;
         if (fac && sim.canAfford(own, u.cost, u.gasCost)) cmds.push({ t: "research", buildingId: fac.id, research: "siegetech" });
+      }
+      if (factories.some((f) => f.done) && (sim.upgrades[own] & UPGRADE_BITS.siegetech) &&
+          !(sim.upgrades[own] & UPGRADE_BITS.overdrive) &&
+          !sim.upgradeQueued(own, "overdrive")) {
+        const fac = factories.find((f) => f.done && f.queue.length < 2);
+        const u = UPGRADES.overdrive;
+        if (fac && sim.canAfford(own, u.cost, u.gasCost)) cmds.push({ t: "research", buildingId: fac.id, research: "overdrive" });
       }
       if (starports.some((sp) => sp.done) && !(sim.upgrades[own] & UPGRADE_BITS.afterburners) &&
           !sim.upgradeQueued(own, "afterburners")) {

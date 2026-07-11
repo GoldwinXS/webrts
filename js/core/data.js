@@ -101,30 +101,45 @@ export const BUILDINGS = {
 
 // ---------- upgrades (researched at buildings, global per player) ----------
 // sim.upgrades[pid] is a bitmask of these bits. Each upgrade is researched once.
+// Bit values are sim-internal (replays already invalidated by this pass). Kept
+// keys keep their old bits; behavior upgrades that replaced flat-stat lines
+// reuse the dead key's bit (ablative<-plating, overdrive<-servos,
+// broodburst<-carapace, overgrowth<-adrenal). membrane (256) was CUT.
 export const UPGRADE_BITS = {
-  stims: 1, plating: 2, siegetech: 4, servos: 8, afterburners: 16,
-  carapace: 32, adrenal: 64, burrowtech: 128, membrane: 256,
+  stims: 1, ablative: 2, siegetech: 4, overdrive: 8, afterburners: 16,
+  broodburst: 32, overgrowth: 64, burrowtech: 128,
 };
 
 // Research definitions. `building` is the structure whose production queue the
-// research shares; cost is deducted at queue time like a unit.
+// research shares; cost is deducted at queue time like a unit. Every entry is
+// either an ability UNLOCK or a BEHAVIOR-CHANGER — no flat stat lines.
 export const UPGRADES = {
-  stims:       { name: "Overclock",     building: "barracks", cost: 100, gasCost: 50,  time: 300, bit: 1 },
-  plating:     { name: "Tin Plating",   building: "barracks", cost: 125, gasCost: 75,  time: 350, bit: 2 },
-  siegetech:   { name: "Anchor Tech",   building: "factory",  cost: 150, gasCost: 100, time: 400, bit: 4 },
-  servos:      { name: "Servo Motors",  building: "factory",  cost: 100, gasCost: 100, time: 300, bit: 8 },
-  afterburners:{ name: "Afterburners",  building: "starport", cost: 100, gasCost: 100, time: 300, bit: 16 },
+  stims:       { name: "Overclock",        building: "barracks", cost: 100, gasCost: 50,  time: 300, bit: 1 },
+  ablative:    { name: "Ablative Shells",  building: "barracks", cost: 125, gasCost: 75,  time: 350, bit: 2 },
+  siegetech:   { name: "Anchor Tech",      building: "factory",  cost: 150, gasCost: 100, time: 400, bit: 4 },
+  overdrive:   { name: "Overdrive Governors", building: "factory", cost: 100, gasCost: 100, time: 300, bit: 8 },
+  afterburners:{ name: "Afterburners",     building: "starport", cost: 100, gasCost: 100, time: 300, bit: 16 },
   // Ooze upgrades
-  carapace:    { name: "Carapace",      building: "den",      cost: 150, gasCost: 100, time: 350, bit: 32 },
-  adrenal:     { name: "Adrenal",       building: "den",      cost: 100, gasCost: 100, time: 300, bit: 64 },
-  burrowtech:  { name: "Burrow Tech",   building: "warren",   cost: 100, gasCost: 100, time: 300, bit: 128 },
-  membrane:    { name: "Membrane",      building: "roost",    cost: 100, gasCost: 100, time: 300, bit: 256 },
+  broodburst:  { name: "Broodburst",       building: "den",      cost: 150, gasCost: 100, time: 350, bit: 32 },
+  overgrowth:  { name: "Overgrowth",       building: "den",      cost: 100, gasCost: 100, time: 300, bit: 64 },
+  burrowtech:  { name: "Burrow Tech",      building: "warren",   cost: 100, gasCost: 100, time: 300, bit: 128 },
 };
 
-// Retroactive plating buff applied to living + future marines/brutes.
-export const PLATING_HP = 12;
-// Tank speed multiplier from servos (numerator/denominator, integer math).
-export const SERVOS_SPEED_NUM = 13, SERVOS_SPEED_DEN = 10;
+// --- Ablative Shells (Cogs): Zappers/Clanks nullify the next hit once they've
+// been out of combat ABLATE_ARM ticks. Armed state is derived from lastDmg at
+// hit time, so no per-unit flag is needed (see applyDamage).
+export const ABLATE_ARM = 50;            // 5s out of combat to re-arm the plate
+// --- Overdrive Governors (Cogs): Thumpers get a speed burst for OVERDRIVE_DUR
+// ticks after UNsieging (hit-and-run repositioning).
+export const OVERDRIVE_DUR = 30;         // 3s window
+export const OVERDRIVE_NUM = 14, OVERDRIVE_DEN = 10;  // +40% speed while active
+// --- Broodburst (Ooze): a Nip detonates on death, splashing enemies.
+export const BROODBURST_DMG = 12;
+export const BROODBURST_RADIUS = (FP * 1.2) | 0;
+// --- Overgrowth (Ooze): goo spreads faster; Ooze ground units gain attack
+// speed ONLY while standing on their own creep. Aggression follows terrain.
+export const OVERGROWTH_GROW_NUM = 2, OVERGROWTH_GROW_DEN = 3; // grow interval x2/3 (~+50% faster)
+export const OVERGROWTH_CD_NUM = 5, OVERGROWTH_CD_DEN = 6;     // -17% cooldown on goo
 
 // ---------- abilities (per-unit, command-driven) ----------
 // Multipliers are numerator/denominator pairs so speed/cooldown math stays
@@ -193,10 +208,6 @@ export const REGEN_RATE_OFF = 0.5;         // HP per 2 ticks off Goo (integer: 1
 
 // ===========================================================================
 // THE OOZE (Phase 3) — see docs/DESIGN.md S8. Same flat registries, unique type
-// Carapace HP bonus per unit type (Ooze faction). Applied retroactively and
-// on spawn, same as Cog's Tin Plating.
-export const CARAPACE_HP = { nip: 12, spit: 12, sluice: 12, maw: 16 };
-// all implemented in sim.js. Type
 // keys never collide with Cog keys, so the sim's spawn/combat/tech code is
 // unchanged — it still looks up UNITS[type] / BUILDINGS[type].
 // ===========================================================================
@@ -280,7 +291,11 @@ Object.assign(BUILDINGS, {
 export const SHIELD_DELAY = 40;        // ticks without damage before recharge
 export const SHIELD_REGEN = 1;         // shield per tick (x2 in own power)
 export const POWER_RADIUS = 6;         // tiles from a powers building
-export const CAPACITOR_SHIELD = 15;    // capacitors upgrade: +15 max shield
+// Feedback Loop (Tempest): when a shielded unit's shield BREAKS (drops to 0
+// from a hit), it lashes the attacker with a chain-lightning zap. Shields stop
+// being a passive buffer and become a retaliation trigger.
+export const FEEDBACK_DMG = 10;
+export const FEEDBACK_CHAIN = { jumps: 1, num: 1, den: 2, radius: (FP * 2) | 0 };
 
 Object.assign(UNITS, {
   ion: {
@@ -376,11 +391,11 @@ Object.assign(BUILDINGS, {
   },
 });
 Object.assign(UPGRADE_BITS, {
-  blinktech: 512, capacitors: 1024, superconduct: 2048, phasetech: 4096, stormtech: 8192,
+  blinktech: 512, feedback: 1024, superconduct: 2048, phasetech: 4096, stormtech: 8192,
 });
 Object.assign(UPGRADES, {
   blinktech:   { name: "Blink Matrix",  faction: "storm", building: "vault", cost: 100, gasCost: 100, time: 300, bit: 512 },
-  capacitors:  { name: "Capacitors",    faction: "storm", building: "forge", cost: 125, gasCost: 75,  time: 350, bit: 1024 },
+  feedback:    { name: "Feedback Loop", faction: "storm", building: "forge", cost: 125, gasCost: 75,  time: 350, bit: 1024 },
   superconduct:{ name: "Superconduct",  faction: "storm", building: "vault", cost: 150, gasCost: 100, time: 350, bit: 2048 },
   phasetech:   { name: "Phase Tech",    faction: "storm", building: "vault", cost: 100, gasCost: 100, time: 300, bit: 4096 },
   stormtech:   { name: "Storm Tech",    faction: "storm", building: "spire", cost: 150, gasCost: 150, time: 400, bit: 8192 },

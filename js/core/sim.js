@@ -5,11 +5,14 @@
 import { FP, HALF, tileToFp, fpToTile, isqrt, dist, dist2, makeHash } from "./fixed.js";
 import { UNITS, BUILDINGS, FACTIONS, START_MINERALS, START_GAS, CARRY_AMOUNT, GATHER_TICKS, PATCH_AMOUNT, MAX_QUEUE,
   GOLD_PATCH_AMOUNT, GOLD_CARRY_BONUS,
-  SHIELD_DELAY, SHIELD_REGEN, POWER_RADIUS, CAPACITOR_SHIELD,
+  SHIELD_DELAY, SHIELD_REGEN, POWER_RADIUS,
   GAS_CARRY, GAS_GATHER_TICKS, GAS_AMOUNT, GAS_DEPLETED, HQ_RESOURCE_CLEARANCE,
-  UPGRADES, UPGRADE_BITS, ABILITIES, PLATING_HP, SERVOS_SPEED_NUM, SERVOS_SPEED_DEN,
+  UPGRADES, UPGRADE_BITS, ABILITIES,
+  ABLATE_ARM, OVERDRIVE_DUR, OVERDRIVE_NUM, OVERDRIVE_DEN,
+  BROODBURST_DMG, BROODBURST_RADIUS, OVERGROWTH_GROW_NUM, OVERGROWTH_GROW_DEN,
+  OVERGROWTH_CD_NUM, OVERGROWTH_CD_DEN, FEEDBACK_DMG, FEEDBACK_CHAIN,
   GOO_GROW_INTERVAL, GOO_RECEDE_INTERVAL, GOO_NOISE, GOO_MAX_RADIUS, GOO_SPEED_NUM, GOO_SPEED_DEN,
-  REGEN_DELAY, REGEN_RATE, REGEN_RATE_OFF, CARAPACE_HP } from "./data.js";
+  REGEN_DELAY, REGEN_RATE, REGEN_RATE_OFF } from "./data.js";
 import { generateMap } from "./map.js";
 import { findPath, nearestFree } from "./path.js";
 
@@ -141,6 +144,7 @@ export class Sim {
       abilityCd: 0,        // ticks until this unit's ability is ready again
       stimUntil: 0,        // marine: stim buff active while tick < stimUntil
       burnUntil: 0,        // wraith: afterburner buff active while tick < burnUntil
+      overdriveUntil: 0,   // tank: Overdrive Governors speed burst after unsieging
       sieged: 0,           // tank: 1 while in siege mode
       burrowed: 0,         // sluice: 1 while burrowed (mortar mode)
       transformUntil: 0,   // tank: transforming (immobile) while tick < transformUntil
@@ -163,29 +167,12 @@ export class Sim {
       lockId: 0, lockN: 0,         // dart: consecutive-hit target lock ramp
       repairAcc: 0,                // cog Bearing: fractional-mineral repair accumulator
     });
-    // FUTURE-unit plating: marines/brutes built after plating completes get +12 maxHp.
-    if ((type === "marine" || type === "brute") && (this.upgrades[pid] & UPGRADE_BITS.plating)) {
-      e.maxHp += PLATING_HP;
-      e.hp += PLATING_HP;
-    }
-    // Ooze Carapace: units built after carapace completes get bonus HP
-    const carapaceHp = CARAPACE_HP[type];
-    if (carapaceHp && (this.upgrades[pid] & UPGRADE_BITS.carapace)) {
-      e.maxHp += carapaceHp;
-      e.hp += carapaceHp;
-    }
-    // Tempest Capacitors: shielded units built after research get +15 shield
-    if (e.maxShield && (this.upgrades[pid] & UPGRADE_BITS.capacitors)) {
-      e.maxShield += CAPACITOR_SHIELD;
-      e.shield += CAPACITOR_SHIELD;
-    }
     return e;
   }
 
   spawnBuilding(pid, type, tx, ty, done) {
     const d = BUILDINGS[type];
-    let sh = d.shield || 0;
-    if (sh && (this.upgrades[pid] & UPGRADE_BITS.capacitors)) sh += CAPACITOR_SHIELD;
+    const sh = d.shield || 0;
     const b = this.addEntity({
       type, owner: pid, tx, ty, size: d.size,
       x: tx * FP + (d.size * FP >> 1), y: ty * FP + (d.size * FP >> 1),
@@ -213,6 +200,11 @@ export class Sim {
     for (const e of this.entities) {
       if (e.owner >= 0 && e.hp <= 0) {
         changed = true;
+        // Broodburst (Ooze): a dying Nip detonates, splashing nearby enemy
+        // ground units. Turns every Nip trade into a small area threat.
+        if (e.type === "nip" && (this.upgrades[e.owner] & UPGRADE_BITS.broodburst)) {
+          this.broodburst(e);
+        }
         this.events.push({ t: "death", x: e.x, y: e.y, type: e.type, owner: e.owner, building: !!e.building, size: e.size || 0 });
         if (e.building) this.setFootprint(e, 0);
         this.byId.delete(e.id);
@@ -520,7 +512,12 @@ export class Sim {
         this.stampGoo(e, 0);
       }
     }
-    const growing = this.tick % GOO_GROW_INTERVAL === 0;
+    // Overgrowth shortens the grow interval (~+50% faster spread) for any
+    // Ooze player who owns the upgrade and has a live source feeding the grid.
+    const growInterval = this.overgrowthActive()
+      ? Math.max(1, (GOO_GROW_INTERVAL * OVERGROWTH_GROW_NUM / OVERGROWTH_GROW_DEN) | 0)
+      : GOO_GROW_INTERVAL;
+    const growing = this.tick % growInterval === 0;
     const receding = this.tick % GOO_RECEDE_INTERVAL === 0;
     if (!growing && !receding) return;
     this.computeGooSupport();
@@ -587,6 +584,16 @@ export class Sim {
     for (const src of this._gooSources) {
       const e = this.byId.get(src.id);
       if (e && e.owner === pid) return true;
+    }
+    return false;
+  }
+
+  // Is any player with a live goo source running Overgrowth? Gates the faster
+  // goo-spread interval. Scans sources in id order — deterministic.
+  overgrowthActive() {
+    for (const src of this._gooSources) {
+      const e = this.byId.get(src.id);
+      if (e && (this.upgrades[e.owner] & UPGRADE_BITS.overgrowth)) return true;
     }
     return false;
   }
@@ -896,34 +903,9 @@ export class Sim {
     const up = UPGRADES[upg];
     if (!up) return;
     this.upgrades[pid] |= up.bit;
-    // plating: +12 max & current hp to all LIVING marines/brutes of this player
-    // (future units get it at spawn — see spawnUnit).
-    if (upg === "plating") {
-      for (const e of this.entities) {
-        if (e.owner === pid && (e.type === "marine" || e.type === "brute")) {
-          e.maxHp += PLATING_HP;
-          e.hp += PLATING_HP;
-        }
-      }
-    }
-    // Carapace: retroactive HP bonus to existing Ooze ground units
-    if (upg === "carapace") {
-      for (const e of this.entities) {
-        if (e.owner === pid && e.unit) {
-          const bonus = CARAPACE_HP[e.type];
-          if (bonus) { e.maxHp += bonus; e.hp += bonus; }
-        }
-      }
-    }
-    // Capacitors: retroactive +15 max shield to every shielded thing owned
-    if (upg === "capacitors") {
-      for (const e of this.entities) {
-        if (e.owner === pid && e.maxShield) {
-          e.maxShield += CAPACITOR_SHIELD;
-          e.shield += CAPACITOR_SHIELD;
-        }
-      }
-    }
+    // No retroactive stat math: every upgrade is now either an ability unlock
+    // or a behavior-changer that reads the player's bit live in combat/speed
+    // code, so living units gain the new behavior automatically.
     this.events.push({ t: "research", owner: pid, upg });
   }
 
@@ -1146,6 +1128,12 @@ export class Sim {
       this.events.push({ t: "ability", kind: "siege_up", id: u.id, owner: u.owner, x: u.x, y: u.y });
     } else {
       u.sieged = 0;
+      // Overdrive Governors: unsieging kicks off a repositioning speed burst.
+      // Timed from the moment the transform-down FINISHES so the burst covers
+      // the getaway, not the immobile windup.
+      if (this.upgrades[u.owner] & UPGRADE_BITS.overdrive) {
+        u.overdriveUntil = this.tick + a.transform + OVERDRIVE_DUR;
+      }
       this.events.push({ t: "ability", kind: "siege_down", id: u.id, owner: u.owner, x: u.x, y: u.y });
     }
   }
@@ -1834,8 +1822,9 @@ export class Sim {
 
   // ---------- ability-aware stat reads ----------
   // Effective movement speed: stim (marine x1.4), afterburners (wraith x1.8),
-  // servos (tank x1.3). Integer math, applied at read time so `data` is never
-  // mutated. Sieged/transforming tanks and leaping/channeling units are
+  // Overdrive Governors (tank x1.4 burst after unsieging). Integer math, applied
+  // at read time so `data` is never mutated. Sieged/transforming tanks and
+  // leaping/channeling units are
   // immobile — callers gate movement separately, this just scales the number.
   unitSpeed(u) {
     const d = UNITS[u.type];
@@ -1846,16 +1835,14 @@ export class Sim {
     if (u.type === "wraith" && this.tick < u.burnUntil) {
       const a = ABILITIES.burners; s = (s * a.spdNum / a.spdDen) | 0;
     }
-    if (u.type === "tank" && (this.upgrades[u.owner] & UPGRADE_BITS.servos)) {
-      s = (s * SERVOS_SPEED_NUM / SERVOS_SPEED_DEN) | 0;
+    // Overdrive Governors: a Thumper repositioning after it UNsieges gets a
+    // speed burst for a few seconds (hit-and-run rhythm, not a flat buff).
+    if (u.type === "tank" && this.tick < u.overdriveUntil) {
+      s = (s * OVERDRIVE_NUM / OVERDRIVE_DEN) | 0;
     }
     // Ooze ground units on Goo: +20% speed
     if (d.faction === "ooze" && !u.fly && this.fpOnGoo(u.x, u.y)) {
       s = (s * GOO_SPEED_NUM / GOO_SPEED_DEN) | 0;
-    }
-    // Membrane: +20% speed for Wisps
-    if (u.type === "wisp" && (this.upgrades[u.owner] & UPGRADE_BITS.membrane)) {
-      s = (s * 6 / 5) | 0;
     }
     // Phase-shifted phantoms slip through the world faster
     if (u.type === "phantom" && u.phased) {
@@ -1884,10 +1871,12 @@ export class Sim {
     if (u.type === "nip" && this.tick < u.frenzyUntil) {
       const a = ABILITIES.frenzy; c = (c * a.cdNum / a.cdDen) | 0;
     }
-    // Ooze Adrenal: +20% attack speed for Nip, Spit, Maw
-    if ((u.type === "nip" || u.type === "spit" || u.type === "maw") &&
-        (this.upgrades[u.owner] & UPGRADE_BITS.adrenal)) {
-      c = (c * 5 / 6) | 0; // -17% = x5/6 = faster
+    // Overgrowth: Ooze ground units attack faster ONLY while standing on their
+    // own creep — aggression is tied to terrain control, not a global buff.
+    const od = UNITS[u.type];
+    if (od.faction === "ooze" && !u.fly &&
+        (this.upgrades[u.owner] & UPGRADE_BITS.overgrowth) && this.fpOnGoo(u.x, u.y)) {
+      c = (c * OVERGROWTH_CD_NUM / OVERGROWTH_CD_DEN) | 0;
     }
     return c;
   }
@@ -1935,14 +1924,62 @@ export class Sim {
   // lastDmg stamps for units AND shielded buildings so both regen delays
   // reset on any hit.
   applyDamage(target, dmg) {
+    // Ablative Shells (Cogs): a Zapper/Clank that has been out of combat for
+    // ABLATE_ARM ticks nullifies the FIRST hit it then takes (the plate pops).
+    // Armed state is derived from lastDmg, so no extra per-unit field. The hit
+    // still stamps lastDmg below, disarming the plate until it re-idles.
+    if (target.unit && (target.type === "marine" || target.type === "brute") &&
+        (this.upgrades[target.owner] & UPGRADE_BITS.ablative) &&
+        (target.lastDmg === 0 || this.tick - target.lastDmg >= ABLATE_ARM)) {
+      target.lastDmg = this.tick;
+      this.events.push({ t: "ability", kind: "ablate", id: target.id, owner: target.owner, x: target.x, y: target.y });
+      return; // hit absorbed entirely
+    }
     if (target.maxShield) {
+      const hadShield = target.shield > 0;
       const absorbed = Math.min(target.shield | 0, dmg);
       target.shield -= absorbed;
       dmg -= absorbed;
       target.lastDmg = this.tick;
+      // Feedback Loop (Tempest): the instant this hit BREAKS the shield (it had
+      // shield, now it's gone), lash the attacker's neighborhood with a zap.
+      if (hadShield && target.shield <= 0 &&
+          (this.upgrades[target.owner] & UPGRADE_BITS.feedback)) {
+        this.emitFeedback(target);
+      }
     }
     target.hp -= dmg;
     if (target.unit) target.lastDmg = this.tick;
+  }
+
+  // Feedback Loop discharge: chain-zap from the unit whose shield just broke to
+  // the nearest enemies around it. Reuses the chain-lightning helper so the fx
+  // layer renders it like an Arc bolt. Deterministic (id-order in chainFrom).
+  emitFeedback(src) {
+    // Find the nearest enemy to arc toward (the "attacker" proxy — we don't
+    // thread the attacker id through applyDamage to keep the funnel simple).
+    let best = null, bestD = (FEEDBACK_CHAIN.radius * 2) * (FEEDBACK_CHAIN.radius * 2);
+    for (const e of this.entities) {
+      if (!e.unit || e.owner < 0 || e.owner === src.owner || e.hp <= 0 || e.phased) continue;
+      const d2 = dist2(src.x, src.y, e.x, e.y);
+      if (d2 < bestD || (d2 === bestD && best && e.id < best.id)) { bestD = d2; best = e; }
+    }
+    if (!best) return;
+    this.applyDamage(best, FEEDBACK_DMG);
+    this.events.push({ t: "chain", fx: src.x, fy: src.y, tx: best.x, ty: best.y, owner: src.owner, targetId: best.id, feedback: 1 });
+    // Jump onward from the struck enemy like a real chain bolt.
+    this.chainFrom(src.owner, best, FEEDBACK_DMG, FEEDBACK_CHAIN, 0);
+  }
+
+  // Broodburst detonation: splash BROODBURST_DMG to all enemy ground units
+  // within BROODBURST_RADIUS of the dead Nip. Id-order scan — deterministic.
+  broodburst(nip) {
+    const r2 = BROODBURST_RADIUS * BROODBURST_RADIUS;
+    for (const e of this.entities) {
+      if (!e.unit || e.fly || e.owner < 0 || e.owner === nip.owner || e.hp <= 0 || e.phased) continue;
+      if (dist2(nip.x, nip.y, e.x, e.y) <= r2) this.applyDamage(e, BROODBURST_DMG);
+    }
+    this.events.push({ t: "ability", kind: "broodburst", id: nip.id, owner: nip.owner, x: nip.x, y: nip.y });
   }
 
   // sieged tank) splash to nearby enemy ground units. `d` is UNITS[u.type].
@@ -2418,6 +2455,7 @@ export class Sim {
         h.mix(e.cooldown | 0); h.mix(e.carry | 0); h.mix(e.carryKind | 0);
         h.mix(e.gatherTimer | 0);
         h.mix(e.stimUntil | 0); h.mix(e.burnUntil | 0);
+        h.mix(e.overdriveUntil | 0);
         h.mix(e.transformUntil | 0); h.mix(e.leapUntil | 0);
         h.mix(e.channelUntil | 0); h.mix(e.noProg | 0);
         h.mix(e.lastDmg | 0);
